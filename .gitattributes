@@ -1,0 +1,47 @@
+# Normalize line endings to LF in the repository.
+* text=auto eol=lf
+
+# Force CRLF for Windows-only scripts that hardcode line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Mark binary blobs explicitly so Git does not try to diff or fix CRLF.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.ogg binary
+*.mp3 binary
+*.mp4 binary
+*.webm binary
+*.zip binary
+*.7z binary
+*.tar binary
+*.gz binary
+
+# Better diffs for the languages we actually use.
+*.rs   diff=rust
+*.tsx  diff=tsx
+*.ts   diff=typescript
+*.tsx  linguist-language=TypeScript
+
+# Avoid double-counting vendored / generated content in language statistics.
+app/src-tauri/gen/** linguist-generated
+app/src-tauri/target/** linguist-generated
+app/dist/**                linguist-generated
+app/output/**              linguist-generated
+docs/**/*.md linguist-documentation
+CHANGELOG.md linguist-documentation
+
+# Export hooks so `git archive` produces a usable source tree.
+app/.gitignore       export-subst
+app/src-tauri/Cargo.lock export-subst

@@ -1,0 +1,65 @@
+# Top-level ignore rules for Agent_LLM.
+# Per-app ignores live under app/.gitignore and app/src-tauri/.gitignore.
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+$RECYCLE.BIN/
+
+# Editor / IDE (project root level)
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Backups / scratch
+*.bak
+*.tmp
+*.orig
+*.rej
+*.swp
+*.swo
+
+# Logs that occasionally land outside app/
+*.log
+logs/
+
+# Documentation build artifacts
+docs/_build/
+docs/.cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Build deliverables / release artifacts (use GitHub Releases instead)
+deliverables/
+dist/
+build/
+
+# llama.cpp prebuilt runtime (download from upstream release)
+app/resources/*.dll
+app/resources/*.exe
+app/resources/*.lib
+app/resources/*.pdb
+
+# Fallback ignores for app build outputs (also covered by app/.gitignore)
+**/node_modules/
+**/target/
+**/dist/
+
+# Local AI / editor caches
+.claude/
+.trae/
+.opencode/
+__pycache__/

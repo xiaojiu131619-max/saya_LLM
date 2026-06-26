@@ -1,0 +1,609 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --glass-bg: rgba(255, 255, 255, 0.45);
+    --glass-border: rgba(0, 0, 0, 0.08);
+    --text-primary: #1A1A1A;
+    --text-secondary: rgba(0, 0, 0, 0.45);
+  }
+
+  .dark {
+    --glass-bg: rgba(255, 255, 255, 0.06);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --text-primary: #FFFFFF;
+    --text-secondary: rgba(255, 255, 255, 0.55);
+  }
+
+  * {
+    border-color: var(--glass-border);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--glass-bg);
+    color: var(--text-primary);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html,
+  body {
+    transition: background-color 260ms ease, color 260ms ease;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html,
+    body,
+    .glass-panel,
+    .glass-panel-strong {
+      transition: none !important;
+    }
+  }
+
+  /* Hide scrollbars globally */
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  *::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    transition: background-color 260ms ease, border-color 260ms ease, box-shadow 260ms ease;
+  }
+
+  .glass-panel-strong {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    transition: background-color 260ms ease, border-color 260ms ease, box-shadow 260ms ease;
+  }
+
+  .text-primary-custom {
+    color: var(--text-primary);
+  }
+
+  .text-secondary-custom {
+    color: var(--text-secondary);
+  }
+
+  .paper-surface {
+    --glass-bg: rgba(255, 255, 255, 0.58);
+    --glass-border: rgba(64, 60, 50, 0.1);
+    --text-primary: #403C32;
+    --text-secondary: #8C8576;
+    color: #403C32;
+  }
+
+  .dark .paper-surface {
+    --glass-bg: rgba(23, 21, 18, 0.86);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --text-primary: #F3EBDD;
+    --text-secondary: #A9A095;
+    color: #F3EBDD;
+  }
+
+  .model-dotted-surface {
+    --dot-shift-x: 0px;
+    --dot-shift-y: 0px;
+    --dot-pull-x: 0px;
+    --dot-pull-y: 0px;
+    --dot-focus-x: 50%;
+    --dot-focus-y: 50%;
+    position: relative;
+    background-color: #FBFAF6;
+    background-image: radial-gradient(circle, rgba(64, 60, 50, 0.18) 1px, transparent 1.35px);
+    background-position: var(--dot-shift-x) var(--dot-shift-y);
+    background-size: 22px 22px;
+    transition: background-position 90ms ease-out;
+  }
+
+  .model-dotted-surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image: radial-gradient(circle, rgba(208, 102, 70, 0.36) 1px, transparent 1.45px);
+    background-position: var(--dot-pull-x) var(--dot-pull-y);
+    background-size: 22px 22px;
+    mask-image: radial-gradient(circle at var(--dot-focus-x) var(--dot-focus-y), #000 0 140px, transparent 260px);
+    -webkit-mask-image: radial-gradient(circle at var(--dot-focus-x) var(--dot-focus-y), #000 0 140px, transparent 260px);
+    opacity: 0.72;
+    transition: background-position 90ms ease-out, mask-position 90ms ease-out;
+  }
+
+  .model-dotted-surface > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .model-glass-card {
+    border: 1px solid rgba(255, 255, 255, 0.58);
+    background: rgba(255, 255, 255, 0.66);
+    box-shadow: 0 10px 24px rgba(61, 53, 42, 0.08), 0 1px 0 rgba(255, 255, 255, 0.76) inset;
+    backdrop-filter: blur(18px) saturate(1.14);
+    -webkit-backdrop-filter: blur(18px) saturate(1.14);
+    transition: border-color 170ms ease, box-shadow 170ms ease, background-color 170ms ease;
+  }
+
+  .model-glass-card:hover,
+  .model-glass-card--active {
+    border-color: rgba(208, 102, 70, 0.42);
+    background: rgba(255, 255, 255, 0.76);
+    box-shadow:
+      0 0 0 1px rgba(208, 102, 70, 0.16),
+      0 0 18px rgba(208, 102, 70, 0.18),
+      0 16px 34px rgba(61, 53, 42, 0.13),
+      0 1px 0 rgba(255, 255, 255, 0.82) inset;
+  }
+
+  /* 加载中：用呼吸描边强调当前正在加载的模型卡片，覆盖 hover/active 颜色 */
+  .model-glass-card--loading,
+  .model-glass-card--loading:hover {
+    border-color: rgba(251, 191, 36, 0.78);
+    background: rgba(255, 252, 240, 0.88);
+    animation: model-glass-card-loading 1.4s ease-in-out infinite;
+  }
+
+  @keyframes model-glass-card-loading {
+    0%, 100% {
+      box-shadow:
+        0 0 0 1px rgba(251, 191, 36, 0.35),
+        0 0 14px rgba(251, 191, 36, 0.28),
+        0 12px 28px rgba(61, 53, 42, 0.12),
+        0 1px 0 rgba(255, 255, 255, 0.82) inset;
+    }
+    50% {
+      box-shadow:
+        0 0 0 2px rgba(251, 191, 36, 0.62),
+        0 0 26px rgba(251, 191, 36, 0.55),
+        0 16px 34px rgba(61, 53, 42, 0.16),
+        0 1px 0 rgba(255, 255, 255, 0.82) inset;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .model-glass-card--loading {
+      animation: none !important;
+    }
+  }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .model-glass-card {
+      background: rgba(255, 255, 255, 0.88);
+    }
+  }
+
+  .mono-font {
+    font-family: ui-monospace, "SFMono-Regular", "JetBrains Mono", monospace;
+  }
+
+  .markdown-body .hljs-keyword,
+  .markdown-body .hljs-selector-tag,
+  .markdown-body .hljs-built_in,
+  .markdown-body .hljs-name,
+  .markdown-body .hljs-tag {
+    color: #9B4DCA;
+  }
+
+  .markdown-body .hljs-string,
+  .markdown-body .hljs-attr,
+  .markdown-body .hljs-symbol,
+  .markdown-body .hljs-bullet {
+    color: #2C8B58;
+  }
+
+  .markdown-body .hljs-number,
+  .markdown-body .hljs-literal,
+  .markdown-body .hljs-variable,
+  .markdown-body .hljs-template-variable {
+    color: #B76540;
+  }
+
+  .markdown-body .hljs-title,
+  .markdown-body .hljs-section,
+  .markdown-body .hljs-function .hljs-title {
+    color: #2E6E9E;
+  }
+
+  .markdown-body .hljs-comment,
+  .markdown-body .hljs-quote {
+    color: #8C8576;
+    font-style: italic;
+  }
+
+  .markdown-body .hljs-meta,
+  .markdown-body .hljs-doctag,
+  .markdown-body .hljs-operator,
+  .markdown-body .hljs-punctuation {
+    color: #6F685A;
+  }
+
+  .form-input {
+    @apply min-h-10 w-full rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-3 py-2 text-sm text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] focus:bg-white focus:ring-2 focus:ring-[#D7663E]/15 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .action-button {
+    @apply inline-flex h-10 flex-shrink-0 items-center justify-center rounded-md px-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .icon-button {
+    @apply inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md border border-[#DCD8CF] bg-[#FAF8F2] text-[#625B50] transition-colors hover:bg-[#EAE5DA] hover:text-[#D7663E] disabled:cursor-not-allowed disabled:opacity-60;
+  }
+}
+
+@layer utilities {
+  .dark .model-dotted-surface {
+    background-color: #171512;
+    background-image: radial-gradient(circle, rgba(243, 235, 221, 0.16) 1px, transparent 1.35px);
+  }
+
+  .dark .model-dotted-surface::before {
+    background-image: radial-gradient(circle, rgba(240, 177, 141, 0.4) 1px, transparent 1.45px);
+    opacity: 0.58;
+  }
+
+  .dark .model-glass-card {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(30, 27, 23, 0.66);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+  }
+
+  .dark .model-glass-card:hover,
+  .dark .model-glass-card--active {
+    border-color: rgba(240, 177, 141, 0.42);
+    background: rgba(36, 32, 27, 0.78);
+    box-shadow:
+      0 0 0 1px rgba(240, 177, 141, 0.15),
+      0 0 18px rgba(240, 177, 141, 0.18),
+      0 16px 38px rgba(0, 0, 0, 0.42),
+      0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  }
+
+  /* 暗色：加载中描边（用更柔的金黄色） */
+  .dark .model-glass-card--loading,
+  .dark .model-glass-card--loading:hover {
+    border-color: rgba(243, 198, 110, 0.7);
+    background: rgba(48, 39, 23, 0.78);
+  }
+
+  @keyframes model-glass-card-loading-dark {
+    0%, 100% {
+      box-shadow:
+        0 0 0 1px rgba(243, 198, 110, 0.32),
+        0 0 14px rgba(243, 198, 110, 0.26),
+        0 12px 30px rgba(0, 0, 0, 0.45),
+        0 1px 0 rgba(255, 255, 255, 0.06) inset;
+    }
+    50% {
+      box-shadow:
+        0 0 0 2px rgba(243, 198, 110, 0.55),
+        0 0 26px rgba(243, 198, 110, 0.5),
+        0 18px 38px rgba(0, 0, 0, 0.52),
+        0 1px 0 rgba(255, 255, 255, 0.08) inset;
+    }
+  }
+
+  .dark .model-glass-card--loading {
+    animation-name: model-glass-card-loading-dark;
+  }
+
+  .dark .glass-panel,
+  .dark .glass-panel-strong {
+    background: rgba(23, 21, 18, 0.74);
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+  }
+
+  .dark .form-input {
+    border-color: rgba(255, 255, 255, 0.08);
+    background-color: #171512;
+    color: #F3EBDD;
+  }
+
+  .dark .form-input::placeholder {
+    color: #82786B;
+  }
+
+  .dark .form-input:focus {
+    border-color: #D7663E;
+    background-color: #1E1B17;
+  }
+
+  .dark .icon-button {
+    border-color: rgba(255, 255, 255, 0.08);
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #D8D0C3;
+  }
+
+  .dark .icon-button:hover {
+    background-color: rgba(255, 255, 255, 0.09);
+    color: #F0B18D;
+  }
+
+  .dark .markdown-body .hljs-keyword,
+  .dark .markdown-body .hljs-selector-tag,
+  .dark .markdown-body .hljs-built_in,
+  .dark .markdown-body .hljs-name,
+  .dark .markdown-body .hljs-tag {
+    color: #C9A6FF;
+  }
+
+  .dark .markdown-body .hljs-string,
+  .dark .markdown-body .hljs-attr,
+  .dark .markdown-body .hljs-symbol,
+  .dark .markdown-body .hljs-bullet {
+    color: #98D19C;
+  }
+
+  .dark .markdown-body .hljs-number,
+  .dark .markdown-body .hljs-literal,
+  .dark .markdown-body .hljs-variable,
+  .dark .markdown-body .hljs-template-variable {
+    color: #F0B18D;
+  }
+
+  .dark .markdown-body .hljs-title,
+  .dark .markdown-body .hljs-section,
+  .dark .markdown-body .hljs-function .hljs-title {
+    color: #9DD3FF;
+  }
+
+  .dark .markdown-body .hljs-comment,
+  .dark .markdown-body .hljs-quote {
+    color: #A9A095;
+  }
+
+  .dark .markdown-body .hljs-meta,
+  .dark .markdown-body .hljs-doctag,
+  .dark .markdown-body .hljs-operator,
+  .dark .markdown-body .hljs-punctuation {
+    color: #D8D0C3;
+  }
+
+  .dark [class~="bg-[#FBFAF6]"],
+  .dark [class~="bg-[#FAF9F5]"],
+  .dark [class~="bg-[#FAF8F2]"],
+  .dark [class~="bg-[#F8F6F1]"],
+  .dark [class~="bg-[#F7F4EC]"],
+  .dark [class~="bg-[#F6F3ED]"],
+  .dark [class~="bg-[#F1EEE7]"],
+  .dark [class~="bg-[#F1EFE8]"],
+  .dark [class~="bg-[#F2F0EA]"],
+  .dark [class~="bg-[#F6F2EA]"] {
+    background-color: #171512 !important;
+  }
+
+  .dark [class~="bg-[#F1EDE4]"],
+  .dark [class~="bg-[#EFEAE0]"],
+  .dark [class~="bg-[#EDE7DD]"],
+  .dark [class~="bg-[#EEEAE2]"],
+  .dark [class~="bg-[#EEEAE1]"],
+  .dark [class~="bg-[#ECE7DC]"],
+  .dark [class~="bg-[#EDE8DE]"],
+  .dark [class~="bg-[#E9E5DA]"],
+  .dark [class~="bg-[#E8E3D8]"],
+  .dark [class~="bg-[#E7E2D6]"],
+  .dark [class~="bg-[#E7E1D5]"],
+  .dark [class~="bg-[#E6E2D8]"],
+  .dark [class~="bg-[#E6E1D8]"],
+  .dark [class~="bg-[#E6E1D6]"],
+  .dark [class~="bg-[#E4E0D6]"],
+  .dark [class~="bg-[#E8E1D5]"],
+  .dark [class~="bg-[#D8D2C5]"] {
+    background-color: rgba(255, 255, 255, 0.06) !important;
+  }
+
+  .dark [class~="hover:bg-[#F6F3ED]"]:hover,
+  .dark [class~="hover:bg-[#F5F1E9]"]:hover,
+  .dark [class~="hover:bg-[#F1EEE7]"]:hover,
+  .dark [class~="hover:bg-[#EEEAE2]"]:hover,
+  .dark [class~="hover:bg-[#EAE6DD]"]:hover,
+  .dark [class~="hover:bg-[#E9E5DA]"]:hover,
+  .dark [class~="hover:bg-[#E7E2D6]"]:hover {
+    background-color: rgba(255, 255, 255, 0.09) !important;
+  }
+
+  .dark [class~="bg-[#FBFAF6]/80"],
+  .dark [class~="bg-[#FBFAF6]/85"],
+  .dark [class~="bg-[#FBFAF6]/95"],
+  .dark [class~="bg-[#FAF9F5]/95"] {
+    background-color: rgba(23, 21, 18, 0.88) !important;
+  }
+
+  .dark [class~="bg-[#F8EDE7]"],
+  .dark [class~="bg-[#F1E7DE]"],
+  .dark [class~="bg-[#F5E2D6]"],
+  .dark [class~="bg-[#F0DDD6]"] {
+    background-color: #3A241C !important;
+  }
+
+  .dark [class~="bg-[#FFF7D7]"] {
+    background-color: #342817 !important;
+  }
+
+  .dark [class~="bg-[#EEF8F2]"],
+  .dark [class~="bg-[#E7F1E4]"] {
+    background-color: #1F3224 !important;
+  }
+
+  .dark [class~="bg-[#F2F0FF]"] {
+    background-color: #28243D !important;
+  }
+
+  .dark [class~="text-[#2F2C26]"],
+  .dark [class~="text-[#403C32]"],
+  .dark [class~="text-[#39362E]"],
+  .dark [class~="text-[#4E4941]"],
+  .dark [class~="text-[#1A1A1A]"] {
+    color: #F3EBDD !important;
+  }
+
+  .dark [class~="text-[#625B50]"],
+  .dark [class~="text-[#625C50]"],
+  .dark [class~="text-[#6F685A]"],
+  .dark [class~="text-[#716A5E]"],
+  .dark [class~="text-[#756E61]"],
+  .dark [class~="text-[#7D766B]"],
+  .dark [class~="text-[#817A6D]"],
+  .dark [class~="text-[#847D6B]"],
+  .dark [class~="text-[#8A8374]"],
+  .dark [class~="text-[#8B8578]"],
+  .dark [class~="text-[#8C8576]"],
+  .dark [class~="text-[#8D867A]"],
+  .dark [class~="text-[#8F887A]"],
+  .dark [class~="text-[#969083]"],
+  .dark [class~="text-[#9A9282]"],
+  .dark [class~="text-[#9B9485]"],
+  .dark [class~="text-[#A19A8B]"],
+  .dark [class~="text-[#A39C8C]"],
+  .dark [class~="text-[#A69E8D]"],
+  .dark [class~="text-[#AAA295]"] {
+    color: #A9A095 !important;
+  }
+
+  .dark [class~="text-[#D06646]"],
+  .dark [class~="text-[#D7663E]"] {
+    color: #F0B18D !important;
+  }
+
+  .dark [class~="text-[#C44E36]"],
+  .dark [class~="text-[#B76540]"] {
+    color: #F0987C !important;
+  }
+
+  .dark [class~="text-[#B77800]"],
+  .dark [class~="text-[#9A6700]"] {
+    color: #F3C66E !important;
+  }
+
+  .dark [class~="text-[#2C8B58]"],
+  .dark [class~="text-[#4E7751]"] {
+    color: #98D19C !important;
+  }
+
+  .dark [class~="text-[#6C5DD3]"] {
+    color: #BEB8FF !important;
+  }
+
+  .dark [class~="border-[#DCD8CF]"],
+  .dark [class~="border-[#DCD7CC]"],
+  .dark [class~="border-[#DDD8CC]"],
+  .dark [class~="border-[#DDD7CB]"],
+  .dark [class~="border-[#DED9CC]"],
+  .dark [class~="border-[#E1DCD0]"],
+  .dark [class~="border-[#E1DDD2]"],
+  .dark [class~="border-[#E2DED5]"],
+  .dark [class~="border-[#E2DFD6]"],
+  .dark [class~="border-[#E3DED2]"],
+  .dark [class~="border-[#E3DFD6]"],
+  .dark [class~="border-[#E4E0D8]"],
+  .dark [class~="border-[#E5E1D8]"],
+  .dark [class~="border-[#E7E2D8]"],
+  .dark [class~="border-[#D8D2C5]"],
+  .dark [class~="border-[#BBB3A2]"] {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+  }
+
+  .dark [class~="border-[#DCC6B9]"],
+  .dark [class~="border-[#E4B59E]"],
+  .dark [class~="border-[#E8C9BD]"] {
+    border-color: rgba(240, 177, 141, 0.24) !important;
+  }
+
+  .dark [class~="border-[#EACB71]"] {
+    border-color: rgba(243, 198, 110, 0.28) !important;
+  }
+
+  .dark [class~="border-[#CFEADA]"] {
+    border-color: rgba(152, 209, 156, 0.22) !important;
+  }
+
+  .dark [class~="border-[#D9D3FF]"] {
+    border-color: rgba(190, 184, 255, 0.24) !important;
+  }
+
+  .dark [class~="placeholder:text-[#A39C8C]"]::placeholder,
+  .dark [class~="placeholder:text-[#A69E8D]"]::placeholder {
+    color: #82786B !important;
+  }
+
+  .dark [class~="shadow-sm"],
+  .dark [class~="shadow-lg"],
+  .dark [class~="shadow-xl"],
+  .dark [class~="shadow-2xl"] {
+    box-shadow: 0 14px 42px rgba(0, 0, 0, 0.32) !important;
+  }
+
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+}
+
+/* 轻量 CSS 动画工具：替代首屏组件中的 framer-motion，避免把动画库打进首屏 chunk。 */
+@layer utilities {
+  @keyframes anim-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes anim-fade-rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes anim-pop-in {
+    from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes anim-panel-in {
+    from { opacity: 0; transform: translateY(12px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .anim-fade-in { animation: anim-fade-in 0.18s ease both; }
+  .anim-fade-rise { animation: anim-fade-rise 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .anim-card-rise { animation: anim-fade-rise 0.18s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .anim-pop-in { animation: anim-pop-in 0.15s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .anim-panel-in { animation: anim-panel-in 0.16s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+  /* 悬停/按压微交互，替代 whileHover / whileTap */
+  .hover-rise { transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1); }
+  .hover-rise:hover { transform: translateY(-2px); }
+  .hover-rise:active { transform: scale(0.98); }
+  .hover-rise-lg:hover { transform: translateY(-4px); }
+  .hover-rise-lg:active { transform: scale(0.996); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .anim-fade-in,
+    .anim-fade-rise,
+    .anim-card-rise,
+    .anim-pop-in,
+    .anim-panel-in {
+      animation: none !important;
+    }
+    .hover-rise,
+    .hover-rise-lg {
+      transition: none !important;
+    }
+  }
+}
+
