@@ -27,14 +27,14 @@ export default function ToolsPage() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="mb-6 max-w-3xl">
+        <div className="mx-auto mb-6 max-w-3xl">
           <h1 className="text-2xl font-bold text-primary-custom">工具</h1>
           <p className="mt-1 text-sm leading-6 text-secondary-custom">
             选择允许模型调用的 llama.cpp 内置工具。修改后需要重新加载模型，新的 --tools 配置才会生效。
           </p>
         </div>
 
-        <div className="max-w-3xl space-y-4 pb-12">
+        <div className="mx-auto max-w-3xl space-y-4 pb-12">
           <section className="glass-panel p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div className="min-w-0">

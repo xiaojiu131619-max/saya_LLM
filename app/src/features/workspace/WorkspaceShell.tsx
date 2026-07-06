@@ -9,14 +9,16 @@ import type { ViewType } from '@/types';
 const ChatPage = lazy(() => import('@/pages/ChatPage'));
 const SettingsWorkspace = lazy(() => import('@/features/settings/SettingsWorkspace'));
 const ModelWorkspace = lazy(() => import('@/features/model/ModelWorkspace'));
+const ApiStatusWorkspace = lazy(() => import('@/features/apiStatus/ApiStatusWorkspace'));
 const ImageWorkspace = lazy(() => import('@/features/image/ImageWorkspace'));
 
-type WorkspaceMode = 'model' | 'chat' | 'settings' | 'image';
+type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus' | 'image';
 
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
+  if (view === 'apiStatus') return 'apiStatus';
   if (view === 'image') return 'image';
-  if (view === 'settings' || view === 'tools' || view === 'usage') return 'settings';
+  if (view === 'settings' || view === 'tools' || view === 'logs') return 'settings';
   return 'model';
 }
 
@@ -30,6 +32,8 @@ export default function WorkspaceShell() {
         return <ChatPage />;
       case 'settings':
         return <SettingsWorkspace />;
+      case 'apiStatus':
+        return <ApiStatusWorkspace />;
       case 'image':
         return <ImageWorkspace />;
       default:

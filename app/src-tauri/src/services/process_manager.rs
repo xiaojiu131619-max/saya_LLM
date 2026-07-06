@@ -16,9 +16,11 @@ use serde::Serialize;
 use sysinfo::System;
 
 use crate::models::server_config::ServerConfig;
+use crate::models::ping_result::PingResult;
 
 static CHILD_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 static SERVER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static LAST_SERVER_CONFIG: Lazy<Mutex<Option<ServerConfig>>> = Lazy::new(|| Mutex::new(None));
 
 #[derive(Clone, Serialize)]
 pub struct ServerProgress {
@@ -288,16 +290,39 @@ fn detect_error(line: &str) -> Option<ServerError> {
         || line_lower.contains("could not find cuda")
         || line_lower.contains("cuda driver")
         || line_lower.contains("cuda dll")
+        // Blackwell / sm_120 特有的错误——llama.cpp 里缺少 kernel image 的经典报错
+        || line_lower.contains("no kernel image is available for execution on the device")
+        || (line_lower.contains("no kernel") && line_lower.contains("available"))
+        || (line_lower.contains("cuda") && line_lower.contains("not supported"))
+        || line_lower.contains("cublas_status_not_supported")
+        || line_lower.contains("unsupported gpu architecture")
+        || (line_lower.contains("ptx") && line_lower.contains("jit"))
     {
+        // 如果日志里包含 sm_120 / Blackwell 线索，给针对性建议
+        let is_blackwell = line_lower.contains("sm_120")
+            || line_lower.contains("blackwell")
+            || line_lower.contains("sm 120")
+            || line_lower.contains("compute capability 12");
+        let suggestions = if is_blackwell
+            || line_lower.contains("no kernel image is available for execution on the device")
+        {
+            vec![
+                "你的 NVIDIA 50 系显卡 (Blackwell/sm_120) 需要 CUDA 12.8+ 的 llama.cpp 构建才能原生运行。".into(),
+                "当前安装的内核版本太低，不包含 sm_120 kernel——请到设置 → llama.cpp 内核 → 检查更新，然后更新到 cuda-12.8 或更新的包。".into(),
+                "如果更新后仍有问题，请确认 NVIDIA 驱动版本 ≥580，或手动安装最新驱动后重试。".into(),
+            ]
+        } else {
+            vec![
+                "更新 NVIDIA 驱动".into(),
+                "确保 CUDA 驱动版本与 llama-server 兼容".into(),
+                "检查 resources/ 目录下的 DLL 是否完整".into(),
+            ]
+        };
         return Some(ServerError {
             error_type: "cuda".into(),
             title: "CUDA 错误".into(),
             details: line.into(),
-            suggestions: vec![
-                "更新 NVIDIA 驱动".into(),
-                "确保 CUDA 驱动版本与 llama-server 兼容".into(),
-                "检查 resources/ 目录下的 DLL 是否完整".into(),
-            ],
+            suggestions,
         });
     }
 
@@ -700,6 +725,94 @@ fn models_endpoint_ready(
     }
 }
 
+fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
+    json.get("data")
+        .and_then(|data| data.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn ping_server() -> PingResult {
+    let config = match LAST_SERVER_CONFIG.lock().ok().and_then(|guard| guard.clone()) {
+        Some(config) => config,
+        None => return PingResult::unavailable("尚未启动过 llama-server。"),
+    };
+
+    if !is_server_running() {
+        return PingResult::unavailable("llama-server 未运行。");
+    }
+
+    if !port_is_listening(&config) {
+        return PingResult::unavailable(format!("端口 {} 未监听。", config.port));
+    }
+
+    let host = health_check_host(&config);
+    let base_url = format!("http://{}:{}", host, config.port);
+    let health_url = format!("{}/health", base_url);
+    let models_url = format!("{}/v1/models", base_url);
+    let api_key = config.api_key.as_deref();
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return PingResult::unavailable(format!("创建 HTTP 客户端失败：{}", error)),
+    };
+
+    let started = Instant::now();
+    let health_resp = server_request(&client, &health_url, api_key).send();
+    let latency_ms = Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+    let (health_ok, status_code, health_error) = match health_resp {
+        Ok(resp) => (resp.status().is_success(), Some(resp.status().as_u16()), None),
+        Err(error) => (false, None, Some(format!("/health 请求失败：{}", error))),
+    };
+
+    let mut models = Vec::new();
+    let mut models_ok = false;
+    let mut models_error = None;
+    match server_request(&client, &models_url, api_key).send() {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                match resp.json::<serde_json::Value>() {
+                    Ok(json) => {
+                        models = extract_model_ids(&json);
+                        models_ok = !models.is_empty();
+                        if !models_ok {
+                            models_error = Some("/v1/models 未返回可用模型。".to_string());
+                        }
+                    }
+                    Err(error) => {
+                        models_error = Some(format!("/v1/models 响应解析失败：{}", error));
+                    }
+                }
+            } else {
+                models_error = Some(format!("/v1/models 返回状态码 {}。", resp.status()));
+            }
+        }
+        Err(error) => {
+            models_error = Some(format!("/v1/models 请求失败：{}", error));
+        }
+    }
+
+    PingResult {
+        reachable: health_ok && models_ok,
+        latency_ms,
+        status_code,
+        health_ok,
+        models_ok,
+        models,
+        error: health_error.or(models_error),
+    }
+}
+
 fn compatible_cpu_config(config: &ServerConfig) -> ServerConfig {
     let mut fallback = config.clone();
     fallback.no_cuda = true;
@@ -1051,6 +1164,9 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
 
     stop_stale_servers_for_exe(&exe);
     clear_logs();
+    if let Ok(mut last_config) = LAST_SERVER_CONFIG.lock() {
+        *last_config = Some(config.clone());
+    }
 
     if !wait_for_port_release(config, Duration::from_secs(2)) {
         return Err(anyhow::anyhow!(

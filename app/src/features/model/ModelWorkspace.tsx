@@ -2,18 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   ArrowLeft,
+  ChevronRight,
   CircleAlert,
   CircleCheck,
   Database,
   FilePlus2,
   Gauge,
   HardDrive,
-  Layers,
+  Images,
   MemoryStick,
   MessageSquare,
   Server,
   Settings,
-  WandSparkles,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -31,6 +31,7 @@ import {
   toFrontendModel,
 } from '@/lib/desktop';
 import type { ChatSession, MessageStats, ModelInfo } from '@/types';
+import { CHAT_HISTORY_MODEL_ID } from '@/features/chat/chatUtils';
 
 function isGgufPath(path: string) {
   return path.toLowerCase().endsWith('.gguf');
@@ -75,6 +76,13 @@ function formatCtxUsage(stats: MessageStats | undefined, model: ModelInfo | unde
   return `${used.toLocaleString()} / ${total.toLocaleString()}`;
 }
 
+function ctxPercentValue(stats: MessageStats | undefined, model: ModelInfo | undefined): number | undefined {
+  const used = stats?.ctxUsed ?? 0;
+  const total = stats?.ctxTotal || model?.loadConfig.ctxLength || model?.ctxLength || 0;
+  if (!Number.isFinite(used) || !Number.isFinite(total) || used <= 0 || total <= 0) return undefined;
+  return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
 function formatGbPair(used: number, total: number) {
   if (!total || total <= 0) return '--';
   const usedText = used >= 10 ? used.toFixed(1) : used.toFixed(2);
@@ -93,13 +101,11 @@ export default function ModelWorkspace() {
   const loadedModel = state.models.find((model) => model.status === 'loaded')
     ?? state.models.find((model) => model.id === state.activeModelId);
   const loadedUsage = loadedModel ? state.usageByModel[loadedModel.id] : undefined;
-  const loadedStats = latestStatsForSessions(loadedModel ? state.chatSessions[loadedModel.id] : undefined);
+  const loadedStats = latestStatsForSessions(state.chatSessions[CHAT_HISTORY_MODEL_ID]);
   const tokensPerSec = loadedStats?.tokensPerSec
     ?? loadedModel?.avgTokensPerSec
     ?? averageTokensPerSec(loadedUsage);
   const linkState = state.serverRunning && loadedModel ? '已连接' : state.serverRunning ? '服务在线' : '未连接';
-  const loadedCount = state.models.filter((model) => model.status === 'loaded').length;
-  const localCount = state.models.filter((model) => model.source === 'local').length;
   const openSettings = () => {
     if (typeof window !== 'undefined') {
       window.sessionStorage.setItem('agent-llm-settings-return-view', state.currentView);
@@ -255,6 +261,13 @@ export default function ModelWorkspace() {
             <Database className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">模型列表</span>
           </button>
+          <button
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'image' })}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#4E4941] transition-colors hover:bg-[#EAE6DD]"
+          >
+            <Images className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">生图工作区</span>
+          </button>
           {detailOpen && (
             <button
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
@@ -264,28 +277,20 @@ export default function ModelWorkspace() {
               <span className="truncate">退出参数界面</span>
             </button>
           )}
-          <button
-            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'image' })}
-            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#4E4941] transition-colors hover:bg-[#EAE6DD]"
-            title="进入生图工作台"
-          >
-            <WandSparkles className="h-4 w-4 flex-shrink-0" />
-            <span className="truncate">生图工作台</span>
-          </button>
         </nav>
 
         <div className="mt-5 space-y-2 px-2">
-          <ModelWorkspaceStat icon={HardDrive} label="真实模型" value={`${localCount} 个`} />
-          <ModelWorkspaceStat icon={Layers} label="已加载" value={`${loadedCount} 个`} />
           <LoadedModelPanel model={loadedModel} running={state.serverRunning} />
           <ServiceStatusPanel
             running={state.serverRunning}
             port={state.serverPort}
             tokensPerSec={formatTokensPerSec(tokensPerSec)}
             ctxUsage={formatCtxUsage(loadedStats, loadedModel)}
+            ctxPercent={ctxPercentValue(loadedStats, loadedModel)}
             vramUsage={formatGbPair(systemStats.vramUsed, systemStats.vramTotal)}
             ramUsage={formatGbPair((systemStats.ramUsage / 100) * systemStats.ramTotal, systemStats.ramTotal)}
             linkState={linkState}
+            onOpenDetails={() => dispatch({ type: 'SET_VIEW', payload: 'apiStatus' })}
           />
         </div>
 
@@ -353,22 +358,6 @@ export default function ModelWorkspace() {
   );
 }
 
-function ModelWorkspaceStat({ icon: Icon, label, value }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2">
-      <div className="flex min-w-0 items-center gap-2">
-        <Icon className="h-4 w-4 flex-shrink-0 text-[#7D766B]" />
-        <span className="truncate text-xs text-[#7D766B]">{label}</span>
-      </div>
-      <span className="mono-font flex-shrink-0 text-xs font-semibold text-[#2F2C26]">{value}</span>
-    </div>
-  );
-}
-
 function LoadedModelPanel({ model, running }: { model?: ModelInfo; running: boolean }) {
   const Icon = running && model ? CircleCheck : CircleAlert;
   return (
@@ -387,30 +376,53 @@ function LoadedModelPanel({ model, running }: { model?: ModelInfo; running: bool
   );
 }
 
-function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, vramUsage, ramUsage, linkState }: {
+function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, onOpenDetails }: {
   running: boolean;
   port: number;
   tokensPerSec: string;
   ctxUsage: string;
+  ctxPercent?: number;
   vramUsage: string;
   ramUsage: string;
   linkState: string;
+  onOpenDetails: () => void;
 }) {
   const LinkIcon = running ? Wifi : WifiOff;
+  const ctxHas = ctxPercent !== undefined && Number.isFinite(ctxPercent) && ctxPercent >= 0;
   return (
-    <div className="rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
+    <button
+      type="button"
+      onClick={onOpenDetails}
+      className="w-full rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2 text-left transition-colors hover:bg-[#F1EEE7] focus:outline-none focus:ring-2 focus:ring-[#D7663E]/35 dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
+      title="查看 API 状态详情"
+    >
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">
           <Server className="h-3.5 w-3.5 flex-shrink-0 text-[#7D766B] dark:text-[#BDB4A7]" />
           <span className="truncate">服务状态</span>
         </div>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${running ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1F3224] dark:text-[#98D19C]' : 'bg-[#ECE7DC] text-[#817A6D] dark:bg-white/[0.06] dark:text-[#A9A095]'}`}>
-          {running ? `:${port}` : '未运行'}
-        </span>
+        <div className="flex items-center gap-1">
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${running ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1F3224] dark:text-[#98D19C]' : 'bg-[#ECE7DC] text-[#817A6D] dark:bg-white/[0.06] dark:text-[#A9A095]'}`}>
+            {running ? `:${port}` : '未运行'}
+          </span>
+          <ChevronRight className="h-3.5 w-3.5 text-[#A49B8C]" />
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-1.5">
         <ServiceMetric icon={Activity} label="ts" value={tokensPerSec} />
-        <ServiceMetric icon={Gauge} label="ctx" value={ctxUsage} />
+        <ServiceMetric icon={Gauge} label="ctx" value={ctxUsage} extra={
+          ctxHas ? (
+            <div className="mt-1 flex items-center gap-1">
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.10]">
+                <div
+                  className="h-full rounded-full bg-[#D7663E] transition-[width] duration-300"
+                  style={{ width: `${Math.min(100, ctxPercent!)}%` }}
+                />
+              </div>
+              <span className="mono-font flex-shrink-0 text-[10px] font-semibold text-[#403C32] dark:text-[#F3EBDD]">{Math.round(ctxPercent!)}%</span>
+            </div>
+          ) : undefined
+        } />
         <ServiceMetric icon={HardDrive} label="vram" value={vramUsage} />
         <ServiceMetric icon={MemoryStick} label="mem" value={ramUsage} />
       </div>
@@ -418,14 +430,15 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, vramUsage, 
         <LinkIcon className={`h-3.5 w-3.5 flex-shrink-0 ${running ? 'text-[#2C8B58]' : 'text-[#A49B8C]'}`} />
         <span className="truncate">{linkState}</span>
       </div>
-    </div>
+    </button>
   );
 }
 
-function ServiceMetric({ icon: Icon, label, value }: {
+function ServiceMetric({ icon: Icon, label, value, extra }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: string;
+  extra?: React.ReactNode;
 }) {
   return (
     <div className="min-w-0 rounded-md border border-[#E4DFD5] bg-[#FBFAF6] px-2 py-1.5 dark:border-white/[0.08] dark:bg-[#15130F]">
@@ -434,6 +447,7 @@ function ServiceMetric({ icon: Icon, label, value }: {
         <span>{label}</span>
       </div>
       <div className="mono-font mt-0.5 truncate text-[11px] font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{value}</div>
+      {extra}
     </div>
   );
 }

@@ -189,6 +189,46 @@ fn parse_cuda_version(value: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// NVIDIA RTX 50 系列（Blackwell, compute capability 12.0 / sm_120）
+/// 需要 CUDA 12.8+ 的 llama.cpp 构建才有原生 kernel，否则会出现
+/// `no kernel image is available for execution on the device` 或 PTX JIT 慢速回退。
+pub fn is_blackwell_gpu(name: Option<&str>) -> bool {
+    let Some(raw) = name else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("blackwell") {
+        return true;
+    }
+    // 匹配 "RTX 50xx" / "RTX50xx"（覆盖 5090 / 5080 / 5070 Ti / 5070 / 5060 Ti / 5060，
+    // 以及 Laptop / D 后缀变体）。刻意不把 sm_120 的 datacenter 卡（B100/B200 等）纳入，
+    // 那类卡目前不是本应用的目标用户。
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if &bytes[i..i + 3] == b"rtx" {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == b'5' && bytes[j + 1].is_ascii_digit() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 判断 asset 的 CUDA 版本是否能覆盖 sm_120 kernel。
+/// llama.cpp 官方从 CUDA 12.8 起才把 sm_120 加入默认编译目标，CUDA 13.x 同样满足。
+fn cuda_asset_supports_blackwell(name: &str) -> bool {
+    match cuda_asset_version(name) {
+        Some((major, minor)) => (major, minor) >= (12, 8),
+        None => false,
+    }
+}
+
 fn cuda_asset_version(name: &str) -> Option<(u32, u32)> {
     let marker = "cuda-";
     let start = name.find(marker)? + marker.len();
@@ -206,32 +246,56 @@ fn cuda_version_from_url(url: &str) -> Option<String> {
     Some(format!("{}.{}", major, minor))
 }
 
-fn cuda_asset_score(name: &str, cuda_version: Option<&str>) -> (u8, u32, u32) {
+fn cuda_asset_score(
+    name: &str,
+    cuda_version: Option<&str>,
+    blackwell: bool,
+) -> (u8, u32, u32) {
     let Some((asset_major, asset_minor)) = cuda_asset_version(name) else {
         return (3, 0, 0);
     };
+    // Blackwell (sm_120) 只在 CUDA 12.8+ 有原生 kernel。低于 12.8 的 asset 装上去
+    // 只会走 PTX JIT 或 no-kernel-image 崩溃，因此单独降级到 tier 3——保留可选性
+    // （用户仍能手动挑选），但排在所有合规 asset 之后。
+    let blackwell_penalty = blackwell && (asset_major, asset_minor) < (12, 8);
     let Some((cuda_major, cuda_minor)) = cuda_version.and_then(parse_cuda_version) else {
-        return (1, u32::MAX - asset_major, u32::MAX - asset_minor);
+        let base = if blackwell_penalty { 3 } else { 1 };
+        return (base, u32::MAX - asset_major, u32::MAX - asset_minor);
     };
 
-    if asset_major == cuda_major {
-        let distance = asset_minor.abs_diff(cuda_minor);
-        (0, distance, u32::MAX - asset_minor)
+    let base_tier = if asset_major == cuda_major {
+        0
     } else if asset_major > cuda_major {
-        (1, asset_major - cuda_major, u32::MAX - asset_minor)
+        1
     } else {
-        (2, cuda_major - asset_major, u32::MAX - asset_minor)
-    }
+        2
+    };
+    let tier = if blackwell_penalty { 3 } else { base_tier };
+    let distance = if asset_major == cuda_major {
+        asset_minor.abs_diff(cuda_minor)
+    } else if asset_major > cuda_major {
+        asset_major - cuda_major
+    } else {
+        cuda_major - asset_major
+    };
+    (tier, distance, u32::MAX - asset_minor)
 }
 
-fn cuda_asset_matches(name: &str, cuda_version: Option<&str>) -> bool {
+fn cuda_asset_matches(name: &str, cuda_version: Option<&str>, blackwell: bool) -> bool {
     let Some((asset_major, _)) = cuda_asset_version(name) else {
         return false;
     };
     let Some((cuda_major, _)) = cuda_version.and_then(parse_cuda_version) else {
         return false;
     };
-    asset_major == cuda_major
+    if asset_major != cuda_major {
+        return false;
+    }
+    // Blackwell 只有 12.8+ 的 asset 才算真正 host-matched。
+    if blackwell && !cuda_asset_supports_blackwell(name) {
+        return false;
+    }
+    true
 }
 
 fn asset_backend(name: &str) -> &'static str {
@@ -272,13 +336,13 @@ fn is_cudart_package(name: &str) -> bool {
         && lower.ends_with(".zip")
 }
 
-fn host_matched_asset(name: &str, cuda_version: Option<&str>, host_backend: &str) -> bool {
+fn host_matched_asset(name: &str, cuda_version: Option<&str>, host_backend: &str, blackwell: bool) -> bool {
     let lower = name.to_ascii_lowercase();
     match host_backend {
         "CUDA" => {
             lower.contains("cuda")
                 && cuda_version
-                    .map(|version| cuda_asset_matches(name, Some(version)))
+                    .map(|version| cuda_asset_matches(name, Some(version), blackwell))
                     .unwrap_or(true)
         }
         "Vulkan" => lower.contains("vulkan") || lower.contains("kompute"),
@@ -287,7 +351,7 @@ fn host_matched_asset(name: &str, cuda_version: Option<&str>, host_backend: &str
     }
 }
 
-fn package_asset_score(name: &str, cuda_version: Option<&str>, host_backend: &str) -> (u8, u32, u32, String) {
+fn package_asset_score(name: &str, cuda_version: Option<&str>, host_backend: &str, blackwell: bool) -> (u8, u32, u32, String) {
     let lower = name.to_ascii_lowercase();
     match host_backend {
         "CUDA" => {
@@ -295,7 +359,7 @@ fn package_asset_score(name: &str, cuda_version: Option<&str>, host_backend: &st
                 if cuda_version.is_none() {
                     return (0, 0, 0, lower);
                 }
-                let (tier, distance, minor_score) = cuda_asset_score(name, cuda_version);
+                let (tier, distance, minor_score) = cuda_asset_score(name, cuda_version, blackwell);
                 return (tier, distance, minor_score, lower);
             }
             if lower.contains("vulkan") {
@@ -440,6 +504,7 @@ pub fn check_latest_release() -> Result<ReleaseInfo, String> {
 
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
+    let blackwell = is_blackwell_gpu(gpu_name.as_deref());
     let mut assets = Vec::new();
     let mut cuda_matched = false;
     if let Some(arr) = json["assets"].as_array() {
@@ -447,11 +512,11 @@ pub fn check_latest_release() -> Result<ReleaseInfo, String> {
             let name = item["name"].as_str().unwrap_or("");
             if is_windows_x64_package(name) {
                 let matches_cuda = name.to_ascii_lowercase().contains("cuda")
-                    && cuda_asset_matches(name, cuda_version.as_deref());
+                    && cuda_asset_matches(name, cuda_version.as_deref(), blackwell);
                 if matches_cuda {
                     cuda_matched = true;
                 }
-                let matches_host = host_matched_asset(name, cuda_version.as_deref(), &host_backend);
+                let matches_host = host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
                 assets.push(AssetInfo {
                     name: name.to_string(),
                     browser_download_url: item["browser_download_url"]
@@ -466,7 +531,7 @@ pub fn check_latest_release() -> Result<ReleaseInfo, String> {
         }
     }
 
-    assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend));
+    assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend, blackwell));
 
     let version = tag_name.trim_start_matches('v').to_string();
 
@@ -487,6 +552,7 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
     let json = github_api_json("releases")?;
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
+    let blackwell = is_blackwell_gpu(gpu_name.as_deref());
 
     let mut releases = Vec::new();
     if let Some(arr) = json.as_array() {
@@ -502,12 +568,12 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
                     let name = a["name"].as_str().unwrap_or("");
                     if is_windows_x64_package(name) {
                         let matches_cuda = name.to_ascii_lowercase().contains("cuda")
-                            && cuda_asset_matches(name, cuda_version.as_deref());
+                            && cuda_asset_matches(name, cuda_version.as_deref(), blackwell);
                         if matches_cuda {
                             cuda_matched = true;
                         }
                         let matches_host =
-                            host_matched_asset(name, cuda_version.as_deref(), &host_backend);
+                            host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
                         assets.push(AssetInfo {
                             name: name.to_string(),
                             browser_download_url: a["browser_download_url"]
@@ -521,7 +587,7 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
                     }
                 }
             }
-            assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend));
+            assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend, blackwell));
 
             let version = tag_name.trim_start_matches('v').to_string();
             releases.push(ReleaseInfo {

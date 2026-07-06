@@ -233,7 +233,7 @@ pub fn save_tune_result(state: State<'_, AppState>, entry: TuneHistoryEntry) -> 
 }
 
 /// 重置应用配置：删除 config.json、清空模型目录扫描缓存、撤销对外 API Key。
-/// 不动 llama.cpp 内核可执行文件、模型文件本身、生图供应商 keyring（由 clear_all_image_keys 处理）。
+/// 不动 llama.cpp 内核可执行文件、模型文件本身。
 #[tauri::command]
 pub fn reset_app_config(state: State<'_, AppState>) -> Result<(), String> {
     // 先撤销对外 API Key 的 keyring 凭据。
@@ -251,4 +251,14 @@ pub fn reset_app_config(state: State<'_, AppState>) -> Result<(), String> {
     *guard = AppConfig::default();
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_close_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    let mut new_config = (*config).clone();
+    new_config.close_to_tray = enabled;
+    persist_config(&new_config)?;
+    *config = new_config;
+    Ok(enabled)
 }

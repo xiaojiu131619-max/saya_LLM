@@ -1,6 +1,7 @@
 use tauri::{AppHandle, Emitter};
 
 use crate::commands::config;
+use crate::models::ping_result::PingResult;
 use crate::models::server_config::ServerConfig;
 use crate::services::process_manager;
 
@@ -38,6 +39,13 @@ pub fn stop_server(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn get_server_status() -> Result<bool, String> {
     Ok(process_manager::is_server_running())
+}
+
+#[tauri::command]
+pub async fn ping_local_api() -> Result<PingResult, String> {
+    tauri::async_runtime::spawn_blocking(process_manager::ping_server)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

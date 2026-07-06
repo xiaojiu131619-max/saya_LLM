@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'modelLoad' | 'usage' | 'image';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'image';
 export type ThemeType = 'dark' | 'light';
 export type SortType = 'default' | 'name' | 'size' | 'updated';
 export type GridColumnType = 1 | 2;
@@ -28,7 +28,8 @@ export interface ModelLoadConfig {
   ropeFreqScale: number;
   seedEnabled: boolean;
   seed: number;
-  speculativeDecoding: 'off';
+  // 推测解码 / 多 token 预测（MTP）：'off' 关闭；'mtp' 使用同目录扫描到的 mtp 草稿模型。
+  speculativeDecoding: 'off' | 'mtp';
   chatTemplate: string;
   rememberSettings: boolean;
   showAdvancedSettings: boolean;
@@ -118,9 +119,12 @@ export interface ModelInfo {
   avgTokensPerSec?: number;
   serverPort?: number;
   // 能力标记：用于模型卡片上的能力徽章。
-  // 视觉：是否多模态（看图）；思考：是否支持 think 模式开关（如 Qwen3）；
+  // 视觉：是否多模态（看图）；音频：是否支持音频输入；视频：是否支持视频输入；
+  // 思考：是否支持 think 模式开关（如 Qwen3）；
   // 工具：是否支持函数调用 / 工具调用；推理：是否为 R1/QwQ 类强推理模型。
   supportsVision?: boolean;
+  supportsAudio?: boolean;
+  supportsVideo?: boolean;
   supportsThinking?: boolean;
   supportsTools?: boolean;
   supportsReasoning?: boolean;
@@ -131,6 +135,8 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  // 多模态用户消息：用于重发/编辑时还原 image_url / audio_url / video_url。
+  multimodalContent?: ChatMessageContentPart[];
   reasoningContent?: string;
   modelId?: string;
   modelName?: string;
@@ -139,6 +145,14 @@ export interface Message {
   isStreaming?: boolean;
   stats?: MessageStats;
 }
+
+export type ChatMessageContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'audio_url'; audio_url: { url: string } }
+  | { type: 'video_url'; video_url: { url: string } }
+  | { type: 'input_audio'; input_audio: { data: string; format: 'wav' | 'mp3' } }
+  | { type: 'input_video'; input_video: { data: string } };
 
 export interface ChatSession {
   id: string;
@@ -196,4 +210,5 @@ export interface AppState {
   usageByModel: Record<string, ModelUsageStats>;
   modelLaunchMemories: Record<string, ModelLaunchMemory>;
   recentModelUsage: Record<string, number>;
+  closeToTray: boolean;
 }

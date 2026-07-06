@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  ArrowDown,
   ArrowUp,
   CheckCircle2,
   FileText,
@@ -17,20 +18,33 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import { useSystemStats } from '@/hooks/useSystemStats';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion } from '@/lib/desktop';
+import { isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion } from '@/lib/desktop';
+import type { ChatMessageContentPart } from '@/types';
 import {
   CHAT_HISTORY_MODEL_ID,
   MAX_ATTACHMENT_BYTES,
-  buildPromptWithAttachments,
+  MAX_MEDIA_BYTES,
+  attachmentToMultimodalPart,
+  buildMultimodalUserMessage,
+  classifyAttachment,
   compactModelName,
   createChatSession,
+  ctxUsagePercent,
   dayLabel,
+  downloadFile,
+  exportSessionAsJson,
+  exportSessionAsMarkdown,
   fileExtension,
+  fileNameFromPath,
   formatFileSize,
-  isSupportedTextFile,
+  latestStatsForSessions,
+  type AttachmentKind,
+  type MediaAttachment,
   type PendingAttachment,
+  type TextAttachment,
 } from '@/features/chat/chatUtils';
 import type { ChatSession } from '@/types';
 import type { ReasoningMode } from '@/types';
@@ -43,16 +57,38 @@ const REASONING_OPTIONS: Array<{ mode: ReasoningMode; label: string; description
   { mode: 'deep', label: '深思', description: '使用更高思考预算' },
 ];
 
-const AUTO_SCROLL_MAGNET_PX = 96;
-const SCROLL_RELEASE_DELTA_PX = 4;
+const AUTO_SCROLL_MAGNET_PX = 56;
+const SCROLL_RELEASE_DELTA_PX = 2;
 
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return dataTransfer.files.length > 0 || Array.from(dataTransfer.types).some((type) => type === 'Files');
 }
 
-function fileNameFromPath(path: string) {
-  const slash = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
-  return slash >= 0 ? path.slice(slash + 1) : path;
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      resolve(result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function classifyAttachmentByName(name: string): AttachmentKind | null {
+  const fakeFile = { name, type: '', size: 0 };
+  return classifyAttachment(fakeFile);
+}
+
+// llama-server 的 input_audio 只接受 wav / mp3 两种格式（OpenAI Audio API 子集）。
+// 用户上传 m4a / flac / ogg / aac / opus 时会被这里拦截，给出明确的转换提示。
+const SUPPORTED_AUDIO_EXTS = new Set(['wav', 'mp3']);
+
+function validateAudioExt(name: string): string | null {
+  const ext = fileExtension(name);
+  if (SUPPORTED_AUDIO_EXTS.has(ext)) return null;
+  return `${name} 暂不支持：llama-server 只接受 wav / mp3 音频（当前是 ${ext || '未知格式'}），请先转码。`;
 }
 
 function elapsedRequestStats(startTime: number, ctxTotal = 0) {
@@ -89,6 +125,7 @@ export default function ChatPage() {
   const [stopMessage, setStopMessage] = useState<string | null>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -103,6 +140,7 @@ export default function ChatPage() {
     : state.models.find((model) => model.status === 'loaded');
   const sidebarModel = loadedModel ?? activeModel;
   const desktopReady = isDesktopRuntime();
+  const systemStats = useSystemStats();
   const canChat = Boolean(desktopReady && activeModel?.filePath && state.serverRunning);
   const chatSessions = useMemo(
     () => Object.values(state.chatSessions).flat().sort((a, b) => b.updatedAt - a.updatedAt),
@@ -118,6 +156,15 @@ export default function ChatPage() {
   const activeSessionModelColor = activeSession?.modelColor ?? activeSessionOwnerModel?.themeColorSolid;
   const activeModelSnapshot = activeModel
     ? { runtimeModelId: activeModel.id, modelName: activeModel.name, modelColor: activeModel.themeColorSolid }
+    : undefined;
+  // 侧边栏状态卡：优先取当前活动会话最新一条消息 stats 算 ctx%，其次取所有会话最新。
+  const chatHistorySessions = state.chatSessions[CHAT_HISTORY_MODEL_ID];
+  const loadedStats = activeSession?.messages?.length
+    ? latestStatsForSessions([activeSession])
+    : latestStatsForSessions(chatHistorySessions);
+  const ctxPercent = ctxUsagePercent(loadedStats);
+  const vramPercent = systemStats.vramTotal > 0
+    ? Math.min(100, Math.max(0, (systemStats.vramUsed / systemStats.vramTotal) * 100))
     : undefined;
   const modelMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
   const streamingMessage = modelMessages.find((message) => message.isStreaming);
@@ -148,15 +195,9 @@ export default function ChatPage() {
     requestAnimationFrame(() => {
       const viewport = messagesViewportRef.current;
       if (!viewport) return;
-
+      // 单次滚动，避免嵌套 rAF 在流式 token 高频触发时产生抖动与"往下拽"的生硬感。
       viewport.scrollTo({ top: viewport.scrollHeight, behavior });
       lastScrollTopRef.current = viewport.scrollTop;
-
-      requestAnimationFrame(() => {
-        if (!shouldStickToBottomRef.current) return;
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'auto' });
-        lastScrollTopRef.current = viewport.scrollTop;
-      });
     });
   }, []);
 
@@ -202,7 +243,17 @@ export default function ChatPage() {
       shouldStickToBottomRef.current = false;
     }
     lastScrollTopRef.current = viewport.scrollTop;
+    setShowJumpToBottom(distanceToBottom > AUTO_SCROLL_MAGNET_PX);
   };
+
+  const jumpToBottom = useCallback(() => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    shouldStickToBottomRef.current = true;
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+    lastScrollTopRef.current = viewport.scrollTop;
+    setShowJumpToBottom(false);
+  }, []);
 
   const releaseAutoScroll = () => {
     shouldStickToBottomRef.current = false;
@@ -215,22 +266,52 @@ export default function ChatPage() {
     const errors: string[] = [];
 
     for (const file of files) {
-      if (!isSupportedTextFile(file)) {
-        errors.push(`${file.name} 不是可直接读取的文本/代码/数据文件。`);
+      const kind = classifyAttachment(file);
+      if (!kind) {
+        errors.push(`${file.name} 不是支持的文本、代码、数据、图片、音频或视频文件。`);
         continue;
       }
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        errors.push(`${file.name} 超过 ${formatFileSize(MAX_ATTACHMENT_BYTES)} 限制。`);
+      if (kind === 'text') {
+        if (file.size > MAX_ATTACHMENT_BYTES) {
+          errors.push(`${file.name} 超过文本附件 ${formatFileSize(MAX_ATTACHMENT_BYTES)} 限制。`);
+          continue;
+        }
+        try {
+          const content = (await file.text()).split(String.fromCharCode(0)).join('');
+          nextAttachments.push({
+            id: `${file.name}-${file.lastModified}-${file.size}`,
+            name: file.name,
+            size: file.size,
+            extension: fileExtension(file.name),
+            kind: 'text',
+            content,
+          });
+        } catch (error) {
+          errors.push(`${file.name} ${String(error instanceof Error ? error.message : error)}`);
+        }
         continue;
       }
-
-      const content = (await file.text()).split(String.fromCharCode(0)).join('');
+      if (file.size > MAX_MEDIA_BYTES) {
+        errors.push(`${file.name} 超过媒体附件 ${formatFileSize(MAX_MEDIA_BYTES)} 限制。`);
+        continue;
+      }
+      // 音频格式校验：llama-server 只接受 wav / mp3
+      if (kind === 'audio') {
+        const audioError = validateAudioExt(file.name);
+        if (audioError) {
+          errors.push(audioError);
+          continue;
+        }
+      }
+      const dataUrl = await readFileAsDataUrl(file);
       nextAttachments.push({
         id: `${file.name}-${file.lastModified}-${file.size}`,
         name: file.name,
         size: file.size,
         extension: fileExtension(file.name),
-        content,
+        kind,
+        mimeType: file.type || undefined,
+        dataUrl,
       });
     }
 
@@ -246,15 +327,53 @@ export default function ChatPage() {
 
     for (const path of paths) {
       const name = fileNameFromPath(path);
+      const ext = fileExtension(name);
+      const kind = classifyAttachmentByName(name);
+      if (!kind) {
+        errors.push(`${name} 不是支持的文本、代码、数据、图片、音频或视频文件。`);
+        continue;
+      }
       try {
-        const content = (await readDesktopFileContent(path)).split(String.fromCharCode(0)).join('');
-        nextAttachments.push({
-          id: `${path}-${Date.now()}-${nextAttachments.length}`,
-          name,
-          size: new Blob([content]).size,
-          extension: fileExtension(name),
-          content,
-        });
+        if (kind !== 'text') {
+          const media = await readDesktopMedia(path);
+          if (media.byte_size > MAX_MEDIA_BYTES) {
+            errors.push(`${name} 超过媒体附件 ${formatFileSize(MAX_MEDIA_BYTES)} 限制。`);
+            continue;
+          }
+          // 音频格式校验：llama-server 只接受 wav / mp3
+          if (kind === 'audio') {
+            const audioError = validateAudioExt(name);
+            if (audioError) {
+              errors.push(audioError);
+              continue;
+            }
+          }
+          nextAttachments.push({
+            id: `${path}-${Date.now()}-${nextAttachments.length}`,
+            name,
+            size: media.byte_size,
+            extension: ext,
+            kind,
+            path,
+            mimeType: media.mime_type,
+            dataUrl: `data:${media.mime_type};base64,${media.data_base64}`,
+          });
+        } else {
+          const content = (await readDesktopFileContent(path)).split(String.fromCharCode(0)).join('');
+          const size = new Blob([content]).size;
+          if (size > MAX_ATTACHMENT_BYTES) {
+            errors.push(`${name} 超过文本附件 ${formatFileSize(MAX_ATTACHMENT_BYTES)} 限制。`);
+            continue;
+          }
+          nextAttachments.push({
+            id: `${path}-${Date.now()}-${nextAttachments.length}`,
+            name,
+            size,
+            extension: ext,
+            kind: 'text',
+            content,
+          });
+        }
       } catch (error) {
         errors.push(`${name} ${String(error instanceof Error ? error.message : error)}`);
       }
@@ -342,7 +461,49 @@ export default function ChatPage() {
   const handleSend = async () => {
     if ((!inputText.trim() && pendingAttachments.length === 0) || !activeModel || !canChat || isGenerating) return;
     shouldStickToBottomRef.current = true;
-    const prompt = buildPromptWithAttachments(inputText.trim(), pendingAttachments);
+
+    const textAttachments = pendingAttachments.filter((a): a is TextAttachment => a.kind === 'text');
+    const mediaAttachments = pendingAttachments.filter((a): a is MediaAttachment => a.kind !== 'text');
+
+    const mediaParts: ChatMessageContentPart[] = [];
+    const sendErrors: string[] = [];
+    for (const media of mediaAttachments) {
+      let dataUrl = media.dataUrl;
+      if (!dataUrl && media.path) {
+        try {
+          const payload = await readDesktopMedia(media.path);
+          dataUrl = `data:${payload.mime_type};base64,${payload.data_base64}`;
+        } catch (error) {
+          sendErrors.push(`${media.name} ${String(error instanceof Error ? error.message : error)}`);
+          continue;
+        }
+      }
+      if (!dataUrl) {
+        sendErrors.push(`${media.name} 无法找到媒体数据，请重新添加文件。`);
+        continue;
+      }
+      mediaParts.push(attachmentToMultimodalPart(media, dataUrl));
+    }
+    if (sendErrors.length > 0) {
+      setAttachmentError(sendErrors.join(' '));
+      return;
+    }
+    // 媒体附件能力校验
+    const imageOrVideoParts = mediaAttachments.filter((a) => a.kind === 'image' || a.kind === 'video');
+    const audioParts = mediaAttachments.filter((a) => a.kind === 'audio');
+    if (imageOrVideoParts.length > 0 && !activeModel.supportsVision) {
+      setAttachmentError('当前模型不支持图片/视频输入（未检测到 mmproj 文件）。');
+      return;
+    }
+    if (audioParts.length > 0 && !activeModel.supportsAudio) {
+      setAttachmentError('当前模型不支持音频输入。');
+      return;
+    }
+    const multimodal = buildMultimodalUserMessage(inputText.trim(), textAttachments, mediaParts);
+    const displayContent = multimodal.kind === 'multimodal'
+      ? (inputText.trim() || `${mediaAttachments.length} 个附件`)
+      : (multimodal.text ?? '');
+
     const session = activeSession ?? createChatSession(CHAT_HISTORY_MODEL_ID, '新对话', activeModelSnapshot);
     if (!activeSession) {
       dispatch({ type: 'CREATE_CHAT_SESSION', payload: { session } });
@@ -362,7 +523,8 @@ export default function ChatPage() {
     const userMsg = {
       id: `msg-${Date.now()}-user`,
       role: 'user' as const,
-      content: prompt,
+      content: displayContent,
+      multimodalContent: multimodal.kind === 'multimodal' ? multimodal.content : undefined,
       timestamp: Date.now(),
     };
 
@@ -409,7 +571,7 @@ export default function ChatPage() {
         signal: abortController.signal,
         messages: [...modelMessages, userMsg].map((msg) => ({
           role: msg.role,
-          content: msg.content,
+          content: msg.multimodalContent ?? msg.content,
         })),
         onToken: (token) => {
           streamedContent += token;
@@ -569,7 +731,7 @@ export default function ChatPage() {
         signal: abortController.signal,
         messages: nextHistory.map((message) => ({
           role: message.role,
-          content: message.content,
+          content: message.multimodalContent ?? message.content,
         })),
         onToken: (token) => {
           streamedContent += token;
@@ -731,6 +893,26 @@ export default function ChatPage() {
     });
   };
 
+  const handleExportSession = (sessionId: string) => {
+    const session = chatSessions.find((s) => s.id === sessionId);
+    if (!session) return;
+
+    // 弹出选择导出格式的对话框
+    const format = prompt('选择导出格式：输入 md 导出为 Markdown，输入 json 导出为 JSON', 'md');
+    if (!format) return;
+
+    const safeTitle = session.title.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50);
+    const dateStr = new Date(session.createdAt).toISOString().slice(0, 10);
+
+    if (format.toLowerCase() === 'json') {
+      const content = exportSessionAsJson(session);
+      downloadFile(content, `${safeTitle}-${dateStr}.json`, 'application/json');
+    } else {
+      const content = exportSessionAsMarkdown(session);
+      downloadFile(content, `${safeTitle}-${dateStr}.md`, 'text/markdown');
+    }
+  };
+
   const handleSelectionMode = () => {
     setSelectionMode((value) => !value);
     setSelectedSessionIds(new Set());
@@ -819,7 +1001,7 @@ export default function ChatPage() {
             <div className="rounded-xl border border-[#E2DFD6] bg-[#FBFAF6] px-5 py-4 text-center shadow-lg dark:border-white/10 dark:bg-[#1C1A16]">
               <FileText className="mx-auto mb-2 h-6 w-6 text-[#D7663E]" />
               <div className="text-[15px] font-semibold text-[#403C32] dark:text-[#F3EBDD]">松开即可上传到当前对话</div>
-              <div className="mt-1 text-[13px] text-[#8C8576] dark:text-[#A9A095]">支持文本、代码、JSON、CSV、Markdown 等文件</div>
+              <div className="mt-1 text-[13px] text-[#8C8576] dark:text-[#A9A095]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
             </div>
           </motion.div>
         )}
@@ -839,19 +1021,21 @@ export default function ChatPage() {
         onDeleteSelectedSessions={handleDeleteSelectedSessions}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onExportSession={handleExportSession}
         onOpenGlobalSettings={() => {
           if (typeof window !== 'undefined') {
             window.sessionStorage.setItem('agent-llm-settings-return-view', 'chat');
           }
           dispatch({ type: 'SET_VIEW', payload: 'settings' });
         }}
-        onOpenImage={() => dispatch({ type: 'SET_VIEW', payload: 'image' })}
         onOpenModelLoad={handleOpenModelLoad}
         onToggleTheme={() => dispatch({ type: 'TOGGLE_THEME' })}
         onToggleCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
         onSwitchToModel={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
         theme={state.theme}
         sidebarWidth={sidebarWidth}
+        ctxPercent={ctxPercent}
+        vramPercent={vramPercent}
       />
 
       <section className="relative grid min-w-0 flex-1 grid-rows-[64px_minmax(0,1fr)] overflow-hidden bg-[#FFFDF8] dark:bg-[#24211D]">
@@ -926,7 +1110,7 @@ export default function ChatPage() {
             if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) releaseAutoScroll();
           }}
           tabIndex={-1}
-          className="min-h-0 overflow-y-auto px-[clamp(22px,6vw,88px)] pb-[clamp(180px,24vh,280px)] pt-8"
+          className="min-h-0 overflow-y-auto px-[clamp(22px,6vw,88px)] pb-[clamp(120px,16vh,180px)] pt-8"
         >
           {modelMessages.length === 0 ? (
             <div className="flex h-full items-center justify-center text-center">
@@ -956,7 +1140,24 @@ export default function ChatPage() {
           )}
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-[clamp(16px,5vw,56px)] pb-5 pt-6">
+        <AnimatePresence>
+          {showJumpToBottom && (
+            <motion.button
+              key="jump-to-bottom"
+              initial={{ opacity: 0, scale: 0.8, y: 6 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.8, y: 6 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+              onClick={jumpToBottom}
+              className="absolute bottom-[clamp(120px,16vh,180px)] right-[clamp(22px,6vw,88px)] z-30 flex h-10 w-10 items-center justify-center rounded-full border border-[#D8D2C5] bg-[#FBFAF6] text-[#6F685A] shadow-[0_4px_14px_rgba(64,60,50,0.18)] transition-colors hover:bg-[#F1EDE4] hover:text-[#403C32] dark:border-white/[0.12] dark:bg-[#1F1D19] dark:text-[#D8D0C3] dark:hover:bg-white/[0.12] dark:hover:text-[#F3EBDD]"
+              title="滚动到最底部"
+            >
+              <ArrowDown className="h-4 w-4" />
+            </motion.button>
+          )}
+        </AnimatePresence>
+
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-[clamp(16px,5vw,56px)] pb-4 pt-3">
           <div className="pointer-events-auto mx-auto w-full max-w-[860px] min-w-0">
             {(pendingAttachments.length > 0 || attachmentError || stopMessage) && (
               <div className="mb-2 space-y-2">
@@ -990,7 +1191,7 @@ export default function ChatPage() {
               </div>
             )}
 
-            <div className="min-h-[104px] rounded-xl border border-[#DCD7CC] bg-[#F7F4EC] shadow-[0_10px_28px_rgba(64,60,50,0.10)] dark:border-white/[0.09] dark:bg-[#2D2923] dark:shadow-[0_10px_28px_rgba(0,0,0,0.26)]">
+            <div className="min-h-[88px] rounded-xl border border-[#DCD7CC] bg-[#F7F4EC] shadow-[0_10px_28px_rgba(64,60,50,0.10)] dark:border-white/[0.09] dark:bg-[#2D2923] dark:shadow-[0_10px_28px_rgba(0,0,0,0.26)]">
               <textarea
                 ref={textareaRef}
                 value={inputText}
@@ -1006,7 +1207,7 @@ export default function ChatPage() {
                   ref={fileInputRef}
                   type="file"
                   multiple
-                  accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.cs,.php,.rb,.swift,.kt,.kts,.sql,.toml,.yaml,.yml,.ini,.env,.bat,.ps1,.sh,text/*,application/json,application/xml"
+                  accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.cs,.php,.rb,.swift,.kt,.kts,.sql,.toml,.yaml,.yml,.ini,.env,.bat,.ps1,.sh,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.wav,.mp3,.m4a,.aac,.ogg,.flac,.opus,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ogv,text/*,application/json,application/xml,image/*,audio/*,video/*"
                   className="hidden"
                   onChange={(event) => void handleAttachFiles(event)}
                 />

@@ -6,7 +6,7 @@
 
 ---
 
-## [Unreleased]
+## [0.2.0] - 2026-07-07
 
 本轮以性能、安全、UI 一致性、深色模式为主线，未改动任何模型加载/推理默认参数（`ctx`/`ngl`/KV/batch/parallel/max token/reasoning 等）。
 

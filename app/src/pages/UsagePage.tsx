@@ -1,5 +1,5 @@
-import { useMemo } from 'react';
-import { Activity, BarChart3, CalendarDays, Gauge, Hash, PieChart, Trophy } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Activity, BarChart3, CalendarDays, ChevronDown, ChevronUp, Gauge, Hash, PieChart, Trophy } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import type { LucideIcon } from 'lucide-react';
 
@@ -64,6 +64,7 @@ function buildHeatmapWeeks(cells: Array<string | null>): HeatmapWeek[] {
 
 export default function UsagePage() {
   const { state } = useApp();
+  const [usageExpanded, setUsageExpanded] = useState(false);
   const days = useMemo(() => yearDays(), []);
   const cells = useMemo(() => heatmapCells(days), [days]);
   const heatmapWeeks = useMemo(() => buildHeatmapWeeks(cells), [cells]);
@@ -156,25 +157,25 @@ export default function UsagePage() {
                 {/* 月份标签 */}
                 <div className="mb-1.5 flex pl-9 text-[10px] leading-none text-[#9A9082] dark:text-[#7A7264]">
                   {heatmapWeeks.map((week, weekIndex) => (
-                    <div key={weekIndex} className="w-[15px] flex-shrink-0">
+                    <div key={weekIndex} className="w-[20px] flex-shrink-0">
                       {week.monthLabel ? <span className="relative -left-px">{week.monthLabel}</span> : null}
                     </div>
                   ))}
                 </div>
                 <div className="flex">
                   {/* 星期标签 */}
-                  <div className="mr-1.5 flex w-7 flex-shrink-0 flex-col gap-[3px] text-[10px] leading-[12px] text-[#9A9082] dark:text-[#7A7264]">
+                  <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col gap-[4px] text-[10px] leading-[16px] text-[#9A9082] dark:text-[#7A7264]">
                     {WEEKDAY_LABELS.map((label, rowIndex) => (
-                      <div key={rowIndex} className="flex h-[12px] items-center justify-end pr-0.5">{rowIndex % 2 === 1 ? label : ''}</div>
+                      <div key={rowIndex} className="flex h-[16px] items-center justify-end pr-0.5">{rowIndex % 2 === 1 ? label : ''}</div>
                     ))}
                   </div>
                   {/* 格子 */}
-                  <div className="flex gap-[3px]">
+                  <div className="flex gap-[4px]">
                     {heatmapWeeks.map((week, weekIndex) => (
-                      <div key={weekIndex} className="flex flex-col gap-[3px]">
+                      <div key={weekIndex} className="flex flex-col gap-[4px]">
                         {week.days.map((day, rowIndex) => {
                           if (!day) {
-                            return <div key={`blank-${weekIndex}-${rowIndex}`} className="h-[12px] w-[12px]" />;
+                            return <div key={`blank-${weekIndex}-${rowIndex}`} className="h-[16px] w-[16px]" />;
                           }
                           const tokens = dailyTokensByDay.get(day) ?? 0;
                           const level = tokenLevel(tokens, maxDayTokens);
@@ -182,7 +183,7 @@ export default function UsagePage() {
                             <div
                               key={day}
                               title={`${day}：${tokens.toLocaleString()} 个 Token`}
-                              className="h-[12px] w-[12px] flex-shrink-0 rounded-[2px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[#D06646]/60"
+                              className="h-[16px] w-[16px] flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[#D06646]/60"
                               style={{ background: heatmapPalette[level] }}
                             />
                           );
@@ -197,7 +198,7 @@ export default function UsagePage() {
                   {heatmapPalette.map((color, index) => (
                     <span
                       key={index}
-                      className="h-[11px] w-[11px] rounded-[2px]"
+                      className="h-[14px] w-[14px] rounded-[3px]"
                       style={{ background: color }}
                     />
                   ))}
@@ -224,7 +225,7 @@ export default function UsagePage() {
                   color,
                 }))} />
                 <div className="space-y-2.5">
-                  {modelUsage.map(({ id, name, color, usage }, index) => (
+                  {(usageExpanded ? modelUsage : modelUsage.slice(0, 5)).map(({ id, name, color, usage }, index) => (
                     <UsageRankRow
                       key={id}
                       rank={index + 1}
@@ -237,6 +238,16 @@ export default function UsagePage() {
                       lastUsedAt={usage.lastUsedAt}
                     />
                   ))}
+                  {modelUsage.length > 5 && (
+                    <button
+                      type="button"
+                      onClick={() => setUsageExpanded((value) => !value)}
+                      className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] py-2 text-xs font-medium text-[#7D766B] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#A9A095] dark:hover:bg-white/[0.07]"
+                    >
+                      {usageExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      {usageExpanded ? '收起' : `展开全部（共 ${modelUsage.length} 个）`}
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (

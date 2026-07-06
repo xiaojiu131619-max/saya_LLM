@@ -29,7 +29,7 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     ropeFreqScale: 0,
     seedEnabled: false,
     seed: -1,
-    speculativeDecoding: 'off',
+    speculativeDecoding: model.supportsMtp ? 'mtp' : 'off',
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -42,6 +42,11 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
 
 function formatNumber(value?: number) {
   return value && value > 0 ? value.toLocaleString() : '未读取';
+}
+
+function fileNameFromPath(path: string) {
+  const slash = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  return slash >= 0 ? path.slice(slash + 1) : path;
 }
 
 function formatCtx(value: number) {
@@ -412,13 +417,19 @@ export default function ModelLoadPage() {
                       description="从 GGUF expert_count 读取"
                       value={model.modelType === 'moe' ? formatNumber(model.expertCount) : '稠密模型'}
                     />
-                    <SelectParamRow
-                      label="推测解码"
-                      description="当前基础页仅保留关闭状态"
-                      value={config.speculativeDecoding}
-                      onChange={(v) => updateConfig('speculativeDecoding', v)}
-                      options={[{ value: 'off', label: '关闭' }]}
-                    />
+                    {model.supportsMtp && (
+                      <ToggleParamRow
+                        label="推测解码（MTP）"
+                        description={
+                          model.mtpDraftPath
+                            ? `启用同目录草稿模型：${fileNameFromPath(model.mtpDraftPath)}`
+                            : '未检测到 mtp 草稿模型，无法启用'
+                        }
+                        badge="实验"
+                        checked={config.speculativeDecoding === 'mtp' && Boolean(model.mtpDraftPath)}
+                        onChange={(v) => updateConfig('speculativeDecoding', v && model.mtpDraftPath ? 'mtp' : 'off')}
+                      />
+                    )}
                     <TextParamRow
                       label="聊天模板"
                       description="留空时使用 GGUF 元数据（metadata）中的模板"
@@ -563,6 +574,42 @@ const CACHE_TYPES = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5
 
 function rowBorderClass() {
   return 'border-b border-[#E3DFD6] last:border-b-0 dark:border-white/[0.08]';
+}
+
+/**
+ * 统一的开关滑块。两种尺寸：默认（h-6 w-11）与小号（h-5 w-9，用于复选场景）。
+ * 圆点用 CSS transform 平滑左右滑动。
+ */
+function ToggleSwitch({ checked, onChange, disabled, size = 'md', ariaLabel }: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+  size?: 'sm' | 'md';
+  ariaLabel?: string;
+}) {
+  const dims = size === 'sm'
+    ? { track: 'h-5 w-9', thumb: 'h-4 w-4', travel: 16 }
+    : { track: 'h-6 w-11', thumb: 'h-5 w-5', travel: 20 };
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={() => !disabled && onChange(!checked)}
+      className={`relative inline-flex ${dims.track} flex-shrink-0 items-center rounded-full border transition-colors duration-200 disabled:opacity-50 ${
+        checked
+          ? 'border-[#3B82F6] bg-[#3B82F6]'
+          : 'border-[#C8C1B4] bg-[#D8D2C5] dark:border-white/[0.18] dark:bg-white/[0.10]'
+      }`}
+    >
+      <span
+        className={`inline-block ${dims.thumb} rounded-full bg-white shadow-sm transition-transform duration-200 ease-out`}
+        style={{ transform: `translateX(${checked ? dims.travel : 2}px)` }}
+      />
+    </button>
+  );
 }
 
 function ParamLabel({ label, description, badge }: { label: string; description?: string; badge?: string }) {
@@ -860,19 +907,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
         description="有消息输入或模型输出时会重新计时。"
       />
       <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={checked}
-          onClick={() => onToggle(!checked)}
-          className={`flex h-6 w-11 flex-shrink-0 items-center rounded-full border p-0.5 transition-colors ${
-            checked
-              ? 'justify-end border-[#3B82F6] bg-[#3B82F6]'
-              : 'justify-start border-[#C8C1B4] bg-[#D8D2C5] dark:border-white/[0.18] dark:bg-white/[0.10]'
-          }`}
-        >
-          <span className="h-4.5 w-4.5 rounded-full bg-white shadow-sm" />
-        </button>
+        <ToggleSwitch checked={checked} onChange={onToggle} ariaLabel="空闲时自动卸载" />
         <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[#2F2C26] dark:text-[#F3EBDD]' : 'text-[#8C8576] dark:text-[#A9A095]'}`}>
           <span className="whitespace-nowrap">没有消息输入和输出的</span>
           <input
@@ -896,19 +931,9 @@ function ToggleParamRow({ label, description, badge, checked, onChange }: { labe
   return (
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} badge={badge} />
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`flex h-6 w-11 flex-shrink-0 items-center rounded-full border p-0.5 transition-colors lg:justify-self-end ${
-          checked
-            ? 'justify-end border-[#3B82F6] bg-[#3B82F6]'
-            : 'justify-start border-[#C8C1B4] bg-[#D8D2C5] dark:border-white/[0.18] dark:bg-white/[0.10]'
-        }`}
-      >
-        <span className="h-4.5 w-4.5 rounded-full bg-white shadow-sm" />
-      </button>
+      <div className="flex justify-end">
+        <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
+      </div>
     </div>
   );
 }
@@ -957,13 +982,7 @@ function OptionalNumberParamRow({ label, description, enabled, value, onToggle, 
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
       <div className="flex items-center gap-2 lg:justify-end">
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={enabled}
-          onClick={() => onToggle(!enabled)}
-          className={`h-4 w-4 rounded-md border transition-colors ${enabled ? 'border-[#3B82F6] bg-[#3B82F6]' : 'border-[#AFA79A] bg-[#EEEAE2] dark:border-white/[0.18] dark:bg-white/[0.10]'}`}
-        />
+        <ToggleSwitch size="sm" checked={enabled} onChange={onToggle} ariaLabel={label} />
         {enabled ? (
           <input
             type="number"
@@ -988,25 +1007,6 @@ function ReadOnlyParamRow({ label, description, value }: { label: string; descri
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
       <span className="mono-font text-sm font-medium text-[#2F2C26] dark:text-[#F3EBDD] lg:justify-self-end lg:text-right">{value}</span>
-    </div>
-  );
-}
-
-function SelectParamRow({ label, description, value, onChange, options }: {
-  label: string; description?: string; value: string; onChange: (v: 'off') => void; options: Array<{ value: 'off'; label: string }>;
-}) {
-  return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
-      <ParamLabel label={label} description={description} />
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value as 'off')}
-        className="h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD] lg:justify-self-end"
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
     </div>
   );
 }
@@ -1037,13 +1037,7 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} badge={badge} />
       <div className="flex items-center gap-2 lg:justify-end">
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={enabled}
-          onClick={() => onToggle(!enabled)}
-          className={`h-4 w-4 rounded-md border transition-colors ${enabled ? 'border-[#3B82F6] bg-[#3B82F6]' : 'border-[#AFA79A] bg-[#EEEAE2] dark:border-white/[0.18] dark:bg-white/[0.10]'}`}
-        />
+        <ToggleSwitch size="sm" checked={enabled} onChange={onToggle} ariaLabel={label} />
         {enabled ? (
           <select
             value={value}
@@ -1064,15 +1058,12 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
 
 function CheckboxParamRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F8F6F1] dark:text-[#F3EBDD] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F8F6F1] dark:text-[#F3EBDD] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <span className="min-w-0 truncate font-medium">{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-4 w-4 accent-[#3B82F6] lg:justify-self-end"
-      />
-    </label>
+      <div className="flex justify-end">
+        <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
+      </div>
+    </div>
   );
 }
 

@@ -56,6 +56,7 @@ pub struct AppConfig {
     pub tools: Option<String>,
     pub last_model_path: Option<String>,
     pub tune_history: Vec<TuneHistoryEntry>,
+    pub close_to_tray: bool,
 }
 
 impl Default for AppConfig {
@@ -75,6 +76,7 @@ impl Default for AppConfig {
             tools: None,
             last_model_path: None,
             tune_history: Vec::new(),
+            close_to_tray: true,
         }
     }
 }

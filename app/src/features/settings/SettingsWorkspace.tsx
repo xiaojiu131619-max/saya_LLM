@@ -1,25 +1,28 @@
 import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, Settings, Wrench } from 'lucide-react';
+import { ArrowLeft, Settings, Terminal, Wrench } from 'lucide-react';
+import type { ComponentType } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
 import SettingsPage from '@/pages/SettingsPage';
 import ToolsPage from '@/pages/ToolsPage';
-import UsagePage from '@/pages/UsagePage';
+import LogsPage from '@/pages/LogsPage';
 
-const settingsTabs: Array<{ id: ViewType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+const settingsTabs: Array<{ id: ViewType; label: string; icon: ComponentType<{ className?: string }> }> = [
   { id: 'settings', label: '设置', icon: Settings },
   { id: 'tools', label: '工具', icon: Wrench },
-  { id: 'usage', label: '使用详情', icon: BarChart3 },
+  { id: 'logs', label: '运行日志', icon: Terminal },
 ];
 
 export default function SettingsWorkspace() {
   const { state, dispatch } = useApp();
-  const activeView = state.currentView === 'tools' || state.currentView === 'usage' ? state.currentView : 'settings';
+  const activeView = state.currentView === 'tools' || state.currentView === 'logs'
+    ? state.currentView
+    : 'settings';
   const returnToModel = () => {
     const storedView = typeof window !== 'undefined'
       ? window.sessionStorage.getItem('agent-llm-settings-return-view')
       : null;
-    const targetView = storedView === 'modelLoad' || storedView === 'home' || storedView === 'chat' || storedView === 'image' ? storedView : 'home';
+    const targetView = storedView === 'modelLoad' || storedView === 'home' || storedView === 'chat' ? storedView : 'home';
     if (typeof window !== 'undefined') {
       window.sessionStorage.removeItem('agent-llm-settings-return-view');
     }
@@ -28,8 +31,8 @@ export default function SettingsWorkspace() {
 
   const renderPanel = () => {
     switch (activeView) {
-      case 'usage':
-        return <UsagePage />;
+      case 'logs':
+        return <LogsPage />;
       case 'tools':
         return <ToolsPage />;
       default:

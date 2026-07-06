@@ -26,6 +26,10 @@ pub struct GgufMetadata {
     pub key_length: Option<u64>,
     pub value_length: Option<u64>,
     pub metadata_entries: Vec<(String, String)>,
+    // 真实读出的能力信号：来自 HuggingFace 模型卡的 tags 数组（包含 vision / tool-use 等）
+    pub tags: Vec<String>,
+    // chat_template 原文，用来判断模型是否有工具调用语法
+    pub chat_template: Option<String>,
 }
 
 fn adv(buf: &[u8], p: &mut usize, n: usize) -> Result<()> {
@@ -188,6 +192,8 @@ pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
     let mut hckv: Option<u64> = None;
     let mut klen: Option<u64> = None;
     let mut vlen: Option<u64> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut chat_template: Option<String> = None;
     let mut entries: Vec<(String, String)> = Vec::new();
 
     for _ in 0..kvn {
@@ -210,7 +216,8 @@ pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
             || key.ends_with(".attention.head_count_kv")
             || key.ends_with(".attention.key_length")
             || key.ends_with(".attention.value_length")
-            || key.ends_with(".nextn_predict_layers");
+            || key.ends_with(".nextn_predict_layers")
+            || key == "tokenizer.chat_template";
 
         if !keep {
             skip(&buf, &mut p, ty)?;
@@ -236,6 +243,17 @@ pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
             }
             "general.quantization_version" => {
                 qv = v.as_u64().map(|n| n as u32);
+            }
+            "general.tags" => {
+                if let Some(arr) = v.as_array() {
+                    tags = arr
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_ascii_lowercase()))
+                        .collect();
+                }
+            }
+            "tokenizer.chat_template" => {
+                chat_template = v.as_str().map(|s| s.to_string());
             }
             _ => {
                 if key.ends_with(".block_count") {
@@ -279,6 +297,8 @@ pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
         key_length: klen,
         value_length: vlen,
         metadata_entries: entries,
+        tags,
+        chat_template,
     })
 }
 
@@ -288,7 +308,22 @@ fn value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Bool(v) => Some(v.to_string()),
         serde_json::Value::Number(v) => Some(v.to_string()),
         serde_json::Value::String(v) => Some(v.clone()),
-        serde_json::Value::Array(v) => Some(format!("array[{}]", v.len())),
+        serde_json::Value::Array(v) => {
+            // 如果数组里全是短字符串（典型的 general.tags / general.languages），
+            // 直接拼接成可读的列表，方便前端展示和后续判定使用。
+            let all_short_strings = v.len() <= 32
+                && v.iter()
+                    .all(|item| item.as_str().is_some_and(|s| s.len() <= 64));
+            if all_short_strings {
+                let items: Vec<String> = v
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect();
+                Some(items.join(", "))
+            } else {
+                Some(format!("array[{}]", v.len()))
+            }
+        }
         serde_json::Value::Object(_) => Some("object".to_string()),
     }
 }

@@ -1,7 +1,7 @@
 pub mod benchmark;
+pub mod comfy;
 pub mod config;
 pub mod hardware;
-pub mod image;
 pub mod model;
 pub mod server;
 pub mod system;

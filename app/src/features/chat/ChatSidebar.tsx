@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   CheckSquare,
-  Image,
+  Download,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -27,14 +27,16 @@ interface ChatSidebarProps {
   onDeleteSelectedSessions: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onExportSession: (sessionId: string) => void;
   onOpenGlobalSettings: () => void;
-  onOpenImage: () => void;
   onOpenModelLoad: () => void;
   onToggleTheme: () => void;
   onToggleCollapse: () => void;
   onSwitchToModel: () => void;
   theme: ThemeType;
   sidebarWidth: number;
+  ctxPercent?: number;
+  vramPercent?: number;
 }
 
 export default function ChatSidebar({
@@ -52,14 +54,16 @@ export default function ChatSidebar({
   onDeleteSelectedSessions,
   onSelectSession,
   onDeleteSession,
+  onExportSession,
   onOpenGlobalSettings,
-  onOpenImage,
   onOpenModelLoad,
   onToggleTheme,
   onToggleCollapse,
   onSwitchToModel,
   theme,
   sidebarWidth,
+  ctxPercent,
+  vramPercent,
 }: ChatSidebarProps) {
   const expandedTransition = { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const };
   const modelStatusLabel = canChat ? '可用' : activeModel ? '已加载' : '未加载';
@@ -181,6 +185,7 @@ export default function ChatSidebar({
                       selectionMode={selectionMode}
                       onSelect={onSelectSession}
                       onDelete={onDeleteSession}
+                      onExport={onExportSession}
                     />
                   ))}
                 </div>
@@ -211,12 +216,17 @@ export default function ChatSidebar({
                 <span className={`h-2 w-2 rounded-full ${modelStatusDotClass}`} />
                 {canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
               </div>
+              {(ctxPercent !== undefined || vramPercent !== undefined) && (
+                <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+                  <UsageChip label="ctx" percent={ctxPercent} />
+                  <UsageChip label="显存" percent={vramPercent} />
+                </div>
+              )}
             </>
           )}
         </button>
         <div className={`flex items-center gap-2 transition-all duration-200 ${collapsed ? 'flex-col justify-center' : ''}`}>
           <ThemeToggleButton theme={theme} onClick={onToggleTheme} />
-          <MiniToolButton icon={Image} label="生图" onClick={onOpenImage} />
           <MiniToolButton icon={Settings} label="设置" onClick={onOpenGlobalSettings} />
           <AnimatePresence initial={false}>
             {!collapsed && <motion.span {...expandedMotion} className="ml-auto text-xs text-[#8C8576] dark:text-[#82786B]">Agent LLM</motion.span>}
@@ -227,7 +237,7 @@ export default function ChatSidebar({
   );
 }
 
-function SessionRow({ session, selected, checked, collapsed, selectionMode, onSelect, onDelete }: {
+function SessionRow({ session, selected, checked, collapsed, selectionMode, onSelect, onDelete, onExport }: {
   session: ChatSession;
   selected: boolean;
   checked: boolean;
@@ -235,6 +245,7 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
   selectionMode: boolean;
   onSelect: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onExport: (sessionId: string) => void;
 }) {
   return (
     <button
@@ -257,25 +268,46 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
         </span>
       )}
       {!selectionMode && !collapsed && (
-        <span
-          role="button"
-          tabIndex={0}
-          onClick={(event) => {
-            event.stopPropagation();
-            onDelete(session.id);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(event) => {
+              event.stopPropagation();
+              onExport(session.id);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                event.stopPropagation();
+                onExport(session.id);
+              }
+            }}
+            className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-lg text-[#8A8374] transition-colors hover:bg-[#D8D2C5] hover:text-[#5A6CFF] dark:text-[#A9A095] dark:hover:bg-white/[0.08] dark:hover:text-[#8B9FFF]"
+            title="导出会话"
+          >
+            <Download className="h-4 w-4" />
+          </span>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(event) => {
               event.stopPropagation();
               onDelete(session.id);
-            }
-          }}
-          className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-lg text-[#8A8374] opacity-0 transition-colors hover:bg-[#D8D2C5] hover:text-[#C44E36] group-hover:opacity-100 dark:text-[#A9A095] dark:hover:bg-[#3A241C] dark:hover:text-[#F0987C]"
-          title="删除会话"
-        >
-          <Trash2 className="h-4 w-4" />
-        </span>
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                event.stopPropagation();
+                onDelete(session.id);
+              }
+            }}
+            className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-lg text-[#8A8374] transition-colors hover:bg-[#D8D2C5] hover:text-[#C44E36] dark:text-[#A9A095] dark:hover:bg-[#3A241C] dark:hover:text-[#F0987C]"
+            title="删除会话"
+          >
+            <Trash2 className="h-4 w-4" />
+          </span>
+        </div>
       )}
     </button>
   );
@@ -294,5 +326,24 @@ function MiniToolButton({ icon: Icon, label, onClick }: {
     >
       <Icon className="h-4 w-4" />
     </button>
+  );
+}
+
+function UsageChip({ label, percent }: { label: string; percent?: number }) {
+  const has = percent !== undefined && Number.isFinite(percent) && percent >= 0;
+  const value = has ? `${Math.round(percent!)}%` : '--';
+  return (
+    <div className="flex items-center gap-1.5 rounded-md border border-[#E4DFD5] bg-[#FBFAF6] px-1.5 py-1 dark:border-white/[0.08] dark:bg-[#1C1A16]">
+      <span className="text-[#8C8576] dark:text-[#A9A095]">{label}</span>
+      <div className="ml-auto flex min-w-0 flex-1 items-center gap-1">
+        <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.10]">
+          <div
+            className="h-full rounded-full bg-[#D7663E] transition-[width] duration-300"
+            style={{ width: has ? `${Math.min(100, percent!)}%` : '0%' }}
+          />
+        </div>
+        <span className="mono-font flex-shrink-0 font-semibold text-[#403C32] dark:text-[#F3EBDD]">{value}</span>
+      </div>
+    </div>
   );
 }

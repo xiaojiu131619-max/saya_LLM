@@ -8,28 +8,23 @@ import {
   FolderX,
   Power,
   Palette,
-  Globe2,
-  KeyRound,
-  Copy,
   Database,
   AlertTriangle,
   Trash2,
   FolderOpen,
+  Monitor,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import ToggleSwitch from '@/components/ToggleSwitch';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import type { LucideIcon } from 'lucide-react';
+import { SettingRow, SettingSection } from '@/components/SettingSection';
 import type { ModelInfo } from '@/types';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 import {
   checkDesktopEngine,
   checkLatestLlamaRelease,
   addDesktopModelDir,
-  clearAllImageApiKeys,
   clearDesktopModelCache,
-  createExternalApiKey,
-  deleteExternalApiKey,
   getDesktopAppDataDir,
   getDesktopServerStatus,
   isDesktopRuntime,
@@ -38,21 +33,14 @@ import {
   removeDesktopModelDir,
   resetDesktopAppConfig,
   revealDesktopPath,
-  saveDesktopRuntimeSettings,
   scanDesktopModels,
+  setCloseToTray,
   stopDesktopServer,
   toFrontendModel,
   updateLlamaKernel,
   type DesktopEngineInfo,
   type LlamaReleaseInfo,
 } from '@/lib/desktop';
-
-interface SettingSectionProps {
-  title: string;
-  icon: LucideIcon;
-  children: React.ReactNode;
-  delay?: number;
-}
 
 // 内核下载源偏好：mirror=内置 GitHub 镜像加速，direct=直连 GitHub 官方。
 type KernelDownloadSource = 'mirror' | 'direct';
@@ -67,7 +55,7 @@ function loadKernelDownloadSource(): KernelDownloadSource {
   return 'mirror';
 }
 
-function kernelMirrorUrl(_source: KernelDownloadSource) {
+function kernelMirrorUrl() {
   return undefined;
 }
 
@@ -80,14 +68,12 @@ function kernelSourceDescription(source: KernelDownloadSource) {
 type DataActionKind =
   | 'clear-frontend-state'
   | 'clear-model-cache'
-  | 'clear-image-keys'
   | 'reset-app-config'
   | 'factory-reset';
 
-// 前端本地持久化的 localStorage key 清单：与 AppContext / ImagePage / SettingsPage 中的常量保持一致。
+// 前端本地持久化的 localStorage key 清单：与 AppContext / SettingsPage 中的常量保持一致。
 const FRONTEND_STORAGE_KEYS = [
   'agent-llm-local-state-v1',
-  'agent-llm-image-settings-v1',
   'agent-llm-kernel-download-source',
 ] as const;
 
@@ -106,43 +92,6 @@ function clearFrontendLocalStorage() {
       // localStorage 在隐私模式下可能不可写；尽量清；失败也继续。
     }
   }
-}
-
-function SettingSection({ title, icon: Icon, children, delay = 0 }: SettingSectionProps) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay, ease: [0.16, 1, 0.3, 1] }}
-      className="glass-panel p-5"
-    >
-      <div className="flex items-center gap-2.5 mb-4">
-        <Icon className="w-4.5 h-4.5 text-[#5A6CFF]" />
-        <h2 className="text-[15px] font-semibold text-primary-custom">{title}</h2>
-      </div>
-      <div className="space-y-4">{children}</div>
-    </motion.div>
-  );
-}
-
-interface SettingRowProps {
-  label: string;
-  description?: string;
-  children: React.ReactNode;
-}
-
-function SettingRow({ label, description, children }: SettingRowProps) {
-  return (
-    <div className="flex items-center justify-between py-2">
-      <div className="flex-1 min-w-0 mr-4">
-        <div className="text-sm text-primary-custom">{label}</div>
-        {description && (
-          <div className="text-xs text-secondary-custom mt-0.5">{description}</div>
-        )}
-      </div>
-      <div className="flex-shrink-0">{children}</div>
-    </div>
-  );
 }
 
 function formatBytes(bytes: number) {
@@ -171,17 +120,6 @@ function matchedBackendDescription(info: LlamaReleaseInfo | null, asset?: LlamaR
   return `本机匹配：${backend}${gpu}${cuda}${picked}`;
 }
 
-function clampPort(value: number) {
-  if (!Number.isFinite(value)) return 8080;
-  return Math.min(65535, Math.max(1, Math.round(value)));
-}
-
-function generateApiKey() {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  return `allm-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
 export default function SettingsPage() {
   const { state, dispatch } = useApp();
   const kernelSectionRef = useRef<HTMLDivElement | null>(null);
@@ -196,7 +134,6 @@ export default function SettingsPage() {
   // 共享的引擎/更新动作提示（用于检查更新、下载进度、错误等）。
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const [themeGroupsCollapsed, setThemeGroupsCollapsed] = useState(false);
-  const [newApiKey, setNewApiKey] = useState<string | null>(null);
   const [kernelDownloadSource, setKernelDownloadSource] = useState<KernelDownloadSource>(loadKernelDownloadSource);
   // 数据管理：当前要弹出确认对话框的清除类型；null 表示对话框关闭。
   const [pendingDataAction, setPendingDataAction] = useState<DataActionKind | null>(null);
@@ -274,80 +211,22 @@ export default function SettingsPage() {
     setServiceMessage(running ? 'llama-server 正在运行。' : 'llama-server 未运行。');
   };
 
-  const persistRuntimeSettings = async (port = state.serverPort, apiConfig = state.apiConfig) => {
+  const handleCloseToTrayChange = async (enabled: boolean) => {
+    dispatch({ type: 'SET_CLOSE_TO_TRAY', payload: enabled });
     if (!isDesktopRuntime()) {
-      setServiceMessage('请在 Tauri 桌面版中保存 API 设置。');
+      setServiceMessage('请在 Tauri 桌面版中设置托盘模式。');
       return;
     }
-
     try {
-      await saveDesktopRuntimeSettings({
-        defaultPort: clampPort(port),
-        apiEnabled: apiConfig.enabled,
-        apiHost: apiConfig.host || '0.0.0.0',
-      });
-      setServiceMessage('API 设置已保存，下一次加载模型时生效。');
+      await setCloseToTray(enabled);
+      setServiceMessage(enabled ? '已开启托盘模式，关闭窗口时将隐藏到系统托盘。' : '已关闭托盘模式，关闭窗口时将直接退出应用。');
     } catch (error) {
-      setServiceMessage(`API 设置保存失败：${String(error)}`);
+      setServiceMessage(`托盘模式设置失败：${String(error)}`);
     }
-  };
-
-  const updateApiConfig = (patch: Partial<typeof state.apiConfig>, persist = false) => {
-    const next = { ...state.apiConfig, ...patch };
-    dispatch({ type: 'SET_API_CONFIG', payload: patch });
-    if (persist) void persistRuntimeSettings(state.serverPort, next);
-  };
-
-  const handleApiEnabledChange = (enabled: boolean) => {
-    const host = enabled && (!state.apiConfig.host || state.apiConfig.host === '127.0.0.1')
-      ? '0.0.0.0'
-      : state.apiConfig.host || '0.0.0.0';
-    updateApiConfig({ enabled, host }, true);
-  };
-
-  const handlePortChange = (value: string) => {
-    const next = Number(value);
-    if (!Number.isFinite(next)) return;
-    dispatch({ type: 'SET_SERVER_PORT', payload: clampPort(next) });
-  };
-
-  const handleGenerateApiKey = () => {
-    const nextKey = generateApiKey();
-    if (!isDesktopRuntime()) {
-      setServiceMessage('请在 Tauri 桌面版中申请 API Key。');
-      return;
-    }
-    void createExternalApiKey(nextKey)
-      .then(() => {
-        setNewApiKey(nextKey);
-        const nextApiConfig = { ...state.apiConfig, hasApiKey: true, apiKey: nextKey };
-        dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: true, apiKey: nextKey } });
-        setServiceMessage('新的 API Key 已生成。请现在复制保存；关闭此提示后将无法再次查看。');
-        void persistRuntimeSettings(state.serverPort, nextApiConfig);
-      })
-      .catch((error) => {
-        setServiceMessage(`API Key 生成失败：${String(error)}`);
-      });
-  };
-
-  const handleDeleteApiKey = () => {
-    if (!isDesktopRuntime()) {
-      setServiceMessage('请在 Tauri 桌面版中撤销 API Key。');
-      return;
-    }
-    void deleteExternalApiKey()
-      .then(() => {
-        setNewApiKey(null);
-        dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: false, apiKey: undefined } });
-        setServiceMessage('API Key 已撤销。下一次加载模型时将不再要求外部请求鉴权。');
-        void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, hasApiKey: false, apiKey: undefined });
-      })
-      .catch((error) => {
-        setServiceMessage(`API Key 撤销失败：${String(error)}`);
-      });
   };
 
   const handleCopyApiExample = async () => {
+
     const auth = state.apiConfig.hasApiKey ? ` \\\n  -H "Authorization: Bearer <API_KEY>"` : '';
     const command = [
       `curl http://127.0.0.1:${state.serverPort}/v1/chat/completions \\`,
@@ -358,12 +237,7 @@ export default function SettingsPage() {
     await navigator.clipboard.writeText(command);
     setServiceMessage('已复制 OpenAI 兼容 API 调用示例。');
   };
-
-  const handleCopyNewApiKey = async () => {
-    if (!newApiKey) return;
-    await navigator.clipboard.writeText(newApiKey);
-    setServiceMessage('已复制新的 API Key。请妥善保存；之后只能重新申请。');
-  };
+  void handleCopyApiExample;
 
   const handleCheckEngine = async () => {
     if (!isDesktopRuntime()) {
@@ -415,7 +289,7 @@ export default function SettingsPage() {
         asset.browser_download_url,
         releaseInfo.version,
         useMirror,
-        kernelMirrorUrl(kernelDownloadSource)
+        kernelMirrorUrl()
       );
       setEngineMessage(result || 'llama.cpp 内核更新完成。');
       await handleCheckEngine();
@@ -444,16 +318,6 @@ export default function SettingsPage() {
     }
     const result = await clearDesktopModelCache();
     setDataMessage(result || '模型扫描缓存已清除。下次进入模型页将重新扫描。');
-  };
-
-  // 数据管理：清除所有生图供应商保存在系统 keyring 中的 API Key。
-  const handleClearImageKeys = async () => {
-    if (!isDesktopRuntime()) {
-      setDataMessage('请在 Tauri 桌面版中清除生图密钥。');
-      return;
-    }
-    const count = await clearAllImageApiKeys();
-    setDataMessage(`已清除 ${count} 个生图供应商的保存密钥。`);
   };
 
   // 数据管理：重置后端配置 + 撤销对外 API Key + 刷新前端状态以反映默认值。
@@ -485,7 +349,6 @@ export default function SettingsPage() {
       dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
     }
     await clearDesktopModelCache();
-    await clearAllImageApiKeys();
     await resetDesktopAppConfig();
     clearFrontendLocalStorage();
     setDataMessage('已执行出厂重置，应用即将刷新...');
@@ -521,9 +384,6 @@ export default function SettingsPage() {
       case 'clear-model-cache':
         await handleClearModelCache();
         break;
-      case 'clear-image-keys':
-        await handleClearImageKeys();
-        break;
       case 'reset-app-config':
         await handleResetAppConfig();
         break;
@@ -537,10 +397,6 @@ export default function SettingsPage() {
   };
 
   const selectedAsset = releaseInfo?.assets.find((item) => item.browser_download_url === selectedAssetUrl);
-  const externalApiAddress = state.apiConfig.enabled
-    ? `http://<本机局域网IP>:${state.serverPort}/v1/chat/completions`
-    : `http://127.0.0.1:${state.serverPort}/v1/chat/completions`;
-
   useEffect(() => {
     if (autoCheckedKernelRef.current || typeof window === 'undefined') return;
 
@@ -595,7 +451,6 @@ export default function SettingsPage() {
         '所有模型的聊天会话与消息历史',
         '使用统计、最近使用记录、模型加载参数记忆',
         '主题、侧边栏、排序与网格列数等界面偏好',
-        '生图页面的供应商与参数设置',
         '内核下载源偏好',
       ],
       footnote: '后端配置（config.json）、模型扫描缓存、系统 keyring 中的 API Key 不受影响。',
@@ -610,18 +465,6 @@ export default function SettingsPage() {
       footnote: '仅清空 AppData\\Roaming\\AgentLLM\\cache 目录中的扫描结果。',
       confirmLabel: '清除缓存',
       tone: 'warning',
-    },
-    'clear-image-keys': {
-      title: '清除全部生图供应商密钥',
-      description: '此操作会从 Windows 凭据管理器中删除所有已保存的生图供应商 API Key，恢复后需要重新输入才能继续生图。',
-      bullets: [
-        'SiliconFlow',
-        'NewAPI（OpenAI / Gemini 兼容）',
-        'ComfyUI 本地 / 局域网（如已设置鉴权）',
-      ],
-      footnote: '对外 OpenAI 兼容 API 的 Key 不在此操作范围；如需撤销，请使用「对外 API」区块的撤销按钮。',
-      confirmLabel: '全部清除',
-      tone: 'danger',
     },
     'reset-app-config': {
       title: '重置应用配置',
@@ -642,8 +485,8 @@ export default function SettingsPage() {
       description: '此操作会一次性清除前述所有本地数据，并自动刷新窗口。模型文件、llama.cpp 内核、WebView2 系统缓存与日志不会被删除。',
       bullets: [
         '后端配置 config.json 与模型扫描缓存',
-        '系统 keyring 中的对外 API Key 与所有生图供应商密钥',
-        '前端 localStorage 中的聊天记录、使用统计、界面偏好与生图设置',
+        '系统 keyring 中的对外 API Key',
+        '前端 localStorage 中的聊天记录、使用统计与界面偏好',
         '正在运行的 llama-server 进程',
       ],
       footnote: '此操作不可恢复。强烈建议在出错排障无果时再使用。',
@@ -686,12 +529,12 @@ export default function SettingsPage() {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="mb-6">
+        <div className="mx-auto mb-6 max-w-2xl">
           <h1 className="text-2xl font-bold text-primary-custom mb-1">设置</h1>
           <p className="text-sm text-secondary-custom">配置 Agent LLM 启动器和模型运行参数</p>
         </div>
 
-        <div className="max-w-2xl space-y-4 pb-12">
+        <div className="mx-auto max-w-2xl space-y-4 pb-12">
           <SettingSection title="本地模型运行" icon={FolderPlus} delay={0}>
             <SettingRow
               label="模型目录"
@@ -755,110 +598,17 @@ export default function SettingsPage() {
             </SettingRow>
           </SettingSection>
 
-          <SettingSection title="对外 API" icon={Globe2} delay={0.11}>
+          <SettingSection title="窗口与托盘" icon={Monitor} delay={0.1}>
             <SettingRow
-              label="释放 OpenAI 兼容 API"
-              description={state.apiConfig.enabled ? `下一次加载模型时监听 ${state.apiConfig.host || '0.0.0.0'}:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
+              label="托盘模式"
+              description={state.closeToTray ? '关闭窗口时隐藏到系统托盘，后台保持运行' : '关闭窗口时直接退出应用'}
             >
               <ToggleSwitch
-                checked={state.apiConfig.enabled}
-                onChange={handleApiEnabledChange}
-                label="释放 OpenAI 兼容 API"
+                checked={state.closeToTray}
+                onChange={(v) => void handleCloseToTrayChange(v)}
+                label="托盘模式"
               />
             </SettingRow>
-            <div className="border-t border-white/5 dark:border-white/5" />
-            <SettingRow
-              label="API 端口"
-              description={state.serverRunning ? '修改后需要重新加载模型才会生效' : '用于 llama-server --port'}
-            >
-              <input
-                type="number"
-                min={1}
-                max={65535}
-                value={state.serverPort}
-                onChange={(event) => handlePortChange(event.target.value)}
-                onBlur={() => void persistRuntimeSettings()}
-                className="w-28 rounded-lg bg-black/5 dark:bg-white/5 px-3 py-2 text-right text-sm mono-font text-primary-custom outline-none focus:ring-1 focus:ring-[#5A6CFF]/50"
-              />
-            </SettingRow>
-            <SettingRow
-              label="监听地址"
-              description="0.0.0.0 表示允许局域网访问；127.0.0.1 表示仅本机访问"
-            >
-              <select
-                value={state.apiConfig.host}
-                onChange={(event) => updateApiConfig({ host: event.target.value }, true)}
-                className="w-36 glass-panel px-3 py-2 text-sm text-primary-custom bg-transparent outline-none"
-              >
-                <option value="0.0.0.0">0.0.0.0</option>
-                <option value="127.0.0.1">127.0.0.1</option>
-              </select>
-            </SettingRow>
-            <SettingRow
-              label="API Key"
-              description={state.apiConfig.hasApiKey ? '已设置。明文只在创建后显示一次；忘记后请重新申请。' : '未设置，不建议在局域网开放时留空'}
-            >
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleGenerateApiKey}
-                  className="px-3 py-2 rounded-lg bg-[#5A6CFF]/10 text-sm text-[#5A6CFF] hover:bg-[#5A6CFF]/15 transition-colors"
-                >
-                  {state.apiConfig.hasApiKey ? '重新申请' : '生成'}
-                </button>
-                {state.apiConfig.hasApiKey && (
-                  <button
-                    onClick={handleDeleteApiKey}
-                    className="px-3 py-2 rounded-lg bg-[#F87171]/10 text-sm text-[#F87171] hover:bg-[#F87171]/15 transition-colors"
-                  >
-                    撤销
-                  </button>
-                )}
-              </div>
-            </SettingRow>
-            {newApiKey && (
-              <div className="rounded-xl border border-[#5A6CFF]/20 bg-[#5A6CFF]/[0.06] p-3">
-                <div className="mb-2 flex items-center gap-2 text-xs font-medium text-primary-custom">
-                  <KeyRound className="h-3.5 w-3.5 text-[#5A6CFF]" />
-                  新 API Key 仅显示一次
-                </div>
-                <div className="flex min-w-0 items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-lg bg-black/5 px-3 py-2 text-xs text-primary-custom dark:bg-white/5">
-                    {newApiKey}
-                  </code>
-                  <button
-                    onClick={() => void handleCopyNewApiKey()}
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[#5A6CFF]/10 text-[#5A6CFF] hover:bg-[#5A6CFF]/15"
-                    title="复制 API Key"
-                  >
-                    <Copy className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => setNewApiKey(null)}
-                    className="px-3 py-2 text-xs text-secondary-custom hover:text-primary-custom"
-                  >
-                    隐藏
-                  </button>
-                </div>
-              </div>
-            )}
-            <div className="rounded-xl bg-black/[0.04] dark:bg-white/[0.04] p-3">
-              <div className="flex items-center justify-between gap-3 mb-2">
-                <div className="min-w-0">
-                  <div className="text-xs text-secondary-custom">接口地址</div>
-                  <div className="text-xs mono-font text-primary-custom truncate">{externalApiAddress}</div>
-                </div>
-                <button
-                  onClick={() => void handleCopyApiExample()}
-                  className="w-9 h-9 rounded-lg bg-black/5 dark:bg-white/5 flex items-center justify-center text-secondary-custom hover:text-primary-custom transition-colors flex-shrink-0"
-                  title="复制 curl 示例"
-                >
-                  <Copy className="w-4 h-4" />
-                </button>
-              </div>
-              <p className="text-[11px] text-secondary-custom leading-relaxed">
-                对外 API 使用 llama-server 原生 OpenAI 兼容接口。防火墙需要放行端口，修改设置后请重新加载模型。
-              </p>
-            </div>
           </SettingSection>
 
           <div ref={kernelSectionRef}>
@@ -1032,7 +782,7 @@ export default function SettingsPage() {
               <div className="border-t border-white/5 dark:border-white/5" />
               <SettingRow
                 label="清除界面状态与聊天记录"
-                description="清空聊天会话、使用统计、模型加载记忆、生图与界面偏好。清除后窗口会自动刷新。"
+                description="清空聊天会话、使用统计、模型加载记忆与界面偏好。清除后窗口会自动刷新。"
               >
                 <button
                   onClick={() => setPendingDataAction('clear-frontend-state')}
@@ -1050,20 +800,6 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => setPendingDataAction('clear-model-cache')}
-                  className="flex items-center gap-1 text-sm text-[#F87171] hover:underline"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  清除
-                </button>
-              </SettingRow>
-
-              <div className="border-t border-white/5 dark:border-white/5" />
-              <SettingRow
-                label="清除全部生图供应商密钥"
-                description="从 Windows 凭据管理器中删除所有已保存的生图 API Key。"
-              >
-                <button
-                  onClick={() => setPendingDataAction('clear-image-keys')}
                   className="flex items-center gap-1 text-sm text-[#F87171] hover:underline"
                 >
                   <Trash2 className="w-3.5 h-3.5" />

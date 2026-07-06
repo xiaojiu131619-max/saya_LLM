@@ -182,11 +182,15 @@ export function ThoughtBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
   const trimmed = content.trim();
   if (!trimmed) return null;
-  // 只统计行数作为静态指示，不再用流式内容生成预览，避免折叠态文字随每个 token 跳动。
-  const lineCount = trimmed.split('\n').filter((line) => line.trim().length > 0).length;
+
+  const lines = trimmed.split('\n').filter((line) => line.trim().length > 0);
+  const lineCount = lines.length;
 
   return (
-    <div className="my-3 max-w-full overflow-hidden rounded-md border border-[#DED9CC] bg-[#F7F4EC] dark:border-white/[0.08] dark:bg-white/[0.05]" style={{ overflowAnchor: 'none' }}>
+    <div
+      className="my-3 max-w-full overflow-hidden rounded-md border border-[#DED9CC] bg-[#F7F4EC] dark:border-white/[0.08] dark:bg-white/[0.05]"
+      style={{ overflowAnchor: 'none' }}
+    >
       <button
         type="button"
         aria-expanded={expanded}
@@ -204,10 +208,21 @@ export function ThoughtBlock({ content }: { content: string }) {
           className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : 'rotate-0'}`}
         />
       </button>
-      {expanded && (
+
+      {!expanded && (
         <div
-          className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#BDB4A7]"
+          aria-hidden="true"
+          className="relative overflow-hidden"
+          style={{ height: 'calc(1.75rem * 2 + 0.75rem)' }}
         >
+          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#BDB4A7]">
+            {trimmed}
+          </div>
+        </div>
+      )}
+
+      {expanded && (
+        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#BDB4A7]">
           {trimmed}
         </div>
       )}

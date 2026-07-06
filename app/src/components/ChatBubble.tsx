@@ -40,6 +40,16 @@ function formatDuration(seconds: number) {
   return `${minutes} 分 ${String(rest).padStart(2, '0')} 秒`;
 }
 
+// 紧凑秒数格式：用于"生成耗时"等行内 Metric。
+// <60s → "12.3s"；>=60s → "2m5s"。
+function formatSecondsShort(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0s';
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes}m${rest}s`;
+}
+
 function elapsedRequestStats(startTime: number, ctxTotal = 0) {
   return {
     ctxUsed: 0,
@@ -88,7 +98,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   const [editing, setEditing] = useState(false);
   const [draftContent, setDraftContent] = useState(message.content);
   const [savingEdit, setSavingEdit] = useState(false);
-  const [timerNow, setTimerNow] = useState(Date.now());
+  const [timerNow, setTimerNow] = useState(message.timestamp);
   const ownerModel = state.models.find((m) => m.id === modelId);
   const runtimeModel = state.models.find((m) => m.id === state.activeModelId);
   const activeModel = ownerModel ?? runtimeModel;
@@ -103,7 +113,6 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
 
   useEffect(() => {
     if (!message.isStreaming) return;
-    setTimerNow(Date.now());
     const timer = window.setInterval(() => setTimerNow(Date.now()), 500);
     return () => window.clearInterval(timer);
   }, [message.id, message.isStreaming]);
@@ -131,10 +140,12 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   const submitEdit = async (content: string) => {
     const nextContent = content.trim();
     if (!nextContent || !onEditAndResend || savingEdit) return;
+    // 乐观关闭编辑框：发送是长流程（含流式输出），若等 await 完成才关闭，
+    // 编辑框会一直挂到本轮输出结束。这里先退出编辑态，立即进入正常输出对话。
     setSavingEdit(true);
+    setEditing(false);
     try {
       await onEditAndResend(message.id, nextContent);
-      setEditing(false);
     } finally {
       setSavingEdit(false);
     }
@@ -204,7 +215,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         apiKey: state.apiConfig.apiKey,
         messages: history.map((msg) => ({
           role: msg.role,
-          content: msg.content,
+          content: msg.multimodalContent ?? msg.content,
         })),
         onToken: (token) => {
           streamedContent += token;
@@ -344,7 +355,12 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           </div>
         ) : (
           <div className="max-w-[min(640px,84%)] rounded-[16px_16px_4px_16px] bg-[#E8E1D5] px-4 py-3 text-[16px] leading-8 text-[#403C32] shadow-[0_1px_3px_rgba(64,60,50,0.10)] dark:bg-[#2B2822] dark:text-[#F3EBDD] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)]">
-            <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</p>
+            {message.content && (
+              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</p>
+            )}
+            {message.multimodalContent && (
+              <MultimodalAttachments parts={message.multimodalContent} />
+            )}
           </div>
         )}
 
@@ -409,7 +425,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           <Metric icon={Zap} label={stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : 'tok 未返回'} />
           <Metric icon={Clock} label={stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : 'TTFT 未返回'} />
           <Metric icon={Clock} label={`${formatMetric(stats.tokensPerSec, ' tok/s')}`} />
-          <Metric icon={Clock} label={`生成耗时 ${formatDuration(stats.genTime)}`} />
+          <Metric icon={Clock} label={`生成耗时 ${formatSecondsShort(stats.genTime)}`} />
         </div>
       )}
     </motion.article>
@@ -448,5 +464,51 @@ function Metric({ icon: Icon, label }: {
         {label}
       </span>
     </span>
+  );
+}
+
+function MultimodalAttachments({ parts }: { parts: Array<{ type: string; text?: string; image_url?: { url: string }; audio_url?: { url: string }; video_url?: { url: string } }> }) {
+  const mediaItems = parts.filter((part) => part.type !== 'text');
+  if (mediaItems.length === 0) return null;
+
+  return (
+    <div className={`${parts.some(p => p.type === 'text') ? 'mt-3' : ''} space-y-2`}>
+      {mediaItems.map((part, idx) => {
+        if (part.type === 'image_url' && part.image_url) {
+          return (
+            <img
+              key={idx}
+              src={part.image_url.url}
+              alt="用户上传的图片"
+              className="max-w-full rounded-lg border border-[#D8D2C5] shadow-sm dark:border-white/[0.1]"
+              style={{ maxHeight: '320px', width: 'auto' }}
+            />
+          );
+        }
+        if (part.type === 'audio_url' && part.audio_url) {
+          return (
+            <div key={idx} className="rounded-lg border border-[#D8D2C5] bg-[#FBFAF6] p-3 dark:border-white/[0.1] dark:bg-[#1C1A16]">
+              <audio
+                controls
+                src={part.audio_url.url}
+                className="w-full max-w-md"
+              />
+            </div>
+          );
+        }
+        if (part.type === 'video_url' && part.video_url) {
+          return (
+            <video
+              key={idx}
+              controls
+              src={part.video_url.url}
+              className="max-w-full rounded-lg border border-[#D8D2C5] shadow-sm dark:border-white/[0.1]"
+              style={{ maxHeight: '480px', width: 'auto' }}
+            />
+          );
+        }
+        return null;
+      })}
+    </div>
   );
 }

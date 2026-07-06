@@ -9,7 +9,15 @@ use crate::models::app_state::AppState;
 use crate::models::hardware_info::SystemStatus;
 use crate::services::auto_updater;
 
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const MAX_TEXT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const MAX_MEDIA_FILE_SIZE: u64 = 80 * 1024 * 1024; // 80MB，OpenAI multimodal base64 上限
+
+#[derive(serde::Serialize)]
+pub struct MediaPayload {
+    pub mime_type: String,
+    pub data_base64: String,
+    pub byte_size: u64,
+}
 
 #[tauri::command]
 pub fn read_file_content(path: String) -> Result<String, String> {
@@ -18,13 +26,111 @@ pub fn read_file_content(path: String) -> Result<String, String> {
         return Err("文件不存在".to_string());
     }
     let meta = std::fs::metadata(p).map_err(|e| format!("无法读取文件信息: {}", e))?;
-    if meta.len() > MAX_FILE_SIZE {
+    if meta.len() > MAX_TEXT_FILE_SIZE {
         return Err(format!(
-            "文件过大 ({:.1}MB)，最大支持 10MB",
+            "文件过大 ({:.1}MB)，文本附件最大支持 10MB",
             meta.len() as f64 / 1024.0 / 1024.0
         ));
     }
-    std::fs::read_to_string(p).map_err(|_| "无法读取文件内容（可能是二进制文件）".to_string())
+    std::fs::read_to_string(p).map_err(|_| "无法读取文件内容（可能是二进制文件，请改用图片/音频/视频附件）".to_string())
+}
+
+#[tauri::command]
+pub fn read_media_file(path: String) -> Result<MediaPayload, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err("文件不存在".to_string());
+    }
+    let meta = std::fs::metadata(p).map_err(|e| format!("无法读取文件信息: {}", e))?;
+    if meta.len() > MAX_MEDIA_FILE_SIZE {
+        return Err(format!(
+            "媒体文件过大 ({:.1}MB)，最大支持 {:.0}MB",
+            meta.len() as f64 / 1024.0 / 1024.0,
+            MAX_MEDIA_FILE_SIZE as f64 / 1024.0 / 1024.0
+        ));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("无法读取文件内容: {}", e))?;
+    let mime_type = infer_media_mime(p);
+    let mime_type = match mime_type {
+        Some(mime) => mime,
+        None => {
+            return Err(format!(
+                "不支持的文件类型: {}（仅支持图片、音频、视频）",
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("未知")
+            ));
+        }
+    };
+    let data_base64 = base64_encode(&bytes);
+    Ok(MediaPayload {
+        mime_type,
+        data_base64,
+        byte_size: meta.len(),
+    })
+}
+
+fn infer_media_mime(p: &Path) -> Option<String> {
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        // 图片
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        // 音频
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        "opus" => "audio/ogg",
+        // 视频
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" | "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "m4v" => "video/mp4",
+        "ogv" => "video/ogg",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b0 = bytes[i];
+        let b1 = bytes[i + 1];
+        let b2 = bytes[i + 2];
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(TABLE[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char);
+        out.push(TABLE[(b2 & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let b0 = bytes[i];
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[((b0 & 0x03) << 4) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let b0 = bytes[i];
+        let b1 = bytes[i + 1];
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(TABLE[((b1 & 0x0F) << 2) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 #[tauri::command]

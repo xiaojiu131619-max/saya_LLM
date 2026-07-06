@@ -86,12 +86,7 @@ export default function ModelDownloadPanel() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!targetDir && state.modelDirs[0]) {
-      setTargetDir(state.modelDirs[0]);
-    }
-  }, [state.modelDirs, targetDir]);
+  const effectiveTargetDir = targetDir || state.modelDirs[0] || '';
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -149,7 +144,7 @@ export default function ModelDownloadPanel() {
       return;
     }
 
-    let dir = targetDir || state.modelDirs[0] || '';
+    let dir = effectiveTargetDir;
     if (!dir) {
       const selected = await chooseTargetDir();
       if (!selected) return;
@@ -261,7 +256,7 @@ export default function ModelDownloadPanel() {
 
               <div className="flex min-w-0 items-center gap-2">
                 <div className="min-w-0 flex-1 rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#A9A095]">
-                  <div className="truncate">{targetDir || '未选择模型目录'}</div>
+                  <div className="truncate">{effectiveTargetDir || '未选择模型目录'}</div>
                 </div>
                 <button
                   type="button"

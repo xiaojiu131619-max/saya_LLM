@@ -2,8 +2,9 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ChatGenerationConfig, ExternalApiConfig, Message, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats } from '@/types';
+import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats } from '@/types';
 import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import { logDebug, logInfo, logWarn } from '@/lib/appLog';
 
 export interface DesktopModelInfo {
   name: string;
@@ -26,6 +27,8 @@ export interface DesktopModelInfo {
   mmproj_path: string | null;
   mtp_draft_path: string | null;
   supports_reasoning: boolean;
+  gguf_tags: string[];
+  has_tool_template: boolean;
   gguf_metadata: Array<[string, string]>;
 }
 
@@ -44,6 +47,17 @@ export interface DesktopConfig {
   tools: string | null;
   last_model_path: string | null;
   tune_history: unknown[];
+  close_to_tray: boolean;
+}
+
+export interface PingResult {
+  reachable: boolean;
+  latencyMs: number | null;
+  statusCode: number | null;
+  healthOk: boolean;
+  modelsOk: boolean;
+  models: string[];
+  error: string | null;
 }
 
 interface DesktopSystemStatus {
@@ -117,51 +131,17 @@ export interface LlamaReleaseInfo {
   gpu_name: string | null;
 }
 
-export interface ImageApiKeyStatus {
-  providerId: string;
-  hasKey: boolean;
+export interface MediaPayload {
+  mime_type: string;
+  data_base64: string;
+  byte_size: number;
 }
 
-export interface ImageInputPayload {
-  name: string;
-  mimeType: string;
-  dataBase64: string;
-}
+export type ChatMessageContent = string | ChatMessageContentPart[];
 
-export interface ImageGenerateRequest {
-  providerId: string;
-  baseUrl: string;
-  model: string;
-  prompt: string;
-  negativePrompt?: string;
-  mode?: 'generate' | 'edit';
-  size?: string;
-  n?: number;
-  quality?: string;
-  style?: string;
-  responseFormat?: string;
-  seed?: number | null;
-  steps?: number | null;
-  guidanceScale?: number | null;
-  aspectRatio?: string;
-  workflowJson?: string;
-  images?: ImageInputPayload[];
-}
-
-export interface GeneratedImage {
-  url?: string | null;
-  b64Json?: string | null;
-  mimeType?: string | null;
-  revisedPrompt?: string | null;
-}
-
-export interface ImageGenerateResponse {
-  providerId: string;
-  model: string;
-  images: GeneratedImage[];
-  text?: string | null;
-  usage?: unknown;
-  raw: unknown;
+export interface ChatCompletionMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: ChatMessageContent;
 }
 
 interface ServerConfig {
@@ -327,46 +307,98 @@ function modelFamily(raw: DesktopModelInfo) {
 
 interface ModelCapabilities {
   vision: boolean;
+  audio: boolean;
+  video: boolean;
   thinking: boolean;
   tools: boolean;
-  reasoning: boolean;
 }
 
 /**
- * 基于模型名称、架构等元信息推断四种能力。
+ * 分层判定模型能力，按可靠性从高到低逐层叠加：
+ *   1. 硬证据：mmproj 同目录文件、chat_template 工具语法、GGUF 自带 tags
+ *   2. 架构白名单：稳定且无歧义的家族关系
+ *   3. basename / 文件名兜底：用于覆盖未在 GGUF 头里声明的二次微调模型
  *
- * 视觉：模型名/架构里出现 vl/vision/clip/llava/internvl 等多模态线索。
- * 思考：能切换 think 模式的模型（Qwen3 系列、Hunyuan think 等），通过 supports_reasoning 透传。
- * 工具：现代 instruct/chat 模型默认具备 function calling 能力（Qwen2.5+/Llama3+/Mistral 系列等）。
- * 推理：R1 / QwQ / o1 类专门用作链式推理输出的模型；这是「思考」的更窄子集。
+ * 视觉：必须有同目录 mmproj 文件，模型名/架构的 vl/vision 等只用来旁证（不会单独启用）
+ * 音频：GGUF tags 含 audio*；或名字命中 Whisper/Voxtral/Ultravox/Gemma3n 等纯音频家族
+ * 视频：GGUF tags 含 video；或名字命中 Omni/VideoLLaMA/Video-LLaVA 等支持视频帧的家族
+ * 工具：chat_template 含工具调用语法（最权威）；或 GGUF tags 含 tool-use/function-calling；
+ *      或架构属于已知支持工具的家族，且不是 base/embed/pretrain 模型
+ * 思考：合并了原"思考"与"推理"。GGUF tags 含 reasoning/thinking/cot；
+ *      或 supports_reasoning（来自 Rust 扫描器，含 R1/QwQ/Qwen3+/think/DeepSeek-R1 等）；
+ *      或架构属于 qwen3/qwen35/gpt-oss 等默认支持的家族
  */
 function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const name = raw.name.toLowerCase();
   const arch = (raw.architecture ?? '').toLowerCase();
   const haystack = `${name} ${arch}`;
+  const tags = new Set((raw.gguf_tags ?? []).map((t) => t.toLowerCase()));
 
-  // 视觉：常见多模态命名约定
-  const visionKeywords = ['-vl', '_vl', ' vl-', 'vision', 'clip', 'llava', 'internvl', 'minicpm-v', 'minicpm_v', 'cogvlm', 'omni', 'qwen2-vl', 'qwen2.5-vl', 'qwen3-vl'];
-  const vision = Boolean(raw.mmproj_path) || visionKeywords.some((kw) => haystack.includes(kw));
+  // === 视觉 ===
+  // Rust 扫描器已经按同目录和名称相似度匹配 mmproj；前端不再用文件名白名单二次否决。
+  const visionFromTags = ['vision', 'image-text-to-text', 'multimodal'].some((t) => tags.has(t));
+  const visionArchitectures = [
+    'qwen2-vl', 'qwen2.5-vl', 'qwen3-vl', 'qwen2vl', 'qwen25vl', 'qwen3vl',
+    'llava', 'llava-next', 'llava_next',
+    'phi3-v', 'phi-3-v', 'phi4-v', 'phi-4-v',
+    'minicpmv', 'minicpm-v',
+    'internvl', 'intern-vl', 'internvl2',
+    'janus',
+    'florence',
+    'pixtral',
+  ];
+  const visionFromArch = visionArchitectures.some((a) => arch === a || arch.startsWith(a));
+  const visionKeywords = ['-vl', '_vl', ' vl-', '-vision', 'vision-', 'llava', 'minicpm', 'deepseek-vl2', 'deepseek_vl2'];
+  const visionFromName = visionKeywords.some((kw) => haystack.includes(kw));
+  const hasMmproj = Boolean(raw.mmproj_path);
+  const vision = hasMmproj || visionFromTags || visionFromArch || visionFromName;
 
-  // 推理：R1 / QwQ 等专用推理模型（更窄的子集）
-  const reasoningKeywords = ['deepseek-r1', 'deepseek_r1', '-r1-', '-r1.', '_r1_', '/r1-', 'qwq', 'o1-', 'o3-', 'reasoner'];
-  const reasoning = reasoningKeywords.some((kw) => haystack.includes(kw));
+  // === 音频 ===
+  const audioFromTags = ['audio', 'audio-text-to-text', 'speech', 'asr', 'tts'].some((t) => tags.has(t));
+  const audioKeywords = ['-audio', '_audio', ' audio-', 'whisper', 'voxtral', 'ultravox', 'gemma3n', 'gemma-3n'];
+  const audio = audioFromTags || audioKeywords.some((kw) => haystack.includes(kw));
 
-  // 思考：能开 think 模式的模型；R1/QwQ 永远是思考模型；Qwen3 / Hunyuan-A13B-Think 等也算
-  // raw.supports_reasoning 来自 Rust 扫描器，已经覆盖了主流 think/reasoning 模型
-  const thinkingKeywords = ['thinking', 'think', 'qwen3', 'qwen-3', 'hunyuan-a'];
-  const thinking = reasoning || raw.supports_reasoning || thinkingKeywords.some((kw) => haystack.includes(kw));
+  // === 视频 ===
+  const videoFromTags = ['video', 'video-text-to-text', 'video-llava', 'any-to-any'].some((t) => tags.has(t));
+  const videoKeywords = ['omni', 'video-llava', 'video_llava', 'videollama', 'videochat', 'longva',
+    'qwen2.5-omni', 'qwen2-omni', 'qwen3-omni', 'pllava', 'mimo-vl', 'nano-omni'];
+  const video = videoFromTags || videoKeywords.some((kw) => haystack.includes(kw));
 
-  // 工具：保守地认定主流 instruct/chat 系列支持 function calling
-  // 规避：纯 base/embed/coder-1.5 等专用小模型；明确包含 instruct/chat 或属于 Qwen2.5+/Llama3+/Mistral 系列时启用
-  const toolFamilies = ['qwen2.5', 'qwen-2.5', 'qwen3', 'qwen-3', 'llama-3', 'llama3', 'mistral', 'mixtral', 'hermes', 'firefunction', 'functionary', 'command-r', 'gpt-oss'];
-  const hasToolFamily = toolFamilies.some((kw) => haystack.includes(kw));
-  const hasInstructTag = haystack.includes('instruct') || haystack.includes('chat') || haystack.includes('-it-') || haystack.endsWith('-it');
+  // === 工具调用 ===
+  // 1) 最权威：chat_template 里有工具语法
+  // 2) GGUF tags 含工具相关条目
+  // 3) 架构白名单兜底（必须不是 base/pretrain/embed）
+  const toolsFromTemplate = Boolean(raw.has_tool_template);
+  const toolsFromTags = ['tool-use', 'function-calling', 'tools', 'agent', 'agents'].some((t) => tags.has(t));
   const isBaseOnly = haystack.includes('-base') || haystack.includes('_base') || haystack.includes('-pretrain');
-  const tools = !isBaseOnly && (hasToolFamily || (hasInstructTag && !haystack.includes('embed')));
+  const isEmbed = haystack.includes('embed') || haystack.includes('reranker');
+  // 架构白名单：已知主流支持 function calling 的架构
+  const toolArchitectures = [
+    'qwen2', 'qwen3', 'qwen35', 'qwen35moe', 'qwen2moe',
+    'llama', 'llama3', 'llama4',
+    'mistral', 'mixtral',
+    'gemma2', 'gemma3', 'gemma4', 'gemma-2', 'gemma-3', 'gemma-4',
+    'glm4', 'glm-4', 'chatglm',
+    'gpt-oss', 'gptoss',
+    'deepseek2', 'deepseek3',
+    'nemotron', 'nemotron_h_moe', 'nemotron-h',
+    'command-r', 'cohere',
+    'phi3', 'phi-3', 'phi4', 'phi-4',
+    'yi',
+  ];
+  const toolsFromArch = toolArchitectures.some((a) => arch === a || arch.startsWith(a));
+  const tools = !isBaseOnly && !isEmbed && (toolsFromTemplate || toolsFromTags || toolsFromArch);
 
-  return { vision, thinking, tools, reasoning };
+  // === 思考（合并了原推理）===
+  // 任何能输出思考内容/链式推理的模型都标
+  const thinkingFromTags = ['reasoning', 'thinking', 'chain-of-thought', 'chain_of_thought', 'cot'].some((t) => tags.has(t));
+  const thinkingArchitectures = ['qwen3', 'qwen35', 'qwen35moe', 'gpt-oss', 'gptoss'];
+  const thinkingFromArch = thinkingArchitectures.some((a) => arch === a || arch.startsWith(a));
+  const thinkingKeywords = ['thinking', '-think', '_think', 'qwq', 'reasoner', '-r1-', '-r1.', '_r1_', 'o1-', 'o3-'];
+  const thinkingFromName = thinkingKeywords.some((kw) => haystack.includes(kw));
+  const thinking = thinkingFromTags || Boolean(raw.supports_reasoning) || thinkingFromArch || thinkingFromName;
+
+  return { vision, audio, video, thinking, tools };
 }
 
 function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
@@ -392,7 +424,7 @@ function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
     ropeFreqScale: 0,
     seedEnabled: false,
     seed: -1,
-    speculativeDecoding: 'off',
+    speculativeDecoding: raw.mtp_support || Boolean(raw.mtp_draft_path) ? 'mtp' : 'off',
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -430,11 +462,11 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
       raw.block_count ? `层数：${raw.block_count}` : null,
       raw.expert_count ? `专家数：${raw.expert_count}` : null,
       raw.context_length ? `上下文：${raw.context_length}` : null,
-      raw.mmproj_path ? `视觉投影：${raw.mmproj_path}` : null,
+      capabilities.vision && raw.mmproj_path ? `视觉投影：${raw.mmproj_path}` : null,
       raw.mtp_draft_path ? `MTP 草稿模型：${raw.mtp_draft_path}` : null,
       raw.supports_reasoning ? '支持思考输出（reasoning / thinking）。' : null,
     ].filter(Boolean).join('\n') || '已读取本地 GGUF 文件。详细表头信息见模型信息页。',
-    tags: ['Local', 'GGUF', ...(raw.mmproj_path ? ['Vision'] : []), ...(raw.mtp_support || raw.mtp_draft_path ? ['MTP'] : []), ...(raw.supports_reasoning ? ['Reasoning'] : [])],
+    tags: ['Local', 'GGUF', ...(capabilities.vision ? ['Vision'] : []), ...(raw.mtp_support || raw.mtp_draft_path ? ['MTP'] : []), ...(raw.supports_reasoning ? ['Reasoning'] : [])],
     downloadCount: '本地',
     ctxLength,
     loadConfig: defaultLoadConfig(raw),
@@ -454,9 +486,11 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     mtpDraftPath: raw.mtp_draft_path ?? undefined,
     ggufMetadata: raw.gguf_metadata?.map(([key, value]) => ({ key, value })) ?? [],
     supportsVision: capabilities.vision,
+    supportsAudio: capabilities.audio,
+    supportsVideo: capabilities.video,
     supportsThinking: capabilities.thinking,
     supportsTools: capabilities.tools,
-    supportsReasoning: capabilities.reasoning,
+    supportsReasoning: capabilities.thinking,
     supportsMtp: raw.mtp_support || Boolean(raw.mtp_draft_path),
   };
 }
@@ -475,6 +509,7 @@ export async function saveDesktopRuntimeSettings(settings: {
   defaultPort?: number;
   apiEnabled?: boolean;
   apiHost?: string;
+  closeToTray?: boolean;
 }) {
   if (!isDesktopRuntime()) return;
   const config = await getDesktopConfig();
@@ -484,8 +519,14 @@ export async function saveDesktopRuntimeSettings(settings: {
     ...(settings.defaultPort ? { default_port: settings.defaultPort } : {}),
     ...(settings.apiEnabled !== undefined ? { api_enabled: settings.apiEnabled } : {}),
     ...(settings.apiHost !== undefined ? { api_host: settings.apiHost } : {}),
+    ...(settings.closeToTray !== undefined ? { close_to_tray: settings.closeToTray } : {}),
     api_key: null,
   });
+}
+
+export async function setCloseToTray(enabled: boolean) {
+  if (!isDesktopRuntime()) return enabled;
+  return invoke<boolean>('set_close_to_tray', { enabled });
 }
 
 export async function getExternalApiKeyStatus() {
@@ -540,6 +581,21 @@ export async function getDesktopServerStatus() {
   return invoke<boolean>('get_server_status');
 }
 
+export async function pingLocalApi() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<PingResult>('ping_local_api');
+}
+
+export async function getDesktopServerLogs() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<string[]>('get_server_logs');
+}
+
+export async function clearDesktopServerLogs() {
+  if (!isDesktopRuntime()) return;
+  await invoke('clear_server_logs');
+}
+
 export async function stopDesktopServer() {
   if (!isDesktopRuntime()) return;
   await invoke('stop_server');
@@ -580,26 +636,6 @@ export async function updateLlamaKernel(url: string, version: string, useMirror 
   return invoke<string>('download_and_update', { url, version, useMirror, mirrorUrl });
 }
 
-export async function getImageApiKeyStatus(providerId: string) {
-  if (!isDesktopRuntime()) return { providerId, hasKey: false };
-  return invoke<ImageApiKeyStatus>('get_image_api_key_status', { providerId });
-}
-
-export async function saveImageApiKey(providerId: string, apiKey: string) {
-  if (!isDesktopRuntime()) return;
-  await invoke('save_image_api_key', { providerId, apiKey });
-}
-
-export async function deleteImageApiKey(providerId: string) {
-  if (!isDesktopRuntime()) return;
-  await invoke('delete_image_api_key', { providerId });
-}
-
-export async function clearAllImageApiKeys() {
-  if (!isDesktopRuntime()) return 0;
-  return invoke<number>('clear_all_image_keys');
-}
-
 export async function clearDesktopModelCache() {
   if (!isDesktopRuntime()) return '';
   return invoke<string>('clear_model_cache');
@@ -615,18 +651,18 @@ export async function getDesktopAppDataDir() {
   return invoke<string>('get_app_data_dir');
 }
 
-export async function generateImage(request: ImageGenerateRequest) {
-  if (!isDesktopRuntime()) {
-    throw new Error('生图 API 调用需要在桌面版中使用。');
-  }
-  return invoke<ImageGenerateResponse>('generate_image', { request });
-}
-
 export async function readDesktopFileContent(path: string) {
   if (!isDesktopRuntime()) {
     throw new Error('读取拖拽文件需要在桌面版中使用。');
   }
   return invoke<string>('read_file_content', { path });
+}
+
+export async function readDesktopMedia(path: string) {
+  if (!isDesktopRuntime()) {
+    throw new Error('读取媒体文件需要在桌面版中使用。');
+  }
+  return invoke<MediaPayload>('read_media_file', { path });
 }
 
 export function listenDesktopEvent<T>(event: string, callback: (payload: T) => void) {
@@ -678,6 +714,8 @@ function buildServerConfig(
   const chatTemplate = config.chatTemplate?.trim() || null;
   const enabledTools = Array.from(new Set((tools ?? []).map((tool) => tool.trim()).filter(Boolean)));
 
+  const mtpEnabled = config.speculativeDecoding === 'mtp' && Boolean(model.mtpDraftPath);
+
   return {
     executable_path: executablePath || 'resources/llama-server.exe',
     model_path: model.filePath,
@@ -703,9 +741,9 @@ function buildServerConfig(
     rope_freq_scale: ropeFreqScale,
     seed,
     chat_template: chatTemplate,
-    mmproj_path: model.mmprojPath ?? null,
-    mtp_draft_path: model.mtpDraftPath ?? null,
-    spec_type: model.mtpDraftPath ? 'draft-mtp' : null,
+    mmproj_path: model.supportsVision && model.mmprojPath ? model.mmprojPath : null,
+    mtp_draft_path: mtpEnabled ? (model.mtpDraftPath ?? null) : null,
+    spec_type: mtpEnabled ? 'draft-mtp' : null,
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,
@@ -781,7 +819,7 @@ async function getServerModelId(port: number, headers: Record<string, string>, s
 export async function streamChatCompletion(options: {
   port: number;
   modelName: string;
-  messages: Pick<Message, 'role' | 'content'>[];
+  messages: ChatCompletionMessage[];
   config: ChatGenerationConfig;
   ctxTotal?: number;
   supportsReasoning?: boolean;
@@ -792,9 +830,94 @@ export async function streamChatCompletion(options: {
   onReasoningDelta?: (reasoningContent: string) => void;
   onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; tokensPerSec?: number; firstTokenDelay?: number; genTime?: number }) => void;
 }): Promise<ChatCompletionMetrics> {
-  const messages = options.config.systemPrompt.trim()
-    ? [{ role: 'system' as const, content: options.config.systemPrompt.trim() }, ...options.messages]
-    : options.messages;
+  // llama-server 支持 text / image_url / input_audio / input_video 四种 content part 类型。
+  // 但内部存储用的是 OpenAI 通用 schema (audio_url / video_url)，这里做格式转换。
+  const sanitizeContent = (content: ChatMessageContent): ChatMessageContent => {
+    if (typeof content === 'string') return content;
+    const transformed: ChatMessageContentPart[] = [];
+    const errors: string[] = [];
+
+    for (const part of content) {
+      if (part.type === 'text' || part.type === 'image_url') {
+        transformed.push(part);
+      } else if (part.type === 'audio_url') {
+        // llama-server 要求格式：{type: 'input_audio', input_audio: {data: '<base64>', format: 'wav'|'mp3'}}
+        // data 必须是 raw base64（不带 data:audio/...;base64, 前缀）
+        const url = part.audio_url?.url ?? '';
+        const match = url.match(/^data:audio\/([\w-]+);base64,(.+)$/);
+        if (!match) {
+          errors.push('音频格式不正确');
+          continue;
+        }
+        const mimeSubtype = match[1].toLowerCase();
+        const rawBase64 = match[2];
+
+        // llama-server 只接受 wav / mp3
+        let format: 'wav' | 'mp3';
+        if (mimeSubtype === 'wav' || mimeSubtype === 'wave' || mimeSubtype === 'x-wav') {
+          format = 'wav';
+        } else if (mimeSubtype === 'mpeg' || mimeSubtype === 'mp3') {
+          format = 'mp3';
+        } else {
+          errors.push(`音频格式 ${mimeSubtype} 不支持（llama-server 仅支持 wav/mp3）`);
+          continue;
+        }
+
+        transformed.push({
+          type: 'input_audio',
+          input_audio: { data: rawBase64, format },
+        });
+      } else if (part.type === 'video_url') {
+        // llama-server 要求格式：{type: 'input_video', input_video: {data: '<base64>'}}
+        // data 必须是 raw base64（不带 data:video/...;base64, 前缀）
+        const url = part.video_url?.url ?? '';
+        // 放宽 MIME 匹配：video/mp4, video/quicktime, video/x-m4v, video/webm 等都能匹配
+        const match = url.match(/^data:video\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
+        if (!match) {
+          logWarn('multimodal', `视频 dataUrl 格式不匹配正则: ${url.slice(0, 100)}...`);
+          errors.push('视频格式不正确');
+          continue;
+        }
+        const rawBase64 = match[1];
+        logInfo('multimodal', `video_url → input_video 翻译成功，base64 长度: ${rawBase64.length}`);
+        transformed.push({
+          type: 'input_video',
+          input_video: { data: rawBase64 },
+        });
+      }
+      // 其他未知类型直接丢弃（静默）
+    }
+
+    if (errors.length > 0) {
+      // 格式错误的附件转为占位文本
+      transformed.push({ type: 'text', text: `[${errors.join('；')}]` });
+    }
+    if (transformed.length === 0) {
+      return [{ type: 'text', text: '[此消息含不支持的媒体附件]' }];
+    }
+    return transformed;
+  };
+
+  const sanitizedMessages = options.messages.map((msg) => ({
+    role: msg.role,
+    content: sanitizeContent(msg.content),
+  }));
+
+  const messages: ChatCompletionMessage[] = options.config.systemPrompt.trim()
+    ? [{ role: 'system', content: options.config.systemPrompt.trim() }, ...sanitizedMessages]
+    : sanitizedMessages;
+
+  // 调试：打印翻译后的消息结构，验证 audio_url/video_url 是否正确转成 input_audio/input_video
+  const hasLegacyParts = messages.some(m => Array.isArray(m.content) && m.content.some((p: ChatMessageContentPart) => p.type === 'audio_url' || p.type === 'video_url'));
+  if (hasLegacyParts) {
+    logWarn('multimodal', '发现未翻译的 audio_url/video_url，翻译可能失败');
+    logDebug('multimodal', '原始消息结构', options.messages);
+  }
+  const hasTranslatedParts = messages.some(m => Array.isArray(m.content) && m.content.some((p: ChatMessageContentPart) => p.type === 'input_audio' || p.type === 'input_video'));
+  if (hasTranslatedParts) {
+    logInfo('multimodal', '成功翻译 audio_url/video_url → input_audio/input_video');
+    logDebug('multimodal', '翻译后消息结构', messages);
+  }
   const requestStartedAt = performance.now();
   let firstTokenAt: number | null = null;
   let latestUsage: Partial<ChatCompletionMetrics> = {};
@@ -862,7 +985,9 @@ export async function streamChatCompletion(options: {
   throwIfAborted(abortSignal);
 
   if (!response.ok) {
+    // 首次失败：先把 body 读出来，否则后面 fetch 流就走不下去了。
     const firstError = await response.text();
+    let retried = false;
     const retryModelId = serverModelId ?? await getServerModelId(options.port, headers, abortSignal);
     if (retryModelId && retryModelId !== requestModelName && [400, 404, 422].includes(response.status)) {
       response = await fetch(chatUrl, {
@@ -871,9 +996,11 @@ export async function streamChatCompletion(options: {
         body: JSON.stringify({ ...requestBody, model: retryModelId }),
         signal: abortSignal,
       });
+      retried = true;
     }
     if (!response.ok) {
-      const retryError = await response.text();
+      // 只有真的重试了才再次读 body，否则会触发 "body stream already read"。
+      const retryError = retried ? await response.text() : '';
       throw new Error(`llama-server 返回 ${response.status}: ${retryError || firstError}`);
     }
   }
@@ -1079,8 +1206,13 @@ function finalizeCompletionMetrics(
     ...(tokensPerSec && tokensPerSec > 0 ? { tokensPerSec } : {}),
     firstTokenDelay,
     genTime,
-    ctxUsed: totalTokens,
-    ctxTotal,
+  // ctxUsed 反映「整个对话当前累计占用的上下文窗口大小」。
+  // llama-server 返回的 prompt_tokens 是当次请求送入的全部历史消息 token 数，
+  // 已包含截至该轮的完整对话上下文，因此用它作为 ctx 已用量；
+  // 不能用 totalTokens（promptTokens + completionTokens），否则会把本次新生成的
+  // 输出也算进"已用上下文"，导致同一条对话内各轮 ctx% 参差不齐、且普遍虚高。
+  ctxUsed: promptTokens,
+  ctxTotal,
   };
 
   if (totalTokens > 0) {

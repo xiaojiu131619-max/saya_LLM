@@ -48,6 +48,7 @@ type Action =
   | { type: 'SET_SERVER_PORT'; payload: number }
   | { type: 'SET_API_CONFIG'; payload: Partial<ExternalApiConfig> }
   | { type: 'SET_MODEL_DIRS'; payload: string[] }
+  | { type: 'SET_CLOSE_TO_TRAY'; payload: boolean }
   | { type: 'SET_APP_STATUS'; payload: string | null }
   | { type: 'SET_CHAT_CONFIG'; payload: Partial<ChatGenerationConfig> }
   | { type: 'SAVE_SYSTEM_PROMPT_PRESET'; payload: { title: string; prompt: string } }
@@ -152,6 +153,7 @@ const initialState: AppState = {
     hasApiKey: false,
   },
   modelDirs: [], appStatus: '启动桌面版并选择本地 GGUF 模型目录后才会显示真实数据。',
+  closeToTray: true,
   chatConfig: {
     temperature: storedState.chatConfig?.temperature ?? 0.8,
     topP: storedState.chatConfig?.topP ?? 0.95,
@@ -178,7 +180,9 @@ const initialState: AppState = {
   recentModelUsage: Object.fromEntries(
     Object.entries(storedState.recentModelUsage ?? {})
       .filter(([, usedAt]) => Number.isFinite(Number(usedAt)))
-      .map(([modelId, usedAt]) => [modelId, Number(usedAt)])
+      .map(([modelId, usedAt]) => [modelId, Number(usedAt)] as const)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 3)
   ),
   chatSessions: sanitizeStoredSessions(storedState.chatSessions ?? {}),
   activeChatSessionIds: storedState.activeChatSessionIds ?? {},
@@ -213,7 +217,7 @@ function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig>
     ropeFreqScale: Math.max(0, Number(config.ropeFreqScale ?? 0)),
     seedEnabled: config.seedEnabled ?? false,
     seed: Math.round(Number(config.seed ?? -1)),
-    speculativeDecoding: 'off',
+    speculativeDecoding: config.speculativeDecoding === 'mtp' ? 'mtp' : 'off',
     chatTemplate: config.chatTemplate ?? '',
     rememberSettings: config.rememberSettings ?? true,
     showAdvancedSettings: config.showAdvancedSettings ?? false,
@@ -462,12 +466,18 @@ function appReducer(state: AppState, action: Action): AppState {
       };
     }
     case 'MARK_MODEL_RECENTLY_USED': {
+      // 只保留最近使用的 3 个模型，按时间戳从新到旧保留。
+      const MAX_RECENT = 3;
+      const merged: Record<string, number> = {
+        ...state.recentModelUsage,
+        [action.payload.modelId]: Date.now(),
+      };
+      const top = Object.entries(merged)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, MAX_RECENT);
       return {
         ...state,
-        recentModelUsage: {
-          ...state.recentModelUsage,
-          [action.payload.modelId]: Date.now(),
-        },
+        recentModelUsage: Object.fromEntries(top),
       };
     }
     case 'UPDATE_MODEL_STATUS': {
@@ -485,6 +495,8 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, apiConfig: { ...state.apiConfig, ...action.payload } };
     case 'SET_MODEL_DIRS':
       return { ...state, modelDirs: action.payload };
+    case 'SET_CLOSE_TO_TRAY':
+      return { ...state, closeToTray: action.payload };
     case 'SET_APP_STATUS':
       return { ...state, appStatus: action.payload };
     case 'SET_CHAT_CONFIG':
@@ -657,6 +669,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (config) {
           dispatch({ type: 'SET_MODEL_DIRS', payload: config.model_dirs });
           dispatch({ type: 'SET_SERVER_PORT', payload: config.default_port });
+          dispatch({ type: 'SET_CLOSE_TO_TRAY', payload: config.close_to_tray ?? true });
           dispatch({
             type: 'SET_API_CONFIG',
             payload: {

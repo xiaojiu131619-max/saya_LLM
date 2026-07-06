@@ -47,7 +47,13 @@ fn cache_path(file_path: &Path) -> PathBuf {
     get_cache_dir().join(format!("{}.json", sanitized))
 }
 
-const SCANNER_VERSION: u32 = 8;
+const SCANNER_VERSION: u32 = 10;
+
+fn is_companion_gguf_stem(lower_stem: &str) -> bool {
+    lower_stem.starts_with("mmproj")
+        || lower_stem.contains("mmproj")
+        || lower_stem.starts_with("mtp")
+}
 
 fn load_cache(cache: &Path, expected_mtime: u64, expected_size: u64) -> Option<ModelInfo> {
     let content = std::fs::read_to_string(cache).ok()?;
@@ -106,7 +112,7 @@ fn collect_gguf_paths(dirs: &[PathBuf]) -> Vec<PathBuf> {
                     .to_string_lossy()
                     .to_string();
                 let lower = name.to_ascii_lowercase();
-                if lower.starts_with("mmproj") || lower.starts_with("mtp") {
+                if is_companion_gguf_stem(&lower) {
                     continue;
                 }
                 gguf_paths.push(path);
@@ -280,11 +286,12 @@ fn candidate_score(model_stem: &str, candidate: &Path, prefix_bonus: u32) -> u32
         .iter()
         .filter(|token| candidate_tokens.contains(token))
         .count() as u32;
-    let substring_bonus = if candidate_stem.contains(model_stem) || model_stem.contains(&candidate_stem) {
-        8
-    } else {
-        0
-    };
+    let substring_bonus =
+        if candidate_stem.contains(model_stem) || model_stem.contains(&candidate_stem) {
+            8
+        } else {
+            0
+        };
     prefix_bonus + substring_bonus + overlap
 }
 
@@ -320,7 +327,10 @@ fn find_companion_gguf(path: &Path, name: &str, kind: &str) -> Option<String> {
         if score == 0 {
             continue;
         }
-        if best.as_ref().is_none_or(|(best_score, _)| score > *best_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score > *best_score)
+        {
             best = Some((score, candidate));
         }
     }
@@ -335,7 +345,7 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
     let name = path.file_stem()?.to_string_lossy().to_string();
 
     let lower_name = name.to_ascii_lowercase();
-    if lower_name.starts_with("mmproj") || lower_name.starts_with("mtp") {
+    if is_companion_gguf_stem(&lower_name) {
         return None;
     }
 
@@ -361,8 +371,26 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
     let context_length = gguf.as_ref().map(|g| g.context_length).filter(|&c| c > 0);
     let embedding_length = gguf.as_ref().map(|g| g.embedding_length).filter(|&c| c > 0);
 
+    // GGUF tags + chat_template 是比文件名更可靠的能力信号
+    let gguf_tags: Vec<String> = gguf.as_ref().map(|g| g.tags.clone()).unwrap_or_default();
+    let chat_template = gguf
+        .as_ref()
+        .and_then(|g| g.chat_template.clone())
+        .unwrap_or_default();
+
+    // 工具调用：严格匹配 chat_template 里的工具语法（最权威）
+    let has_tool_template = detect_tool_template(&chat_template);
+
+    // 思考/推理：合并判定 —— GGUF tags 含 reasoning/thinking，或架构/名字命中
     let supports_reasoning =
-        detect_reasoning_support(&name, gguf.as_ref().map(|g| g.architecture.as_str()));
+        gguf_tags.iter().any(|t| {
+            t == "reasoning"
+                || t == "thinking"
+                || t == "chain-of-thought"
+                || t == "chain_of_thought"
+                || t == "cot"
+        }) || detect_reasoning_support(&name, gguf.as_ref().map(|g| g.architecture.as_str()));
+
     let mmproj_path = find_companion_gguf(path, &name, "mmproj");
     let mtp_draft_path = find_companion_gguf(path, &name, "mtp");
 
@@ -383,13 +411,37 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         head_count_kv: gguf.as_ref().and_then(|g| g.head_count_kv),
         key_length: gguf.as_ref().and_then(|g| g.key_length),
         value_length: gguf.as_ref().and_then(|g| g.value_length),
-        mtp_support: gguf.as_ref().map(|g| g.mtp_support).unwrap_or(false) || mtp_draft_path.is_some(),
+        mtp_support: gguf.as_ref().map(|g| g.mtp_support).unwrap_or(false)
+            || mtp_draft_path.is_some(),
         mmproj_path,
         mtp_draft_path,
         supports_reasoning,
+        gguf_tags,
+        has_tool_template,
         gguf_metadata: gguf
             .as_ref()
             .map(|g| g.metadata_entries.clone())
             .unwrap_or_default(),
     })
+}
+
+/// 通过 chat_template 中是否含工具调用相关语法来权威判断 function calling 支持。
+/// 主流 instruct 模板（Qwen/Llama/Mistral/Gemma/GLM/GPT-OSS 等）在支持工具时会在模板里出现
+/// tool_calls / tools / function_call 等占位符；纯 base / 无工具的对话模板不会有。
+fn detect_tool_template(template: &str) -> bool {
+    if template.is_empty() {
+        return false;
+    }
+    let lower = template.to_ascii_lowercase();
+    // 任一关键词命中即视为支持工具
+    lower.contains("tool_calls")
+        || lower.contains("tool_call")
+        || lower.contains("\"tools\"")
+        || lower.contains("function_call")
+        || lower.contains("<|tool|>")
+        || lower.contains("<tool_call")
+        || lower.contains("<|tool_call|>")
+        || lower.contains("function calling")
+        || lower.contains("tools }}")
+        || lower.contains("tools %}")
 }

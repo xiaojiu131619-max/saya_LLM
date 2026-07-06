@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Play, Box, Layers, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles } from 'lucide-react';
+import { Play, Box, Layers, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles, Mic, Film } from 'lucide-react';
 import type { ModelInfo } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { isDesktopRuntime, listenDesktopEvent, revealDesktopPath, startDesktopServer } from '@/lib/desktop';
@@ -154,7 +154,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             {model.modelType === 'moe' ? 'MoE' : '稠密'}
           </CompactPill>
           <span className="hidden lg:inline-flex">
-            <CapabilityBadges model={model} dense />
+            <CapabilityBadges model={model} dense onlyActive />
           </span>
           {recentUsedAt && (
             <span
@@ -237,8 +237,8 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
                 {themeGroup.icon}
               </span>
             </div>
-            <div className="min-w-0">
-              <h3 className="truncate text-[15px] font-semibold text-[#2F2C26]">{model.name}</h3>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-[15px] font-semibold leading-snug text-[#2F2C26] [overflow-wrap:anywhere] dark:text-[#F3EBDD]">{model.name}</h3>
               <p className={`mt-1 text-xs leading-relaxed text-[#7D766B] ${isSingleColumn ? 'line-clamp-1' : 'line-clamp-2'}`}>
                 {model.description}
               </p>
@@ -302,7 +302,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         </div>
 
         <div className={`flex flex-wrap items-center gap-1 ${isSingleColumn ? 'mb-3' : 'mb-4'}`}>
-          <CapabilityBadges model={model} dense={isSingleColumn} />
+          <CapabilityBadges model={model} dense={isSingleColumn} onlyActive={isSingleColumn} />
         </div>
 
         <div className={`flex items-center gap-2 ${isSingleColumn ? 'justify-end' : 'justify-between'}`}>
@@ -367,7 +367,7 @@ function CompactPill({ children, className = '' }: { children: ReactNode; classN
   );
 }
 
-type CapabilityKey = 'vision' | 'thinking' | 'tools' | 'reasoning' | 'mtp';
+type CapabilityKey = 'vision' | 'audio' | 'video' | 'thinking' | 'tools' | 'mtp';
 
 interface CapabilityDef {
   key: CapabilityKey;
@@ -380,32 +380,46 @@ interface CapabilityDef {
 
 const CAPABILITY_DEFS: CapabilityDef[] = [
   { key: 'vision',    label: '视觉', icon: Eye,      active: 'bg-[#E7F1F8]', activeText: 'text-[#2E6E9E]', activeBorder: 'border-[#BFD7E8]' },
+  { key: 'audio',     label: '音频', icon: Mic,      active: 'bg-[#F4ECFA]', activeText: 'text-[#7A48B5]', activeBorder: 'border-[#DCC9F0]' },
+  { key: 'video',     label: '视频', icon: Film,     active: 'bg-[#FCEFE6]', activeText: 'text-[#B76540]', activeBorder: 'border-[#E8C9BD]' },
   { key: 'thinking',  label: '思考', icon: Brain,    active: 'bg-[#F2EEFB]', activeText: 'text-[#6C5DD3]', activeBorder: 'border-[#D9D3FF]' },
   { key: 'tools',     label: '工具', icon: Wrench,   active: 'bg-[#EEF8F2]', activeText: 'text-[#2C8B58]', activeBorder: 'border-[#CFEADA]' },
-  { key: 'reasoning', label: '推理', icon: Sparkles, active: 'bg-[#FFF2EA]', activeText: 'text-[#B76540]', activeBorder: 'border-[#E8C9BD]' },
   { key: 'mtp',       label: 'MTP',  icon: Sparkles, active: 'bg-[#EEF6FF]', activeText: 'text-[#2F6FB0]', activeBorder: 'border-[#C7DDF4]' },
 ];
 
 function modelCapabilityFlags(model: ModelInfo): Record<CapabilityKey, boolean> {
+  // 思考与推理合并为单一"思考"标签：任一为 true 即显示
+  const thinking = !!model.supportsThinking || !!model.supportsReasoning;
   return {
     vision: !!model.supportsVision,
-    thinking: !!model.supportsThinking,
+    audio: !!model.supportsAudio,
+    video: !!model.supportsVideo,
+    thinking,
     tools: !!model.supportsTools,
-    reasoning: !!model.supportsReasoning,
     mtp: !!model.supportsMtp,
   };
 }
 
-function CapabilityBadges({ model, dense = false }: { model: ModelInfo; dense?: boolean }) {
+function CapabilityBadges({ model, dense = false, onlyActive = false }: { model: ModelInfo; dense?: boolean; onlyActive?: boolean }) {
   const flags = modelCapabilityFlags(model);
   const sizeClasses = dense
     ? 'h-5 px-1.5 text-[10px] gap-0.5'
     : 'h-6 px-2 text-[11px] gap-1';
   const iconSize = dense ? 'h-2.5 w-2.5' : 'h-3 w-3';
+  const visibleDefs = onlyActive
+    ? CAPABILITY_DEFS.filter((def) => flags[def.key])
+    : CAPABILITY_DEFS;
+
+  // 单列/onlyActive 模式下没有命中的能力时，直接不渲染（避免空占位文字挤压排版）。
+  if (onlyActive && visibleDefs.length === 0) {
+    return dense ? null : (
+      <span className="text-[11px] text-[#8D867A] dark:text-[#7A7263]">无能力徽章</span>
+    );
+  }
 
   return (
     <div className="flex flex-shrink-0 flex-wrap items-center gap-1">
-      {CAPABILITY_DEFS.map((def) => {
+      {visibleDefs.map((def) => {
         const Icon = def.icon;
         const on = flags[def.key];
         return (
