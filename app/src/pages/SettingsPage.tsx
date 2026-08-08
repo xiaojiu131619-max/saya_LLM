@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   FolderPlus,
@@ -13,11 +13,13 @@ import {
   Trash2,
   FolderOpen,
   Monitor,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import ToggleSwitch from '@/components/ToggleSwitch';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
+import PageHeader from '@/components/PageHeader';
 import type { ModelInfo } from '@/types';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 import {
@@ -530,19 +532,18 @@ export default function SettingsPage() {
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto mb-6 max-w-2xl">
-          <h1 className="text-2xl font-bold text-primary-custom mb-1">设置</h1>
-          <p className="text-sm text-secondary-custom">配置 Agent LLM 启动器和模型运行参数</p>
+          <PageHeader icon={SlidersHorizontal} title="设置" description="配置 Agent LLM 启动器和模型运行参数" />
         </div>
 
         <div className="mx-auto max-w-2xl space-y-4 pb-12">
           <SettingSection title="本地模型运行" icon={FolderPlus} delay={0}>
             <SettingRow
               label="模型目录"
-              description={state.modelDirs.length > 0 ? state.modelDirs.join(' | ') : '选择包含 .gguf 文件的本地目录'}
+              description={state.modelDirs.length > 0 ? `已配置 ${state.modelDirs.length} 个模型目录` : '选择包含 .gguf 文件的本地目录'}
             >
               <button
                 onClick={handleAddModelDir}
-                className="flex items-center gap-1 text-sm text-[#5A6CFF] hover:underline"
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
               >
                 选择目录 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -556,7 +557,7 @@ export default function SettingsPage() {
                       <span className="truncate">{dir}</span>
                       <button
                         onClick={() => void handleRemoveModelDir(dir)}
-                        className="flex items-center gap-1 text-[#F87171] hover:underline flex-shrink-0"
+                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md px-2 text-[#C44E36] hover:bg-[#F0DDD6] dark:hover:bg-[#1C2836]"
                       >
                         <FolderX className="w-3.5 h-3.5" />
                         移除
@@ -582,7 +583,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => void handleRefreshServerStatus()}
-                  className="flex items-center gap-1 text-sm text-[#5A6CFF] hover:underline"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   刷新
@@ -590,7 +591,7 @@ export default function SettingsPage() {
                 <button
                   onClick={() => void handleStopServer()}
                   disabled={!state.serverRunning}
-                  className="flex items-center gap-1 text-sm text-[#F87171] hover:underline disabled:opacity-40"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#C44E36] hover:bg-[#F0DDD6] disabled:opacity-40 dark:hover:bg-[#1C2836]"
                 >
                   停止
                 </button>
@@ -619,7 +620,7 @@ export default function SettingsPage() {
             >
               <button
                 onClick={() => void handleCheckEngine()}
-                className="flex items-center gap-1 text-sm text-[#5A6CFF] hover:underline"
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
               >
                 检查
               </button>
@@ -632,7 +633,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => void handleCheckLatest()}
-                  className="flex items-center gap-1 text-sm text-[#5A6CFF] hover:underline"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
                 >
                   检查更新
                 </button>
@@ -651,6 +652,7 @@ export default function SettingsPage() {
               description={kernelSourceDescription(kernelDownloadSource)}
             >
               <select
+                aria-label="内核下载源"
                 value={kernelDownloadSource}
                 onChange={(event) => handleKernelSourceChange(event.target.value as KernelDownloadSource)}
                 className="max-w-[260px] glass-panel px-3 py-2 text-xs text-primary-custom bg-transparent outline-none"
@@ -671,6 +673,7 @@ export default function SettingsPage() {
                   }
                 >
                   <select
+                    aria-label="llama.cpp 发布包"
                     value={selectedAssetUrl}
                     onChange={(event) => setSelectedAssetUrl(event.target.value)}
                     disabled={releaseInfo.assets.length === 0}
@@ -731,6 +734,7 @@ export default function SettingsPage() {
                         </div>
                         <input
                           type="color"
+                          aria-label={`${group.label} 主题颜色`}
                           value={group.color}
                           onChange={(event) => dispatch({
                             type: 'SET_MODEL_GROUP_THEME_COLOR',
@@ -772,7 +776,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => void handleOpenAppDataDir()}
-                  className="flex items-center gap-1 text-sm text-[#5A6CFF] hover:underline"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
                 >
                   <FolderOpen className="w-3.5 h-3.5" />
                   打开
@@ -849,7 +853,7 @@ export default function SettingsPage() {
             className="glass-panel p-5"
           >
             <div className="text-center">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#5A6CFF] to-[#8B5CF6] flex items-center justify-center mx-auto mb-3">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-[#D7663E]">
                 <span className="text-xl font-bold text-white">L</span>
               </div>
               <h3 className="text-base font-semibold text-primary-custom mb-1">Agent LLM</h3>

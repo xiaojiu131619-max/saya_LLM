@@ -99,8 +99,8 @@ fn download_model_file_blocking(
     app: AppHandle,
     request: ModelDownloadRequest,
 ) -> Result<DownloadedModelFile, String> {
-    let url = reqwest::Url::parse(request.url.trim())
-        .map_err(|_| "下载链接格式不正确".to_string())?;
+    let url =
+        reqwest::Url::parse(request.url.trim()).map_err(|_| "下载链接格式不正确".to_string())?;
     if url.scheme() != "https" && url.scheme() != "http" {
         return Err("下载链接必须是 http 或 https".to_string());
     }
@@ -109,8 +109,7 @@ fn download_model_file_blocking(
     if target_dir.as_os_str().is_empty() {
         return Err("请选择模型保存目录".to_string());
     }
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("无法创建模型目录: {}", e))?;
+    std::fs::create_dir_all(&target_dir).map_err(|e| format!("无法创建模型目录: {}", e))?;
     if !target_dir.is_dir() {
         return Err("模型保存目录无效".to_string());
     }
@@ -183,7 +182,8 @@ fn download_model_file_blocking(
         }
     }
 
-    file.flush().map_err(|e| format!("保存模型文件失败: {}", e))?;
+    file.flush()
+        .map_err(|e| format!("保存模型文件失败: {}", e))?;
     drop(file);
 
     std::fs::rename(&part_path, &target_path).map_err(|error| {
@@ -207,7 +207,10 @@ fn download_model_file_blocking(
     })
 }
 
-fn resolve_download_file_name(url: &reqwest::Url, explicit: Option<&str>) -> Result<String, String> {
+fn resolve_download_file_name(
+    url: &reqwest::Url,
+    explicit: Option<&str>,
+) -> Result<String, String> {
     let raw_name = explicit
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -266,7 +269,12 @@ fn unique_target_path(target_dir: &Path, file_name: &str) -> PathBuf {
         }
     }
 
-    target_dir.join(format!("{}-{}{}", stem, chrono::Utc::now().timestamp(), ext))
+    target_dir.join(format!(
+        "{}-{}{}",
+        stem,
+        chrono::Utc::now().timestamp(),
+        ext
+    ))
 }
 
 fn part_path_for(target_path: &Path) -> Result<PathBuf, String> {
@@ -274,7 +282,9 @@ fn part_path_for(target_path: &Path) -> Result<PathBuf, String> {
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "模型保存路径无效".to_string())?;
-    Ok(target_path.with_file_name(format!("{}.part", file_name)))
+    // 使用时间戳避免并发下载同一文件时互相覆盖 part 文件
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    Ok(target_path.with_file_name(format!("{}.{}.part", file_name, timestamp)))
 }
 
 fn emit_download_progress(

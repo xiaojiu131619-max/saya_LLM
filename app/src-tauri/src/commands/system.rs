@@ -8,23 +8,51 @@ use std::os::windows::process::CommandExt;
 use crate::models::app_state::AppState;
 use crate::models::hardware_info::SystemStatus;
 use crate::services::auto_updater;
+use crate::services::process_manager;
 
-const MAX_TEXT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-const MAX_MEDIA_FILE_SIZE: u64 = 80 * 1024 * 1024; // 80MB，OpenAI multimodal base64 上限
+fn resolve_allowed_dirs(model_dirs: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    // 模型目录
+    for d in model_dirs {
+        if let Ok(canonical) = d.canonicalize() {
+            dirs.push(canonical);
+        }
+    }
+    // 应用数据目录
+    if let Some(data_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        dirs.push(data_dir);
+    }
+    // 临时目录
+    if let Ok(tmp) = std::env::temp_dir().canonicalize() {
+        dirs.push(tmp);
+    }
+    // 当前工作目录
+    if let Ok(cwd) = std::env::current_dir().map(|p| p.canonicalize().unwrap_or(p)) {
+        dirs.push(cwd);
+    }
+    dirs
+}
 
-#[derive(serde::Serialize)]
-pub struct MediaPayload {
-    pub mime_type: String,
-    pub data_base64: String,
-    pub byte_size: u64,
+fn is_path_in_allowed_dirs(path: &std::path::Path, model_dirs: &[std::path::PathBuf]) -> bool {
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let allowed = resolve_allowed_dirs(model_dirs);
+    allowed.iter().any(|d| canonical.starts_with(d))
 }
 
 #[tauri::command]
-pub fn read_file_content(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
+pub fn read_file_content(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err("文件不存在".to_string());
     }
+    let config = state.config.lock().map_err(|e| format!("配置锁定失败: {}", e))?;
+    if !is_path_in_allowed_dirs(p, &config.model_dirs) {
+        return Err("不允许读取该路径下的文件".to_string());
+    }
+    drop(config);
     let meta = std::fs::metadata(p).map_err(|e| format!("无法读取文件信息: {}", e))?;
     if meta.len() > MAX_TEXT_FILE_SIZE {
         return Err(format!(
@@ -32,15 +60,21 @@ pub fn read_file_content(path: String) -> Result<String, String> {
             meta.len() as f64 / 1024.0 / 1024.0
         ));
     }
-    std::fs::read_to_string(p).map_err(|_| "无法读取文件内容（可能是二进制文件，请改用图片/音频/视频附件）".to_string())
+    std::fs::read_to_string(p)
+        .map_err(|_| "无法读取文件内容（可能是二进制文件，请改用图片/音频/视频附件）".to_string())
 }
 
 #[tauri::command]
-pub fn read_media_file(path: String) -> Result<MediaPayload, String> {
-    let p = Path::new(&path);
+pub fn read_media_file(state: State<'_, AppState>, path: String) -> Result<MediaPayload, String> {
+    let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err("文件不存在".to_string());
     }
+    let config = state.config.lock().map_err(|e| format!("配置锁定失败: {}", e))?;
+    if !is_path_in_allowed_dirs(p, &config.model_dirs) {
+        return Err("不允许读取该路径下的文件".to_string());
+    }
+    drop(config);
     let meta = std::fs::metadata(p).map_err(|e| format!("无法读取文件信息: {}", e))?;
     if meta.len() > MAX_MEDIA_FILE_SIZE {
         return Err(format!(
@@ -56,9 +90,7 @@ pub fn read_media_file(path: String) -> Result<MediaPayload, String> {
         None => {
             return Err(format!(
                 "不支持的文件类型: {}（仅支持图片、音频、视频）",
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("未知")
+                p.extension().and_then(|e| e.to_str()).unwrap_or("未知")
             ));
         }
     };
@@ -68,6 +100,16 @@ pub fn read_media_file(path: String) -> Result<MediaPayload, String> {
         data_base64,
         byte_size: meta.len(),
     })
+}
+
+const MAX_TEXT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const MAX_MEDIA_FILE_SIZE: u64 = 80 * 1024 * 1024; // 80MB，OpenAI multimodal base64 上限
+
+#[derive(serde::Serialize)]
+pub struct MediaPayload {
+    pub mime_type: String,
+    pub data_base64: String,
+    pub byte_size: u64,
 }
 
 fn infer_media_mime(p: &Path) -> Option<String> {
@@ -101,8 +143,7 @@ fn infer_media_mime(p: &Path) -> Option<String> {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -231,67 +272,13 @@ pub struct EngineInfo {
     pub exe_path: String,
 }
 
+/// 解析引擎可执行文件路径。
+///
+/// 直接复用 `process_manager` 的实现：那份带有「允许目录 + 白名单文件名」两道检查。
+/// 这里曾有一份重复实现，它对绝对路径不做任何校验就原样返回，
+/// 而 `check_engine_info` 的参数来自前端，等于允许执行任意本地程序。
 fn resolve_exe_path(path: &str) -> String {
-    let requested = Path::new(path);
-    if requested.is_absolute() && requested.exists() {
-        return path.to_string();
-    }
-    let fname = requested
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path);
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(grandparent) = dir.parent() {
-                candidates.push(
-                    grandparent
-                        .join("_up_")
-                        .join("resources")
-                        .join(fname)
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                candidates.push(
-                    grandparent
-                        .join("resources")
-                        .join(fname)
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
-            candidates.push(
-                dir.join("_up_")
-                    .join("resources")
-                    .join(fname)
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            candidates.push(
-                dir.join("resources")
-                    .join(fname)
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            candidates.push(dir.join(fname).to_string_lossy().to_string());
-            candidates.push(dir.join(path).to_string_lossy().to_string());
-        }
-    }
-    candidates.push(format!("_up_/resources/{}", fname));
-    candidates.push(format!("resources/{}", fname));
-    candidates.push(format!("../{}", path));
-    candidates.push(format!("./{}", path));
-    candidates.push(format!("./{}", fname));
-    candidates.push(format!("../resources/{}", fname));
-    candidates.push(format!("../../resources/{}", fname));
-    candidates.push(path.to_string());
-    candidates.push(fname.to_string());
-    for c in &candidates {
-        if Path::new(c).exists() {
-            return c.to_string();
-        }
-    }
-    path.to_string()
+    process_manager::resolve_exe_path(path)
 }
 
 fn normalize_release_version(value: &str) -> Option<String> {
@@ -311,7 +298,9 @@ fn normalize_release_version(value: &str) -> Option<String> {
 }
 
 fn parse_llama_server_version(output: &str) -> Option<String> {
-    for token in output.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']')) {
+    for token in output
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']'))
+    {
         if let Some(version) = normalize_release_version(token) {
             if version != "b0" {
                 return Some(version);
@@ -365,9 +354,8 @@ pub fn check_engine_info(exe_path: String) -> EngineInfo {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let combined = format!("{}\n{}", stdout, stderr);
 
-        info.llama_server_version = auto_updater::get_current_version()
-            .and_then(|version| normalize_release_version(&version))
-            .or_else(|| parse_llama_server_version(&combined));
+        info.llama_server_version = parse_llama_server_version(&combined)
+            .or_else(|| auto_updater::get_current_version().and_then(|version| normalize_release_version(&version)));
 
         // Fallback: first non-empty line
         if info.llama_server_version.is_none() && !combined.trim().is_empty() {
@@ -417,7 +405,12 @@ pub fn check_engine_info(exe_path: String) -> EngineInfo {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        if combined.contains("spec-type") || combined.contains("reasoning-budget") {
+        // 仅在已有 CUDA 证据时才根据 --help 选项确认 CUDA Graphs
+        // （spec-type/reasoning-budget 在所有近期构建中都存在，包括纯 CPU 构建）
+        let has_cuda_evidence = info.sm_architecture.is_some()
+            || combined.contains("CUDA")
+            || combined.contains("cuda");
+        if has_cuda_evidence && (combined.contains("spec-type") || combined.contains("reasoning-budget")) {
             info.cuda_graphs_enabled = true;
         }
     }

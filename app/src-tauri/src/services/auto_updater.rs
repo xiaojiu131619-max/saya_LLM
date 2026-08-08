@@ -203,6 +203,7 @@ pub fn is_blackwell_gpu(name: Option<&str>) -> bool {
     // 匹配 "RTX 50xx" / "RTX50xx"（覆盖 5090 / 5080 / 5070 Ti / 5070 / 5060 Ti / 5060，
     // 以及 Laptop / D 后缀变体）。刻意不把 sm_120 的 datacenter 卡（B100/B200 等）纳入，
     // 那类卡目前不是本应用的目标用户。
+    // 排除 RTX 5000（Ada/Turing 专业卡，非 Blackwell）。
     let bytes = lower.as_bytes();
     let mut i = 0;
     while i + 4 < bytes.len() {
@@ -211,7 +212,11 @@ pub fn is_blackwell_gpu(name: Option<&str>) -> bool {
             while j < bytes.len() && bytes[j] == b' ' {
                 j += 1;
             }
-            if j + 1 < bytes.len() && bytes[j] == b'5' && bytes[j + 1].is_ascii_digit() {
+            // 匹配 5060/5070/5080/5090，排除 5000（Ada/Turing）
+            if j + 1 < bytes.len()
+                && bytes[j] == b'5'
+                && matches!(bytes[j + 1], b'6' | b'7' | b'8' | b'9')
+            {
                 return true;
             }
         }
@@ -246,11 +251,7 @@ fn cuda_version_from_url(url: &str) -> Option<String> {
     Some(format!("{}.{}", major, minor))
 }
 
-fn cuda_asset_score(
-    name: &str,
-    cuda_version: Option<&str>,
-    blackwell: bool,
-) -> (u8, u32, u32) {
+fn cuda_asset_score(name: &str, cuda_version: Option<&str>, blackwell: bool) -> (u8, u32, u32) {
     let Some((asset_major, asset_minor)) = cuda_asset_version(name) else {
         return (3, 0, 0);
     };
@@ -336,7 +337,12 @@ fn is_cudart_package(name: &str) -> bool {
         && lower.ends_with(".zip")
 }
 
-fn host_matched_asset(name: &str, cuda_version: Option<&str>, host_backend: &str, blackwell: bool) -> bool {
+fn host_matched_asset(
+    name: &str,
+    cuda_version: Option<&str>,
+    host_backend: &str,
+    blackwell: bool,
+) -> bool {
     let lower = name.to_ascii_lowercase();
     match host_backend {
         "CUDA" => {
@@ -351,7 +357,12 @@ fn host_matched_asset(name: &str, cuda_version: Option<&str>, host_backend: &str
     }
 }
 
-fn package_asset_score(name: &str, cuda_version: Option<&str>, host_backend: &str, blackwell: bool) -> (u8, u32, u32, String) {
+fn package_asset_score(
+    name: &str,
+    cuda_version: Option<&str>,
+    host_backend: &str,
+    blackwell: bool,
+) -> (u8, u32, u32, String) {
     let lower = name.to_ascii_lowercase();
     match host_backend {
         "CUDA" => {
@@ -516,7 +527,8 @@ pub fn check_latest_release() -> Result<ReleaseInfo, String> {
                 if matches_cuda {
                     cuda_matched = true;
                 }
-                let matches_host = host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
+                let matches_host =
+                    host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
                 assets.push(AssetInfo {
                     name: name.to_string(),
                     browser_download_url: item["browser_download_url"]
@@ -531,7 +543,14 @@ pub fn check_latest_release() -> Result<ReleaseInfo, String> {
         }
     }
 
-    assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend, blackwell));
+    assets.sort_by_key(|asset| {
+        package_asset_score(
+            &asset.name,
+            cuda_version.as_deref(),
+            &host_backend,
+            blackwell,
+        )
+    });
 
     let version = tag_name.trim_start_matches('v').to_string();
 
@@ -572,8 +591,12 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
                         if matches_cuda {
                             cuda_matched = true;
                         }
-                        let matches_host =
-                            host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
+                        let matches_host = host_matched_asset(
+                            name,
+                            cuda_version.as_deref(),
+                            &host_backend,
+                            blackwell,
+                        );
                         assets.push(AssetInfo {
                             name: name.to_string(),
                             browser_download_url: a["browser_download_url"]
@@ -587,7 +610,14 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
                     }
                 }
             }
-            assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version.as_deref(), &host_backend, blackwell));
+            assets.sort_by_key(|asset| {
+                package_asset_score(
+                    &asset.name,
+                    cuda_version.as_deref(),
+                    &host_backend,
+                    blackwell,
+                )
+            });
 
             let version = tag_name.trim_start_matches('v').to_string();
             releases.push(ReleaseInfo {
@@ -607,9 +637,109 @@ pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
     Ok(releases)
 }
 
-const GITHUB_MIRRORS: &[&str] = &[
-    "https://ghfast.top/",
+const GITHUB_MIRRORS: &[&str] = &["https://ghfast.top/"];
+
+/// 允许直连下载发布包的主机。发布包最终会被当作可执行文件运行，
+/// 因此下载地址必须限定在 GitHub 官方域名，不能接受前端传入的任意 URL。
+const ALLOWED_RELEASE_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
 ];
+
+/// 从 `https://host/path` 中取出小写 host。仅接受 https。
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn host_allowed(host: &str, allowed: &[&str]) -> bool {
+    allowed
+        .iter()
+        .any(|candidate| host == *candidate || host.ends_with(&format!(".{}", candidate)))
+}
+
+/// 校验发布包 URL 必须是 https 且落在 GitHub 官方域名内。
+fn ensure_release_url_allowed(url: &str) -> Result<(), String> {
+    match url_host(url) {
+        Some(host) if host_allowed(&host, ALLOWED_RELEASE_HOSTS) => Ok(()),
+        Some(host) => Err(format!(
+            "拒绝从非官方地址下载发布包：{}（仅允许 GitHub 官方域名）",
+            host
+        )),
+        None => Err("发布包地址无效，必须是 https:// 开头的 GitHub 官方地址。".to_string()),
+    }
+}
+
+/// 校验加速源 URL 至少是 https。加速源内容不可信，
+/// 因此它下载到的字节必须逐一通过 SHA256 比对才会被采用。
+fn ensure_mirror_url_allowed(mirror: &str) -> Result<(), String> {
+    match url_host(mirror) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "加速源地址无效，必须是 https:// 开头：{}",
+            mirror
+        )),
+    }
+}
+
+/// 从发布包 URL 中解析出 release tag 与 asset 文件名。
+/// 形如 `https://github.com/ggml-org/llama.cpp/releases/download/<tag>/<asset>`。
+fn parse_release_asset_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://")?;
+    let path = rest.split_once('/')?.1;
+    let marker = "releases/download/";
+    let after = path.split_once(marker)?.1;
+    let (tag, asset) = after.split_once('/')?;
+    if tag.is_empty() || asset.is_empty() || asset.contains('/') {
+        return None;
+    }
+    Some((tag.to_string(), asset.to_string()))
+}
+
+/// 向 GitHub API 查询指定 asset 的官方 SHA256（API 返回形如 `sha256:abc...`）。
+/// 这是整条更新链的信任根：没有它就无法判断下载到的字节是否被篡改。
+fn fetch_expected_sha256(tag: &str, asset_name: &str) -> Result<String, String> {
+    // tag 会拼进 API 路径，必须先排除路径穿越与注入字符。
+    if tag.is_empty()
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    {
+        return Err(format!("release tag 非法：{}", tag));
+    }
+    let json = github_api_json(&format!("releases/tags/{}", tag))?;
+    let assets = json["assets"]
+        .as_array()
+        .ok_or_else(|| "更新源未返回 assets 列表，无法校验发布包。".to_string())?;
+    for item in assets {
+        if item["name"].as_str() == Some(asset_name) {
+            let digest = item["digest"]
+                .as_str()
+                .ok_or_else(|| format!("更新源未提供 {} 的校验和，已中止更新。", asset_name))?;
+            let hex = digest
+                .strip_prefix("sha256:")
+                .ok_or_else(|| format!("不支持的校验和格式：{}", digest))?
+                .trim()
+                .to_ascii_lowercase();
+            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("校验和格式非法：{}", digest));
+            }
+            return Ok(hex);
+        }
+    }
+    Err(format!("更新源中找不到发布包 {}，已中止更新。", asset_name))
+}
 
 fn mirror_download_url(mirror: &str, url: &str) -> String {
     format!(
@@ -624,6 +754,7 @@ fn try_download_stream(
     url: &str,
     use_mirror: bool,
     mirror_url: Option<&str>,
+    expected_sha256: &str,
     on_progress: &dyn Fn(String),
 ) -> Result<Vec<u8>, String> {
     if use_mirror {
@@ -645,7 +776,18 @@ fn try_download_stream(
                     }
                     match download_with_progress(resp, on_progress) {
                         Ok(bytes) => match validate_downloaded_zip(&bytes) {
-                            Ok(()) => return Ok(bytes),
+                            Ok(()) => {
+                                // 加速源不可信：校验和不一致就换下一个源，绝不采用。
+                                let actual = sha256_hex(&bytes);
+                                if actual == expected_sha256 {
+                                    return Ok(bytes);
+                                }
+                                on_progress(format!(
+                                    "加速源内容校验和不匹配（期望 {}...，实际 {}...），跳过",
+                                    &expected_sha256[..12],
+                                    &actual[..12]
+                                ));
+                            }
                             Err(error) => {
                                 on_progress(format!("加速源返回内容无效：{}，跳过", error));
                             }
@@ -675,7 +817,16 @@ fn try_download_stream(
     match direct_client.get(url).send() {
         Ok(resp) => {
             if resp.status().is_success() {
-                return download_with_progress(resp, on_progress);
+                let bytes = download_with_progress(resp, on_progress)?;
+                let actual = sha256_hex(&bytes);
+                if actual != expected_sha256 {
+                    return Err(format!(
+                        "发布包校验和不匹配，已中止安装（期望 {}...，实际 {}...）。",
+                        &expected_sha256[..12],
+                        &actual[..12]
+                    ));
+                }
+                return Ok(bytes);
             }
             Err(format!("下载失败: HTTP {}", resp.status()))
         }
@@ -718,23 +869,40 @@ fn download_with_progress(
     Ok(bytes)
 }
 
+/// 下载并强制校验一个发布包。
+///
+/// 调用方必须先从 GitHub API 取到官方 SHA256 再传进来；
+/// 校验不通过一律返回 Err，绝不允许未校验的字节流入解压和执行环节。
 fn download_zip_bytes(
     client: &reqwest::blocking::Client,
     label: &str,
     url: &str,
     use_mirror: bool,
     mirror_url: Option<&str>,
+    expected_sha256: &str,
     on_progress: &dyn Fn(String),
 ) -> Result<(Vec<u8>, String), String> {
     on_progress(format!("正在下载 {}...", label));
-    let bytes = try_download_stream(client, url, use_mirror, mirror_url, &|msg| {
+    let bytes = try_download_stream(client, url, use_mirror, mirror_url, expected_sha256, &|msg| {
         eprintln!("[updater] {}", msg);
         on_progress(msg);
     })?;
 
     validate_downloaded_zip(&bytes)?;
     let sha256 = sha256_hex(&bytes);
-    on_progress(format!("{} 下载完成，SHA256：{}...", label, &sha256[..12]));
+    if sha256 != expected_sha256 {
+        return Err(format!(
+            "{} 校验和不匹配，已中止安装（期望 {}...，实际 {}...）。",
+            label,
+            &expected_sha256[..12],
+            &sha256[..12]
+        ));
+    }
+    on_progress(format!(
+        "{} 下载完成，SHA256 校验通过：{}...",
+        label,
+        &sha256[..12]
+    ));
     Ok((bytes, sha256))
 }
 
@@ -781,7 +949,10 @@ fn find_llama_server(root: &Path) -> Result<PathBuf, String> {
         return Ok(direct_path);
     }
 
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if entry.file_name().to_string_lossy() == name {
             return Ok(entry.path().to_path_buf());
         }
@@ -823,15 +994,23 @@ fn validate_llama_server(exe_path: &Path) -> Result<String, String> {
         String::from_utf8_lossy(&output.stderr)
     );
     let preview = combined.trim();
-    if !output.status.success() && preview.is_empty() {
-        return Err("新版 llama-server --version 验证失败。".to_string());
+    if !output.status.success() {
+        return Err(format!(
+            "新版 llama-server --version 验证失败（退出码 {:?}）：{}",
+            output.status.code(),
+            if preview.is_empty() { "无输出" } else { preview }
+        ));
     }
-    if !preview.to_ascii_lowercase().contains("version")
-        && !preview.to_ascii_lowercase().contains("llama")
-    {
+    let lower = preview.to_ascii_lowercase();
+    if !lower.contains("version") && !lower.contains("llama") {
         return Err("新版 llama-server 输出异常，已取消安装。".to_string());
     }
-    Ok(preview.lines().next().unwrap_or("llama-server 已验证").trim().to_string())
+    Ok(preview
+        .lines()
+        .next()
+        .unwrap_or("llama-server 已验证")
+        .trim()
+        .to_string())
 }
 
 fn copy_runtime_files_inner(
@@ -943,37 +1122,45 @@ fn install_from_staging(staging_dir: &Path, resources: &Path) -> Result<(), Stri
     Ok(())
 }
 
-fn powershell_path(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
-}
-
 fn expand_zip(zip_path: &Path, extract_dir: &Path) -> Result<(), String> {
-    let mut command = Command::new("powershell");
-    command.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        &format!(
-            "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
-            powershell_path(zip_path),
-            powershell_path(extract_dir)
-        ),
-    ]);
-    #[cfg(windows)]
-    {
-        command.creation_flags(0x08000000);
-    }
+    let file = fs::File::open(zip_path).map_err(|e| format!("无法打开压缩文件: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法读取压缩文件: {}", e))?;
+    fs::create_dir_all(extract_dir).map_err(|e| format!("无法创建解压目录: {}", e))?;
 
-    let output = command.output().map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("解压失败: {}{}", stderr, stdout))
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("读取压缩条目失败: {}", e))?;
+        // enclosed_name() 会在条目名包含 `..` 或为绝对路径时返回 None。
+        // 这种条目必须直接拒绝：绝不能退回未清洗的 entry.name()，
+        // 否则 PathBuf::join 遇到绝对路径会丢弃 extract_dir，形成任意路径写入（Zip Slip）。
+        let entry_name = match entry.enclosed_name() {
+            Some(name) => name.to_path_buf(),
+            None => {
+                return Err(format!(
+                    "压缩包内条目路径非法，已中止解压：{}",
+                    entry.name()
+                ));
+            }
+        };
+        let target_path = extract_dir.join(&entry_name);
+        // 二次确认：规范化后的目标必须仍落在解压目录内。
+        if !target_path.starts_with(extract_dir) {
+            return Err(format!(
+                "压缩包内条目试图写出解压目录，已中止解压：{}",
+                entry.name()
+            ));
+        }
+
+        if entry.is_dir() {
+            fs::create_dir_all(&target_path).map_err(|e| format!("创建目录失败: {}", e))?;
+        } else {
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
+            }
+            let mut out = fs::File::create(&target_path).map_err(|e| format!("创建文件失败: {}", e))?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| format!("解压文件失败: {}", e))?;
+        }
     }
+    Ok(())
 }
 
 pub fn download_and_install(
@@ -988,6 +1175,17 @@ pub fn download_and_install(
         url, version, use_mirror
     );
 
+    // 下载地址来自前端参数，必须先限定在 GitHub 官方域名，再取官方校验和。
+    ensure_release_url_allowed(url)?;
+    if let Some(mirror) = mirror_url {
+        ensure_mirror_url_allowed(mirror)?;
+    }
+    let (release_tag, asset_name) = parse_release_asset_url(url)
+        .ok_or_else(|| "无法从发布包地址解析出版本与文件名，已中止更新。".to_string())?;
+
+    on_progress("正在获取官方校验和...".to_string());
+    let expected_sha256 = fetch_expected_sha256(&release_tag, &asset_name)?;
+
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
@@ -999,6 +1197,7 @@ pub fn download_and_install(
         url,
         use_mirror,
         mirror_url,
+        &expected_sha256,
         &on_progress,
     )?;
     eprintln!("[updater] download complete, size: {} bytes", bytes.len());
@@ -1015,6 +1214,15 @@ pub fn download_and_install(
     let runtime_extract_dir = temp_root.join("runtime");
     let staging_dir = temp_root.join("staging");
     fs::create_dir_all(&temp_root).map_err(|error| error.to_string())?;
+
+    // 确保临时目录在所有路径（包括错误路径）都被清理
+    struct TempGuard(PathBuf);
+    impl Drop for TempGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = TempGuard(temp_root.clone());
     {
         let mut file = fs::File::create(&zip_path).map_err(|error| error.to_string())?;
         file.write_all(&bytes).map_err(|error| error.to_string())?;
@@ -1037,12 +1245,18 @@ pub fn download_and_install(
     let mut runtime_copied = Vec::new();
     if let Some(runtime_url) = companion_cudart_url(url) {
         on_progress("检测到 CUDA 发布包，正在下载配套 CUDA runtime...".to_string());
+        // 配套 runtime 同样要过官方域名与校验和两道关。
+        ensure_release_url_allowed(&runtime_url)?;
+        let (runtime_tag, runtime_asset) = parse_release_asset_url(&runtime_url)
+            .ok_or_else(|| "无法解析 CUDA runtime 地址，已中止更新。".to_string())?;
+        let expected_runtime_sha256 = fetch_expected_sha256(&runtime_tag, &runtime_asset)?;
         let (runtime_bytes, runtime_sha256) = download_zip_bytes(
             &client,
             "CUDA runtime",
             &runtime_url,
             use_mirror,
             mirror_url,
+            &expected_runtime_sha256,
             &on_progress,
         )?;
         eprintln!(
@@ -1109,7 +1323,6 @@ pub fn download_and_install(
     log.current_version = Some(version.to_string());
     save_log(&log);
 
-    let _ = fs::remove_dir_all(&temp_root);
     on_progress("安装完成，重启生效".to_string());
     Ok(format!("llama.cpp 内核已更新到 {}", version))
 }
@@ -1150,7 +1363,17 @@ pub fn list_backups() -> Vec<(String, String)> {
 }
 
 pub fn rollback_to(version_dir: &str) -> Result<(), String> {
+    // 防止路径穿越：version_dir 应为纯目录名（如 "b4567"），不允许路径分隔符
+    if version_dir.contains("..") || version_dir.contains('/') || version_dir.contains('\\') {
+        return Err("非法的版本目录名。".to_string());
+    }
     let backup_dir = versions_dir().join(version_dir);
+    // 规范化后确认仍在 versions 目录下
+    let canonical = backup_dir.canonicalize().map_err(|_| "版本目录不存在。".to_string())?;
+    let versions_root = versions_dir().canonicalize().map_err(|_| "无法解析版本根目录。".to_string())?;
+    if !canonical.starts_with(&versions_root) {
+        return Err("版本目录路径异常，已拒绝。".to_string());
+    }
     let resources = resource_dir();
 
     if !backup_dir.exists() {
@@ -1177,4 +1400,57 @@ pub fn rollback_to(version_dir: &str) -> Result<(), String> {
 
 pub fn get_update_log() -> Vec<UpdateLogEntry> {
     load_log().entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REAL_ASSET_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b6459/llama-b6459-bin-win-cuda-12.4-x64.zip";
+
+    #[test]
+    fn accepts_official_github_release_hosts() {
+        assert!(ensure_release_url_allowed(REAL_ASSET_URL).is_ok());
+        assert!(ensure_release_url_allowed(
+            "https://objects.githubusercontent.com/some/path/pkg.zip"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_non_github_and_plaintext_release_urls() {
+        // 发布包最终会被当作可执行文件运行，非官方域名必须拒绝。
+        assert!(ensure_release_url_allowed("https://evil.example.com/pkg.zip").is_err());
+        // 仿冒域名不能因为包含 github.com 子串就通过。
+        assert!(ensure_release_url_allowed("https://github.com.evil.example/pkg.zip").is_err());
+        // 明文 http 一律拒绝。
+        assert!(ensure_release_url_allowed(
+            "http://github.com/ggml-org/llama.cpp/releases/download/b1/pkg.zip"
+        )
+        .is_err());
+        // userinfo 混淆写法不能骗过 host 解析。
+        assert!(
+            ensure_release_url_allowed("https://github.com@evil.example.com/pkg.zip").is_err()
+        );
+    }
+
+    #[test]
+    fn parses_tag_and_asset_from_release_url() {
+        let (tag, asset) = parse_release_asset_url(REAL_ASSET_URL).expect("应能解析");
+        assert_eq!(tag, "b6459");
+        assert_eq!(asset, "llama-b6459-bin-win-cuda-12.4-x64.zip");
+    }
+
+    #[test]
+    fn rejects_urls_without_a_release_asset_path() {
+        assert!(parse_release_asset_url("https://github.com/ggml-org/llama.cpp").is_none());
+        assert!(parse_release_asset_url("https://github.com/a/b/releases/download/tagonly").is_none());
+    }
+
+    #[test]
+    fn subdomains_of_allowed_hosts_are_accepted_but_suffix_tricks_are_not() {
+        assert!(host_allowed("objects.githubusercontent.com", ALLOWED_RELEASE_HOSTS));
+        assert!(!host_allowed("notgithub.com", ALLOWED_RELEASE_HOSTS));
+        assert!(!host_allowed("github.com.attacker.net", ALLOWED_RELEASE_HOSTS));
+    }
 }

@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+﻿import { useMemo, useState } from 'react';
 import { Activity, BarChart3, CalendarDays, ChevronDown, ChevronUp, Gauge, Hash, PieChart, Trophy } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import type { LucideIcon } from 'lucide-react';
+import PageHeader from '@/components/PageHeader';
 
 function yearDays() {
   const now = new Date();
@@ -24,7 +25,7 @@ const MONTH_LABELS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8
 
 // 离散色阶：0=无记录，1-4 由浅到深。GitHub 贡献图风格，避免连续 opacity 发灰。
 const HEATMAP_LEVELS_LIGHT = ['#EBE6DB', '#F4C9B5', '#E89B79', '#DA744D', '#C4502E'];
-const HEATMAP_LEVELS_DARK = ['rgba(255,255,255,0.06)', '#5C3322', '#8A4A2E', '#BC6038', '#E68A57'];
+const HEATMAP_LEVELS_DARK = ['rgba(255,255,255,0.06)', '#1C3050', '#2A4A72', '#3A6494', '#5088BC'];
 
 function tokenLevel(tokens: number, maxTokens: number): number {
   if (tokens <= 0) return 0;
@@ -113,26 +114,19 @@ export default function UsagePage() {
     })
     .filter((item) => item.usage.totalTokens > 0)
     .sort((a, b) => b.usage.totalTokens - a.usage.totalTokens);
+  const currentYear = new Date().getFullYear();
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#171512] dark:text-[#F3EBDD]">
+    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-[1100px]">
-          <div className="anim-fade-rise mb-6 flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] text-[#D06646] dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <BarChart3 className="h-5 w-5" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-xl font-bold leading-tight text-[#2F2C26] dark:text-[#F3EBDD]">使用详情</h1>
-              <p className="mt-0.5 truncate text-xs text-[#7D766B] dark:text-[#A9A095]">真实 usage 数据来自 llama.cpp 响应。</p>
-            </div>
-          </div>
+          <PageHeader icon={BarChart3} title="使用详情" description="真实用量数据来自 llama.cpp 响应。" className="anim-fade-rise mb-6" />
 
           <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <MetricCard icon={Hash} label="总 Token" value={totals.totalTokens.toLocaleString()} delay={0} />
-            <MetricCard icon={Activity} label="输入 Token" value={totals.promptTokens.toLocaleString()} delay={40} />
-            <MetricCard icon={CalendarDays} label="输出 Token" value={totals.completionTokens.toLocaleString()} delay={80} />
-            <MetricCard icon={Gauge} label="平均 tok/s" value={avgTokensPerSec > 0 ? avgTokensPerSec.toFixed(1) : '暂无'} delay={120} />
+            <MetricCard icon={Hash} label="总令牌数（Token）" value={totals.totalTokens.toLocaleString()} delay={0} />
+            <MetricCard icon={Activity} label="输入令牌" value={totals.promptTokens.toLocaleString()} delay={40} />
+            <MetricCard icon={CalendarDays} label="输出令牌" value={totals.completionTokens.toLocaleString()} delay={80} />
+            <MetricCard icon={Gauge} label="平均速度（tok/s）" value={avgTokensPerSec > 0 ? avgTokensPerSec.toFixed(1) : '暂无'} delay={120} />
           </div>
 
           <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -145,37 +139,36 @@ export default function UsagePage() {
             <div className="mb-5 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <CalendarDays className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
-                <h2 className="text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">全年 Token 热力图</h2>
+                <h2 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{currentYear} 年 Token 热力图</h2>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] text-[#7D766B] dark:text-[#A9A095]">{activeDayCount} 天有记录</span>
-                <span className="rounded-full border border-[#E3DFD6] bg-[#FBFAF6] px-2 py-0.5 text-[11px] text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#A9A095]">{new Date().getFullYear()}</span>
+                <span className="text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{activeDayCount} 天有记录</span>
               </div>
             </div>
-            <div className="overflow-x-auto pb-1">
-              <div className="w-max">
+            <div className="overflow-x-auto overscroll-x-contain pb-3 [scrollbar-color:#D06646_#E8E1D6] [scrollbar-width:thin] dark:[scrollbar-color:#D06646_#2A241E]">
+              <div className="w-max min-w-[820px]">
                 {/* 月份标签 */}
-                <div className="mb-1.5 flex pl-9 text-[10px] leading-none text-[#9A9082] dark:text-[#7A7264]">
+                <div className="mb-1.5 flex pl-9 text-[10px] leading-none text-[#9A9082] dark:text-[#6B7688]">
                   {heatmapWeeks.map((week, weekIndex) => (
-                    <div key={weekIndex} className="w-[20px] flex-shrink-0">
-                      {week.monthLabel ? <span className="relative -left-px">{week.monthLabel}</span> : null}
+                    <div key={weekIndex} className="w-[15px] flex-shrink-0">
+                      {week.monthLabel ? <span className="relative -left-px whitespace-nowrap">{week.monthLabel}</span> : null}
                     </div>
                   ))}
                 </div>
                 <div className="flex">
                   {/* 星期标签 */}
-                  <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col gap-[4px] text-[10px] leading-[16px] text-[#9A9082] dark:text-[#7A7264]">
+                  <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col gap-[3px] text-[10px] leading-[12px] text-[#716A5E] dark:text-[#8E99AD]">
                     {WEEKDAY_LABELS.map((label, rowIndex) => (
-                      <div key={rowIndex} className="flex h-[16px] items-center justify-end pr-0.5">{rowIndex % 2 === 1 ? label : ''}</div>
+                      <div key={rowIndex} className="flex h-3 items-center justify-end pr-0.5">{rowIndex % 2 === 1 ? label : ''}</div>
                     ))}
                   </div>
                   {/* 格子 */}
-                  <div className="flex gap-[4px]">
+                  <div className="flex gap-[3px]">
                     {heatmapWeeks.map((week, weekIndex) => (
-                      <div key={weekIndex} className="flex flex-col gap-[4px]">
+                      <div key={weekIndex} className="flex flex-col gap-[3px]">
                         {week.days.map((day, rowIndex) => {
                           if (!day) {
-                            return <div key={`blank-${weekIndex}-${rowIndex}`} className="h-[16px] w-[16px]" />;
+                            return <div key={`blank-${weekIndex}-${rowIndex}`} className="h-3 w-3" />;
                           }
                           const tokens = dailyTokensByDay.get(day) ?? 0;
                           const level = tokenLevel(tokens, maxDayTokens);
@@ -183,7 +176,7 @@ export default function UsagePage() {
                             <div
                               key={day}
                               title={`${day}：${tokens.toLocaleString()} 个 Token`}
-                              className="h-[16px] w-[16px] flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[#D06646]/60"
+                              className="h-3 w-3 flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[#D06646]/60"
                               style={{ background: heatmapPalette[level] }}
                             />
                           );
@@ -193,7 +186,7 @@ export default function UsagePage() {
                   </div>
                 </div>
                 {/* 图例 */}
-                <div className="mt-3 flex items-center justify-end gap-1.5 pr-0.5 text-[10px] leading-none text-[#9A9082] dark:text-[#7A7264]">
+                <div className="mt-3 flex items-center justify-end gap-1.5 pr-0.5 text-[10px] leading-none text-[#9A9082] dark:text-[#6B7688]">
                   <span>少</span>
                   {heatmapPalette.map((color, index) => (
                     <span
@@ -212,9 +205,9 @@ export default function UsagePage() {
             <div className="mb-5 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <PieChart className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
-                <h2 className="text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">模型使用占比</h2>
+                <h2 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">模型使用占比</h2>
               </div>
-              <span className="text-[11px] text-[#7D766B] dark:text-[#A9A095]">按真实 token 总量排序</span>
+              <span className="text-[11px] text-[#7D766B] dark:text-[#8E99AD]">按真实 token 总量排序</span>
             </div>
             {modelUsage.length > 0 ? (
               <div className="grid grid-cols-1 items-center gap-6 lg:grid-cols-[220px_1fr]">
@@ -242,7 +235,7 @@ export default function UsagePage() {
                     <button
                       type="button"
                       onClick={() => setUsageExpanded((value) => !value)}
-                      className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] py-2 text-xs font-medium text-[#7D766B] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#A9A095] dark:hover:bg-white/[0.07]"
+                      className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] py-2 text-xs font-medium text-[#7D766B] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD] dark:hover:bg-white/[0.07]"
                     >
                       {usageExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                       {usageExpanded ? '收起' : `展开全部（共 ${modelUsage.length} 个）`}
@@ -251,7 +244,7 @@ export default function UsagePage() {
                 </div>
               </div>
             ) : (
-              <div className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-8 text-center text-sm text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#A9A095]">
+              <div className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-8 text-center text-sm text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]">
                 暂无真实 token 使用记录。
               </div>
             )}
@@ -276,13 +269,14 @@ function DonutChart({ items }: { items: Array<{ id: string; label: string; value
   return (
     <div className="flex flex-col items-center justify-center">
       <div
+        title={items.map((item) => `${item.label}：${item.value.toLocaleString()} Token`).join('\n')}
         className="relative flex h-44 w-44 items-center justify-center rounded-full"
         style={{ background: total > 0 ? `conic-gradient(${segments.join(', ')})` : 'rgba(128,128,128,0.12)' }}
       >
-        <div className="flex h-28 w-28 flex-col items-center justify-center rounded-full border border-[#DCD8CF] bg-[#FBFAF6] px-3 text-center shadow-sm dark:border-white/[0.08] dark:bg-[#1C1A16]">
+        <div className="flex h-28 w-28 flex-col items-center justify-center rounded-full border border-[#DCD8CF] bg-[#FBFAF6] px-3 text-center shadow-sm dark:border-white/[0.08] dark:bg-[#1A1E28]">
           <Trophy className="mb-1 h-4 w-4 text-[#D9A324]" />
-          <div className="text-[11px] text-[#7D766B] dark:text-[#A9A095]">最多使用</div>
-          <div className="max-w-full truncate text-xs font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{top?.label ?? '暂无'}</div>
+          <div className="text-[11px] text-[#7D766B] dark:text-[#8E99AD]">最多使用</div>
+          <div className="max-w-full truncate text-xs font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{top?.label ?? '暂无'}</div>
         </div>
       </div>
     </div>
@@ -303,7 +297,7 @@ function UsageRankRow({ rank, name, tokens, total, color, responseCount, avgToke
   const lastUsedText = lastUsedAt ? new Date(lastUsedAt).toLocaleString() : '暂无时间';
 
   return (
-    <div className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-3 transition-colors hover:border-[#D06646]/30 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:border-[#D06646]/40">
+    <div title={name} className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-3 transition-colors hover:border-[#D06646]/30 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:border-[#D06646]/40">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <div
@@ -313,13 +307,13 @@ function UsageRankRow({ rank, name, tokens, total, color, responseCount, avgToke
             {rank}
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-[#2F2C26] dark:text-[#F3EBDD]">{name}</div>
-            <div className="mt-0.5 truncate text-[11px] text-[#7D766B] dark:text-[#A9A095]">
+            <div title={name} className="truncate text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2]">{name}</div>
+            <div className="mt-0.5 truncate text-[11px] text-[#7D766B] dark:text-[#8E99AD]">
               {percent.toFixed(1)}% · {responseCount} 次 · {avgTokensPerSec > 0 ? `${avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'} · {lastUsedText}
             </div>
           </div>
         </div>
-        <div className="mono-font flex-shrink-0 text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{tokens.toLocaleString()}</div>
+        <div className="mono-font flex-shrink-0 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{tokens.toLocaleString()}</div>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.08]">
         <div className="h-full rounded-full transition-[width] duration-500 ease-out" style={{ width: `${percent}%`, background: color }} />
@@ -337,8 +331,8 @@ function MetricCard({ icon: Icon, label, value, delay = 0 }: { icon: LucideIcon;
       <div className="mb-2.5 flex h-7 w-7 items-center justify-center rounded-md bg-[#F0E7E1] text-[#D06646] dark:bg-white/[0.06]">
         <Icon className="h-4 w-4" />
       </div>
-      <div className="mb-1 truncate text-xs text-[#7D766B] dark:text-[#A9A095]">{label}</div>
-      <div className="mono-font truncate text-lg font-semibold leading-tight text-[#2F2C26] dark:text-[#F3EBDD]">{value}</div>
+      <div className="mb-1 truncate text-xs text-[#7D766B] dark:text-[#8E99AD]">{label}</div>
+      <div className="mono-font truncate text-lg font-semibold leading-tight text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
     </div>
   );
 }

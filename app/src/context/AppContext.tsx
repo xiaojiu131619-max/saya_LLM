@@ -6,8 +6,10 @@ import {
   getDesktopServerStatus,
   getExternalApiKeyForSession,
   getExternalApiKeyStatus,
+  getServerApiKey,
   isDesktopRuntime,
   createExternalApiKey,
+  listenDesktopEvent,
   scanDesktopModels,
   stopDesktopServer,
   toFrontendModel,
@@ -207,6 +209,7 @@ function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig>
     kvUnified: config.kvUnified ?? false,
     mmap: config.mmap ?? true,
     mlock: config.mlock ?? false,
+    noWarmup: config.noWarmup ?? false,
     cacheTypeKEnabled: config.cacheTypeKEnabled ?? legacyKvQuant !== 'f16',
     cacheTypeK: config.cacheTypeK ?? legacyKvQuant,
     cacheTypeVEnabled: config.cacheTypeVEnabled ?? legacyKvQuant !== 'f16',
@@ -666,6 +669,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }
         }
 
+        if (serverRunning) {
+          const activeKey = await getServerApiKey().catch(() => null);
+          if (activeKey) {
+            resolvedSessionApiKey = activeKey;
+            resolvedHasApiKey = true;
+          }
+        }
+
+        // 迁移完成后立即清除 localStorage 中的旧明文 apiKey
+        if (migratedStoredApiKey) {
+          try {
+            const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}');
+            if (stored?.apiConfig && 'apiKey' in stored.apiConfig) {
+              delete stored.apiConfig.apiKey;
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+            }
+          } catch { /* best-effort */ }
+        }
+
         if (config) {
           dispatch({ type: 'SET_MODEL_DIRS', payload: config.model_dirs });
           dispatch({ type: 'SET_SERVER_PORT', payload: config.default_port });
@@ -763,6 +785,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.models,
     state.serverRunning,
   ]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    void listenDesktopEvent<{ error_type?: string; title?: string; details?: string }>(
+      'server:error',
+      (error) => {
+        if (disposed) return;
+        dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
+        const modelId = state.activeModelId;
+        if (modelId) {
+          dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId, status: 'error' } });
+        }
+        dispatch({
+          type: 'SET_APP_STATUS',
+          payload: error.title
+            ? `${error.title}：${error.details ?? ''}`
+            : '推理服务异常退出，请重新加载模型。',
+        });
+      },
+    ).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    });
+
+    void listenDesktopEvent('server:stopped', () => {
+      if (disposed) return;
+      dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    });
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [state.activeModelId]);
 
   // H1: 把"构建快照 + JSON.stringify + 同步写 localStorage"集中到一个 ref 函数，
   // 流式输出时每个 token 都会改写 chatSessions，若每次都全量序列化+写盘会严重阻塞主线程。

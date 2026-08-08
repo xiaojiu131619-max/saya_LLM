@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct ServerConfig {
     pub executable_path: String,
     pub model_path: String,
+    #[serde(default)]
+    pub model_alias: Option<String>,
     pub port: u16,
     #[serde(default = "default_host")]
     pub host: String,
@@ -24,6 +26,8 @@ pub struct ServerConfig {
     pub kv_unified: bool,
     pub mmap: bool,
     pub mlock: bool,
+    #[serde(default)]
+    pub no_warmup: bool,
     pub cache_type_k: String,
     pub cache_type_v: String,
     #[serde(default)]
@@ -74,6 +78,7 @@ impl Default for ServerConfig {
         Self {
             executable_path: String::from("resources/llama-server.exe"),
             model_path: String::new(),
+            model_alias: None,
             port: 8080,
             host: default_host(),
             api_key: None,
@@ -88,6 +93,7 @@ impl Default for ServerConfig {
             kv_unified: true,
             mmap: true,
             mlock: false,
+            no_warmup: false,
             cache_type_k: String::from("f16"),
             cache_type_v: String::from("f16"),
             cache_type_k_enabled: false,

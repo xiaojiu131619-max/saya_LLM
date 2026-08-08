@@ -2,15 +2,20 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats } from '@/types';
+import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
 import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
-import { logDebug, logInfo, logWarn } from '@/lib/appLog';
+import { logInfo } from '@/lib/appLog';
+import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
+import { filterLlamaCppServerTools } from '@/lib/llamaTools';
 
 export interface DesktopModelInfo {
   name: string;
   file_name: string;
   file_path: string;
   file_size_gb: number;
+  split_part?: number | null;
+  split_count?: number | null;
+  split_total_size_gb?: number | null;
   architecture: string | null;
   params: string | null;
   quantization: string | null;
@@ -23,8 +28,31 @@ export interface DesktopModelInfo {
   head_count_kv: number | null;
   key_length: number | null;
   value_length: number | null;
+  gguf_version?: number;
   mtp_support: boolean;
+  nextn_predict_layers?: number;
+  has_embedded_mtp?: boolean;
+  mtp_architecture_supported?: boolean;
+  mtp_tensor_count?: number;
+  vocab_size?: number | null;
+  tensor_count?: number;
+  tensor_type_summary?: Array<[string, number]>;
+  rope_freq_base?: number | null;
+  rope_dimension_count?: number | null;
+  rope_scaling_type?: string | null;
+  rope_scaling_factor?: number | null;
+  rope_scaling_original_context_length?: number | null;
+  tokenizer_model?: string | null;
+  tokenizer_bos_id?: number | null;
+  tokenizer_eos_id?: number | null;
+  tokenizer_pad_id?: number | null;
   mmproj_path: string | null;
+  mmproj_supports_vision?: boolean;
+  mmproj_supports_audio?: boolean;
+  mmproj_projector_type?: string | null;
+  mmproj_vision_projector_type?: string | null;
+  mmproj_audio_projector_type?: string | null;
+  video_support?: VideoSupportLevel;
   mtp_draft_path: string | null;
   supports_reasoning: boolean;
   gguf_tags: string[];
@@ -57,6 +85,11 @@ export interface PingResult {
   healthOk: boolean;
   modelsOk: boolean;
   models: string[];
+  baseUrl?: string | null;
+  externalBaseUrl?: string | null;
+  bindHost?: string | null;
+  apiKeyRequired?: boolean;
+  protocolStandards?: string[];
   error: string | null;
 }
 
@@ -137,6 +170,14 @@ export interface MediaPayload {
   byte_size: number;
 }
 
+export interface DesktopVideoRuntimeInfo {
+  ffmpeg_available: boolean;
+  ffprobe_available: boolean;
+  native_video_ready: boolean;
+  ffmpeg_path: string | null;
+  ffprobe_path: string | null;
+}
+
 export type ChatMessageContent = string | ChatMessageContentPart[];
 
 export interface ChatCompletionMessage {
@@ -147,6 +188,7 @@ export interface ChatCompletionMessage {
 interface ServerConfig {
   executable_path: string;
   model_path: string;
+  model_alias: string | null;
   port: number;
   host: string;
   api_key: string | null;
@@ -161,6 +203,7 @@ interface ServerConfig {
   kv_unified: boolean;
   mmap: boolean;
   mlock: boolean;
+  no_warmup: boolean;
   cache_type_k: string;
   cache_type_v: string;
   cache_type_k_enabled: boolean;
@@ -236,7 +279,7 @@ function createAbortError() {
   return error;
 }
 
-function mergeAbortSignals(...signals: Array<AbortSignal | undefined>) {
+function mergeAbortSignals(...signals: Array<AbortSignal | undefined>): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
   const abort = () => {
     if (!controller.signal.aborted) {
@@ -244,6 +287,7 @@ function mergeAbortSignals(...signals: Array<AbortSignal | undefined>) {
     }
   };
 
+  const cleanups: Array<() => void> = [];
   signals.forEach((signal) => {
     if (!signal) return;
     if (signal.aborted) {
@@ -251,9 +295,10 @@ function mergeAbortSignals(...signals: Array<AbortSignal | undefined>) {
       return;
     }
     signal.addEventListener('abort', abort, { once: true });
+    cleanups.push(() => signal.removeEventListener('abort', abort));
   });
 
-  return controller.signal;
+  return { signal: controller.signal, cleanup: () => cleanups.forEach((fn) => fn()) };
 }
 
 export function stopActiveChatCompletion() {
@@ -309,24 +354,38 @@ interface ModelCapabilities {
   vision: boolean;
   audio: boolean;
   video: boolean;
+  videoSupport: VideoSupportLevel;
   thinking: boolean;
   tools: boolean;
 }
 
+function inferVideoSupport(raw: DesktopModelInfo, vision: boolean): VideoSupportLevel {
+  if (!vision) return 'none';
+  if (raw.video_support && raw.video_support !== 'none') return raw.video_support;
+
+  // 兼容旧扫描缓存或旧后端：按同一套保守规则回退推断。
+  const projector = (
+    raw.mmproj_vision_projector_type
+    ?? raw.mmproj_projector_type
+    ?? ''
+  ).toLowerCase();
+  const nameParts = raw.name.toLowerCase().split(/[^a-z0-9]+/);
+  const tags = new Set((raw.gguf_tags ?? []).map((tag) => tag.toLowerCase()));
+  if (
+    projector === 'nemotron_v2_vl'
+    || nameParts.includes('video')
+    || ['video', 'video-to-text', 'video-text-to-text', 'video-understanding'].some((tag) => tags.has(tag))
+  ) {
+    return 'verified';
+  }
+  if (['qwen2vl_merger', 'qwen2.5vl_merger', 'qwen25vl_merger', 'qwen3vl_merger'].includes(projector)) {
+    return 'candidate';
+  }
+  return 'frames';
+}
+
 /**
- * 分层判定模型能力，按可靠性从高到低逐层叠加：
- *   1. 硬证据：mmproj 同目录文件、chat_template 工具语法、GGUF 自带 tags
- *   2. 架构白名单：稳定且无歧义的家族关系
- *   3. basename / 文件名兜底：用于覆盖未在 GGUF 头里声明的二次微调模型
- *
- * 视觉：必须有同目录 mmproj 文件，模型名/架构的 vl/vision 等只用来旁证（不会单独启用）
- * 音频：GGUF tags 含 audio*；或名字命中 Whisper/Voxtral/Ultravox/Gemma3n 等纯音频家族
- * 视频：GGUF tags 含 video；或名字命中 Omni/VideoLLaMA/Video-LLaVA 等支持视频帧的家族
- * 工具：chat_template 含工具调用语法（最权威）；或 GGUF tags 含 tool-use/function-calling；
- *      或架构属于已知支持工具的家族，且不是 base/embed/pretrain 模型
- * 思考：合并了原"思考"与"推理"。GGUF tags 含 reasoning/thinking/cot；
- *      或 supports_reasoning（来自 Rust 扫描器，含 R1/QwQ/Qwen3+/think/DeepSeek-R1 等）；
- *      或架构属于 qwen3/qwen35/gpt-oss 等默认支持的家族
+ * 分层判定模型能力，按可靠性从高到低逐层叠加。
  */
 function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const name = raw.name.toLowerCase();
@@ -334,45 +393,19 @@ function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const haystack = `${name} ${arch}`;
   const tags = new Set((raw.gguf_tags ?? []).map((t) => t.toLowerCase()));
 
-  // === 视觉 ===
-  // Rust 扫描器已经按同目录和名称相似度匹配 mmproj；前端不再用文件名白名单二次否决。
-  const visionFromTags = ['vision', 'image-text-to-text', 'multimodal'].some((t) => tags.has(t));
-  const visionArchitectures = [
-    'qwen2-vl', 'qwen2.5-vl', 'qwen3-vl', 'qwen2vl', 'qwen25vl', 'qwen3vl',
-    'llava', 'llava-next', 'llava_next',
-    'phi3-v', 'phi-3-v', 'phi4-v', 'phi-4-v',
-    'minicpmv', 'minicpm-v',
-    'internvl', 'intern-vl', 'internvl2',
-    'janus',
-    'florence',
-    'pixtral',
-  ];
-  const visionFromArch = visionArchitectures.some((a) => arch === a || arch.startsWith(a));
-  const visionKeywords = ['-vl', '_vl', ' vl-', '-vision', 'vision-', 'llava', 'minicpm', 'deepseek-vl2', 'deepseek_vl2'];
-  const visionFromName = visionKeywords.some((kw) => haystack.includes(kw));
+  // libmtmd 的通用元数据只提供 vision/audio；视频需要独立的证据等级。
   const hasMmproj = Boolean(raw.mmproj_path);
-  const vision = hasMmproj || visionFromTags || visionFromArch || visionFromName;
-
-  // === 音频 ===
-  const audioFromTags = ['audio', 'audio-text-to-text', 'speech', 'asr', 'tts'].some((t) => tags.has(t));
-  const audioKeywords = ['-audio', '_audio', ' audio-', 'whisper', 'voxtral', 'ultravox', 'gemma3n', 'gemma-3n'];
-  const audio = audioFromTags || audioKeywords.some((kw) => haystack.includes(kw));
-
-  // === 视频 ===
-  const videoFromTags = ['video', 'video-text-to-text', 'video-llava', 'any-to-any'].some((t) => tags.has(t));
-  const videoKeywords = ['omni', 'video-llava', 'video_llava', 'videollama', 'videochat', 'longva',
-    'qwen2.5-omni', 'qwen2-omni', 'qwen3-omni', 'pllava', 'mimo-vl', 'nano-omni'];
-  const video = videoFromTags || videoKeywords.some((kw) => haystack.includes(kw));
+  const vision = hasMmproj && Boolean(raw.mmproj_supports_vision);
+  const audio = hasMmproj && Boolean(raw.mmproj_supports_audio);
+  const videoSupport = inferVideoSupport(raw, vision);
+  const video = videoSupport === 'verified';
 
   // === 工具调用 ===
   // 1) 最权威：chat_template 里有工具语法
-  // 2) GGUF tags 含工具相关条目
-  // 3) 架构白名单兜底（必须不是 base/pretrain/embed）
   const toolsFromTemplate = Boolean(raw.has_tool_template);
   const toolsFromTags = ['tool-use', 'function-calling', 'tools', 'agent', 'agents'].some((t) => tags.has(t));
   const isBaseOnly = haystack.includes('-base') || haystack.includes('_base') || haystack.includes('-pretrain');
   const isEmbed = haystack.includes('embed') || haystack.includes('reranker');
-  // 架构白名单：已知主流支持 function calling 的架构
   const toolArchitectures = [
     'qwen2', 'qwen3', 'qwen35', 'qwen35moe', 'qwen2moe',
     'llama', 'llama3', 'llama4',
@@ -390,7 +423,6 @@ function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const tools = !isBaseOnly && !isEmbed && (toolsFromTemplate || toolsFromTags || toolsFromArch);
 
   // === 思考（合并了原推理）===
-  // 任何能输出思考内容/链式推理的模型都标
   const thinkingFromTags = ['reasoning', 'thinking', 'chain-of-thought', 'chain_of_thought', 'cot'].some((t) => tags.has(t));
   const thinkingArchitectures = ['qwen3', 'qwen35', 'qwen35moe', 'gpt-oss', 'gptoss'];
   const thinkingFromArch = thinkingArchitectures.some((a) => arch === a || arch.startsWith(a));
@@ -398,7 +430,7 @@ function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const thinkingFromName = thinkingKeywords.some((kw) => haystack.includes(kw));
   const thinking = thinkingFromTags || Boolean(raw.supports_reasoning) || thinkingFromArch || thinkingFromName;
 
-  return { vision, audio, video, thinking, tools };
+  return { vision, audio, video, videoSupport, thinking, tools };
 }
 
 function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
@@ -414,6 +446,7 @@ function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
     kvUnified: true,
     mmap: true,
     mlock: false,
+    noWarmup: false,
     cacheTypeKEnabled: false,
     cacheTypeK: 'f16',
     cacheTypeVEnabled: false,
@@ -424,7 +457,7 @@ function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
     ropeFreqScale: 0,
     seedEnabled: false,
     seed: -1,
-    speculativeDecoding: raw.mtp_support || Boolean(raw.mtp_draft_path) ? 'mtp' : 'off',
+    speculativeDecoding: 'off',
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -458,21 +491,43 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     description: `本地 GGUF 模型 · ${raw.file_name}`,
     longDescription: [
       `文件路径：${raw.file_path}`,
+      raw.split_count ? `分片 GGUF：第 ${raw.split_part ?? 1} / ${raw.split_count} 片` : null,
       raw.architecture ? `架构：${raw.architecture}` : null,
+      raw.gguf_version ? `GGUF 版本：${raw.gguf_version}` : null,
+      raw.tensor_count ? `Tensor 数量：${raw.tensor_count}` : null,
       raw.block_count ? `层数：${raw.block_count}` : null,
       raw.expert_count ? `专家数：${raw.expert_count}` : null,
       raw.context_length ? `上下文：${raw.context_length}` : null,
       capabilities.vision && raw.mmproj_path ? `视觉投影：${raw.mmproj_path}` : null,
+      capabilities.audio && raw.mmproj_path ? `音频投影：${raw.mmproj_path}` : null,
+      raw.has_embedded_mtp ? `内置 MTP：${raw.nextn_predict_layers ?? 0} 个 NextN 层，${raw.mtp_tensor_count ?? 0} 个相关 tensor` : null,
+      !raw.has_embedded_mtp && (raw.nextn_predict_layers ?? 0) > 0 && !raw.mtp_architecture_supported
+        ? '检测到 NextN 元数据，但当前 llama.cpp 尚未实现该架构的 MTP graph。'
+        : null,
       raw.mtp_draft_path ? `MTP 草稿模型：${raw.mtp_draft_path}` : null,
+      raw.rope_scaling_type ? `RoPE 缩放：${raw.rope_scaling_type}${raw.rope_scaling_factor ? ` x${raw.rope_scaling_factor}` : ''}` : null,
+      raw.tokenizer_model ? `Tokenizer：${raw.tokenizer_model}` : null,
       raw.supports_reasoning ? '支持思考输出（reasoning / thinking）。' : null,
     ].filter(Boolean).join('\n') || '已读取本地 GGUF 文件。详细表头信息见模型信息页。',
-    tags: ['Local', 'GGUF', ...(capabilities.vision ? ['Vision'] : []), ...(raw.mtp_support || raw.mtp_draft_path ? ['MTP'] : []), ...(raw.supports_reasoning ? ['Reasoning'] : [])],
+    tags: [
+      'Local',
+      'GGUF',
+      ...(raw.split_count ? ['Split GGUF'] : []),
+      ...(capabilities.vision ? ['Vision'] : []),
+      ...(capabilities.audio ? ['Audio'] : []),
+      ...(capabilities.video ? ['Video'] : []),
+      ...(raw.mtp_support ? ['MTP'] : []),
+      ...(raw.supports_reasoning ? ['Reasoning'] : []),
+    ],
     downloadCount: '本地',
     ctxLength,
     loadConfig: defaultLoadConfig(raw),
     releaseDate: '本地',
     license: '本地文件',
     filePath: raw.file_path,
+    splitPart: raw.split_part ?? undefined,
+    splitCount: raw.split_count ?? undefined,
+    splitTotalSizeGb: raw.split_total_size_gb ?? undefined,
     source: 'local',
     architecture: raw.architecture ?? undefined,
     blockCount: raw.block_count ?? undefined,
@@ -482,12 +537,35 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     headCountKv: raw.head_count_kv ?? undefined,
     keyLength: raw.key_length ?? undefined,
     valueLength: raw.value_length ?? undefined,
+    ggufVersion: raw.gguf_version || undefined,
+    tensorCount: raw.tensor_count || undefined,
+    mtpTensorCount: raw.mtp_tensor_count || undefined,
+    nextnPredictLayers: raw.nextn_predict_layers || undefined,
+    hasEmbeddedMtp: Boolean(raw.has_embedded_mtp),
+    mtpArchitectureSupported: Boolean(raw.mtp_architecture_supported),
+    vocabSize: raw.vocab_size ?? undefined,
+    tensorTypeSummary: raw.tensor_type_summary ?? undefined,
+    ropeFreqBase: raw.rope_freq_base ?? undefined,
+    ropeDimensionCount: raw.rope_dimension_count ?? undefined,
+    ropeScalingType: raw.rope_scaling_type ?? undefined,
+    ropeScalingFactor: raw.rope_scaling_factor ?? undefined,
+    ropeScalingOriginalContextLength: raw.rope_scaling_original_context_length ?? undefined,
+    tokenizerModel: raw.tokenizer_model ?? undefined,
+    tokenizerBosId: raw.tokenizer_bos_id ?? undefined,
+    tokenizerEosId: raw.tokenizer_eos_id ?? undefined,
+    tokenizerPadId: raw.tokenizer_pad_id ?? undefined,
     mmprojPath: raw.mmproj_path ?? undefined,
+    mmprojSupportsVision: Boolean(raw.mmproj_supports_vision),
+    mmprojSupportsAudio: Boolean(raw.mmproj_supports_audio),
+    mmprojProjectorType: raw.mmproj_projector_type ?? undefined,
+    mmprojVisionProjectorType: raw.mmproj_vision_projector_type ?? undefined,
+    mmprojAudioProjectorType: raw.mmproj_audio_projector_type ?? undefined,
     mtpDraftPath: raw.mtp_draft_path ?? undefined,
     ggufMetadata: raw.gguf_metadata?.map(([key, value]) => ({ key, value })) ?? [],
     supportsVision: capabilities.vision,
     supportsAudio: capabilities.audio,
     supportsVideo: capabilities.video,
+    videoSupport: capabilities.videoSupport,
     supportsThinking: capabilities.thinking,
     supportsTools: capabilities.tools,
     supportsReasoning: capabilities.thinking,
@@ -581,9 +659,31 @@ export async function getDesktopServerStatus() {
   return invoke<boolean>('get_server_status');
 }
 
+export async function getServerApiKey() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<string | null>('get_server_api_key');
+}
+
+export async function getLanIpAddress() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<string | null>('get_lan_ip_address');
+}
+
+let lastPingReachable: boolean | null = null;
+
 export async function pingLocalApi() {
   if (!isDesktopRuntime()) return null;
-  return invoke<PingResult>('ping_local_api');
+  const result = await invoke<PingResult>('ping_local_api');
+  // 只在可达状态发生变化或探测失败时记录，避免每 2 秒刷屏。
+  if (result.reachable !== lastPingReachable) {
+    lastPingReachable = result.reachable;
+    if (result.reachable) {
+      void logDesktopEvent('info', 'api', `接口恢复可达：${result.baseUrl ?? ''}（/health ${result.latencyMs ?? 0} ms）`);
+    } else {
+      void logDesktopEvent('warn', 'api', `接口不可达：${result.error ?? '未知原因'}`);
+    }
+  }
+  return result;
 }
 
 export async function getDesktopServerLogs() {
@@ -594,6 +694,33 @@ export async function getDesktopServerLogs() {
 export async function clearDesktopServerLogs() {
   if (!isDesktopRuntime()) return;
   await invoke('clear_server_logs');
+}
+
+export interface SystemLogEntry {
+  timestamp: number;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  category: 'llama' | 'server' | 'api' | 'app';
+  message: string;
+}
+
+export async function getDesktopSystemLogs(sinceMs = 0) {
+  if (!isDesktopRuntime()) return [];
+  return invoke<SystemLogEntry[]>('get_system_logs', { sinceMs });
+}
+
+export async function clearDesktopSystemLogs() {
+  if (!isDesktopRuntime()) return;
+  await invoke('clear_system_logs');
+}
+
+// 把应用侧事件汇入后端统一日志中枢。best-effort：失败不影响主流程。
+export async function logDesktopEvent(level: SystemLogEntry['level'], category: SystemLogEntry['category'], message: string) {
+  if (!isDesktopRuntime()) return;
+  try {
+    await invoke('log_app_event', { level, category, message });
+  } catch {
+    // 日志记录失败不应打断业务。
+  }
 }
 
 export async function stopDesktopServer() {
@@ -665,6 +792,11 @@ export async function readDesktopMedia(path: string) {
   return invoke<MediaPayload>('read_media_file', { path });
 }
 
+export async function getDesktopVideoRuntimeInfo() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<DesktopVideoRuntimeInfo>('get_video_runtime_info');
+}
+
 export function listenDesktopEvent<T>(event: string, callback: (payload: T) => void) {
   if (!isDesktopRuntime()) return Promise.resolve(() => {});
   return listen<T>(event, (message) => callback(message.payload));
@@ -683,9 +815,39 @@ function apiHost(apiConfig?: ExternalApiConfig) {
   return host || '0.0.0.0';
 }
 
+// 传给 llama-server 的 API Key：只要 keyring 里有就带上。
+// 是否真正启用鉴权由「监听地址」决定——回环监听时后端 normalize_server_access
+// 会强制丢弃 Key，所以这里无需再看 enabled，避免「已设置 Key 却没生效」的错觉。
 function apiKey(apiConfig?: ExternalApiConfig) {
   const key = apiConfig?.apiKey?.trim();
   return key ? key : null;
+}
+
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return normalized === '' || normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+// 软件内对话始终走回环（127.0.0.1）。只有当服务真正对外开放（enabled 且监听地址
+// 不是回环）并配置了 Key 时，服务端才会要求鉴权，这时才需要带上 Authorization。
+// 回环监听时服务端无鉴权，再发一个可能过期的 Key 只会制造 401 噪音。
+export function effectiveRequestApiKey(apiConfig?: ExternalApiConfig): string | undefined {
+  if (!apiConfig?.enabled) return undefined;
+  if (isLoopbackHost(apiConfig.host)) return undefined;
+  const key = apiConfig.apiKey?.trim();
+  return key ? key : undefined;
+}
+
+export function isServerAuthError(error: unknown): boolean {
+  const text = String(error instanceof Error ? error.message : error);
+  return text.includes('401') || text.includes('Invalid API Key') || text.includes('authentication_error');
+}
+
+export function serverErrorHint(error: unknown): string {
+  if (isServerAuthError(error)) {
+    return 'API Key 与当前运行的 llama-server 不匹配。如果你最近重新申请或撤销了 API Key，请重新加载模型使新 Key 生效。';
+  }
+  return '请确认模型已经加载完成，llama-server 正在运行。';
 }
 
 function buildServerConfig(
@@ -701,6 +863,7 @@ function buildServerConfig(
 
   const config = model.loadConfig;
   const gpuLayers = Math.max(0, config.gpuLayers);
+  const cpuOnly = gpuLayers === 0;
   const ctxLength = Math.max(1, config.ctxLength);
   const moeCpuLayers = Math.max(0, config.moeCpuLayers);
   const reasoningBudget = Math.max(0, Math.round(Number(config.reasoningBudget ?? 0)));
@@ -712,13 +875,17 @@ function buildServerConfig(
     : null;
   const seed = config.seedEnabled ? Math.round(Number(config.seed ?? -1)) : null;
   const chatTemplate = config.chatTemplate?.trim() || null;
-  const enabledTools = Array.from(new Set((tools ?? []).map((tool) => tool.trim()).filter(Boolean)));
+  const enabledTools = filterLlamaCppServerTools(tools ?? []);
 
-  const mtpEnabled = config.speculativeDecoding === 'mtp' && Boolean(model.mtpDraftPath);
+  const mtpEnabled = config.speculativeDecoding === 'mtp' && Boolean(model.supportsMtp);
+  const hasMultimodalProjector = Boolean(
+    model.mmprojPath && (model.supportsVision || model.supportsAudio)
+  );
 
   return {
     executable_path: executablePath || 'resources/llama-server.exe',
-    model_path: model.filePath,
+    model_path: model.filePath ?? '',
+    model_alias: model.name || null,
     port,
     host: apiHost(apiConfig),
     api_key: apiKey(apiConfig),
@@ -729,10 +896,11 @@ function buildServerConfig(
     threads: config.threads,
     parallel: config.parallel,
     flash_attn: config.fastAttention,
-    kv_offload: config.kvCache,
+    kv_offload: cpuOnly ? false : config.kvCache,
     kv_unified: config.kvUnified,
     mmap: config.mmap,
     mlock: config.mlock,
+    no_warmup: config.noWarmup,
     cache_type_k: config.cacheTypeK,
     cache_type_v: config.cacheTypeV,
     cache_type_k_enabled: config.cacheTypeKEnabled,
@@ -741,16 +909,16 @@ function buildServerConfig(
     rope_freq_scale: ropeFreqScale,
     seed,
     chat_template: chatTemplate,
-    mmproj_path: model.supportsVision && model.mmprojPath ? model.mmprojPath : null,
+    mmproj_path: hasMultimodalProjector ? (model.mmprojPath ?? null) : null,
     mtp_draft_path: mtpEnabled ? (model.mtpDraftPath ?? null) : null,
     spec_type: mtpEnabled ? 'draft-mtp' : null,
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,
-    device: 'CUDA0',
-    main_gpu: 0,
-    retry_cpu_fallback: false,
-    no_cuda: false,
+    device: cpuOnly ? null : 'CUDA0',
+    main_gpu: cpuOnly ? null : 0,
+    retry_cpu_fallback: !cpuOnly,
+    no_cuda: cpuOnly,
   };
 }
 
@@ -762,16 +930,28 @@ export async function startDesktopServer(
   tools?: string[]
 ) {
   if (!isDesktopRuntime()) return;
-  await invoke('start_server', { config: buildServerConfig(model, port, executablePath, apiConfig, tools) });
+  let storedApiKey: string | null = null;
+  if (apiConfig?.enabled) {
+    try {
+      storedApiKey = await getExternalApiKeyForSession();
+    } catch (error) {
+      throw new Error(`无法读取 API Key，已阻止在无鉴权状态下开放接口：${String(error)}`);
+    }
+  }
+  if (apiConfig?.enabled && apiConfig.hasApiKey && !storedApiKey) {
+    throw new Error('无法读取已配置的 API Key，已阻止在无鉴权状态下开放接口。请重新申请 API Key 后再加载模型。');
+  }
+  const runtimeApiConfig = apiConfig
+    ? { ...apiConfig, apiKey: storedApiKey ?? undefined }
+    : undefined;
+  await invoke('start_server', { config: buildServerConfig(model, port, executablePath, runtimeApiConfig, tools) });
 }
 
 export async function getDesktopSystemStats(previous: SystemStats): Promise<SystemStats | null> {
   if (!isDesktopRuntime()) return null;
 
-  const [status, hardware] = await Promise.all([
-    invoke<DesktopSystemStatus>('get_system_status'),
-    invoke<DesktopHardwareInfo>('get_hardware_info').catch(() => null),
-  ]);
+  const status = await invoke<DesktopSystemStatus>('get_system_status');
+  const hardware = await invoke<DesktopHardwareInfo>('get_hardware_info').catch(() => null);
 
   const ramTotal = status.memory_total ?? previous.ramTotal;
   const ramUsed = status.memory_used ?? (previous.ramUsage / 100) * previous.ramTotal;
@@ -790,7 +970,7 @@ export async function getDesktopSystemStats(previous: SystemStats): Promise<Syst
     computeScores: newScores,
     gpuName: hardware?.gpu_name ?? previous.gpuName,
     hostName: previous.hostName === '未连接桌面运行环境' ? '本机' : previous.hostName,
-  };
+  } as SystemStats;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -816,6 +996,185 @@ async function getServerModelId(port: number, headers: Record<string, string>, s
   }
 }
 
+interface ServerModalities {
+  resolved: boolean;
+  vision: boolean;
+  audio: boolean;
+  video: boolean;
+  reportedVideo: boolean;
+  hasNativeVideoProtocol: boolean;
+  videoFallbackReason?: string;
+}
+
+function messagesContainPart(messages: ChatCompletionMessage[], type: ChatMessageContentPart['type']) {
+  return messages.some((message) =>
+    Array.isArray(message.content) && message.content.some((part) => part.type === type)
+  );
+}
+
+function validateMediaSupport(
+  modalities: ServerModalities,
+  hasAudio: boolean,
+  hasVideo: boolean,
+) {
+  if (modalities.resolved && hasAudio && !modalities.audio) {
+    throw new Error('当前 llama-server 没有加载支持音频的 mmproj。');
+  }
+  if (modalities.resolved && hasVideo && !modalities.vision) {
+    throw new Error('当前 llama-server 没有加载支持视觉的 mmproj，无法处理视频。');
+  }
+}
+
+async function sanitizeContentForLlama(
+  content: ChatMessageContent,
+  useNativeVideo: boolean,
+): Promise<ChatMessageContent> {
+  if (typeof content === 'string') return content;
+  const transformed: ChatMessageContentPart[] = [];
+
+  for (const part of content) {
+    if (
+      part.type === 'text'
+      || part.type === 'image_url'
+      || part.type === 'input_audio'
+      || part.type === 'input_video'
+    ) {
+      transformed.push(part);
+    } else if (part.type === 'audio_url') {
+      const payload = await prepareAudioForLlama(part.audio_url?.url ?? '');
+      transformed.push({
+        type: 'input_audio',
+        input_audio: payload,
+      });
+    } else if (part.type === 'video_url') {
+      const url = part.video_url?.url ?? '';
+      const comma = url.indexOf(',');
+      const validDataUrl = url.startsWith('data:video/')
+        && comma >= 0
+        && url.slice(0, comma).toLowerCase().includes(';base64')
+        && url.length > comma + 1;
+      if (!validDataUrl) throw new Error('视频格式不正确，缺少 base64 data URL。');
+
+      if (useNativeVideo) {
+        transformed.push({
+          type: 'input_video',
+          input_video: { data: url.slice(comma + 1) },
+        });
+      } else {
+        const frames = part.video_url.frames?.length
+          ? part.video_url.frames
+          : await extractVideoFrames(url);
+        transformed.push({
+          type: 'text',
+          text: `[视频抽帧兼容：以下 ${frames.length} 帧按时间顺序提取；这不等同于原生视频理解]`,
+        });
+        frames.forEach((frame, index) => {
+          const minutes = Math.floor(frame.timestampSeconds / 60);
+          const seconds = (frame.timestampSeconds % 60).toFixed(1).padStart(4, '0');
+          transformed.push({
+            type: 'text',
+            text: `[视频帧 ${index + 1}/${frames.length} · ${minutes}:${seconds}]`,
+          });
+          transformed.push({
+            type: 'image_url',
+            image_url: { url: frame.url },
+          });
+        });
+      }
+    }
+  }
+
+  return transformed.length > 0
+    ? transformed
+    : [{ type: 'text', text: '[此消息没有可发送的媒体内容]' }];
+}
+
+async function sanitizeMessagesForLlama(
+  messages: ChatCompletionMessage[],
+  useNativeVideo: boolean,
+): Promise<ChatCompletionMessage[]> {
+  return Promise.all(messages.map(async (message) => ({
+    role: message.role,
+    content: await sanitizeContentForLlama(message.content, useNativeVideo),
+  })));
+}
+
+function logMultimodalMode(hasAudio: boolean, hasVideo: boolean, modalities: ServerModalities) {
+  if (hasAudio) logInfo('multimodal', '音频已适配为 llama.cpp input_audio。');
+  if (!hasVideo) return;
+  const mode = modalities.video
+    ? 'llama.cpp 原生 input_video'
+    : `图像帧兼容模式（${modalities.videoFallbackReason ?? (
+      modalities.hasNativeVideoProtocol ? '原生视频未就绪' : '旧版 server'
+    )}）`;
+  logInfo('multimodal', `视频使用${mode}。`);
+}
+
+async function getServerModalities(
+  port: number,
+  headers: Record<string, string>,
+  hasVideo: boolean,
+  videoSupport: VideoSupportLevel,
+  signal?: AbortSignal,
+): Promise<ServerModalities> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/props`, { headers, signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    const modalities = json?.modalities;
+    const reportedVideo = Boolean(modalities?.video);
+    const modelAllowsNativeVideo = videoSupport === 'verified' || videoSupport === 'candidate';
+    let video = reportedVideo && modelAllowsNativeVideo;
+    let videoFallbackReason: string | undefined;
+
+    if (!modelAllowsNativeVideo) {
+      videoFallbackReason = videoSupport === 'frames'
+        ? '模型仅验证了视觉抽帧'
+        : '模型未检测到视频能力';
+    } else if (!reportedVideo) {
+      videoFallbackReason = 'llama-server 未报告原生视频';
+    }
+
+    if (hasVideo && video && isDesktopRuntime()) {
+      if (signal) throwIfAborted(signal);
+      try {
+        const runtime = await getDesktopVideoRuntimeInfo();
+        if (signal) throwIfAborted(signal);
+        if (!runtime?.native_video_ready) {
+          video = false;
+          videoFallbackReason = '缺少 ffmpeg/ffprobe';
+        }
+      } catch (error) {
+        if (signal?.aborted) throw createAbortError();
+        video = false;
+        videoFallbackReason = `无法确认 ffmpeg/ffprobe：${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    return {
+      resolved: true,
+      vision: Boolean(modalities?.vision),
+      audio: Boolean(modalities?.audio),
+      video,
+      reportedVideo,
+      hasNativeVideoProtocol: Boolean(
+        modalities && Object.prototype.hasOwnProperty.call(modalities, 'video')
+      ),
+      videoFallbackReason,
+    };
+  } catch {
+    if (signal?.aborted) throw createAbortError();
+    return {
+      resolved: false,
+      vision: false,
+      audio: false,
+      video: false,
+      reportedVideo: false,
+      hasNativeVideoProtocol: false,
+      videoFallbackReason: '无法读取 llama-server 能力',
+    };
+  }
+}
+
 export async function streamChatCompletion(options: {
   port: number;
   modelName: string;
@@ -824,109 +1183,49 @@ export async function streamChatCompletion(options: {
   ctxTotal?: number;
   supportsReasoning?: boolean;
   reasoningBudget?: number;
+  videoSupport?: VideoSupportLevel;
   apiKey?: string;
   signal?: AbortSignal;
   onToken: (token: string) => void;
   onReasoningDelta?: (reasoningContent: string) => void;
   onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; tokensPerSec?: number; firstTokenDelay?: number; genTime?: number }) => void;
 }): Promise<ChatCompletionMetrics> {
-  // llama-server 支持 text / image_url / input_audio / input_video 四种 content part 类型。
-  // 但内部存储用的是 OpenAI 通用 schema (audio_url / video_url)，这里做格式转换。
-  const sanitizeContent = (content: ChatMessageContent): ChatMessageContent => {
-    if (typeof content === 'string') return content;
-    const transformed: ChatMessageContentPart[] = [];
-    const errors: string[] = [];
-
-    for (const part of content) {
-      if (part.type === 'text' || part.type === 'image_url') {
-        transformed.push(part);
-      } else if (part.type === 'audio_url') {
-        // llama-server 要求格式：{type: 'input_audio', input_audio: {data: '<base64>', format: 'wav'|'mp3'}}
-        // data 必须是 raw base64（不带 data:audio/...;base64, 前缀）
-        const url = part.audio_url?.url ?? '';
-        const match = url.match(/^data:audio\/([\w-]+);base64,(.+)$/);
-        if (!match) {
-          errors.push('音频格式不正确');
-          continue;
-        }
-        const mimeSubtype = match[1].toLowerCase();
-        const rawBase64 = match[2];
-
-        // llama-server 只接受 wav / mp3
-        let format: 'wav' | 'mp3';
-        if (mimeSubtype === 'wav' || mimeSubtype === 'wave' || mimeSubtype === 'x-wav') {
-          format = 'wav';
-        } else if (mimeSubtype === 'mpeg' || mimeSubtype === 'mp3') {
-          format = 'mp3';
-        } else {
-          errors.push(`音频格式 ${mimeSubtype} 不支持（llama-server 仅支持 wav/mp3）`);
-          continue;
-        }
-
-        transformed.push({
-          type: 'input_audio',
-          input_audio: { data: rawBase64, format },
-        });
-      } else if (part.type === 'video_url') {
-        // llama-server 要求格式：{type: 'input_video', input_video: {data: '<base64>'}}
-        // data 必须是 raw base64（不带 data:video/...;base64, 前缀）
-        const url = part.video_url?.url ?? '';
-        // 放宽 MIME 匹配：video/mp4, video/quicktime, video/x-m4v, video/webm 等都能匹配
-        const match = url.match(/^data:video\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
-        if (!match) {
-          logWarn('multimodal', `视频 dataUrl 格式不匹配正则: ${url.slice(0, 100)}...`);
-          errors.push('视频格式不正确');
-          continue;
-        }
-        const rawBase64 = match[1];
-        logInfo('multimodal', `video_url → input_video 翻译成功，base64 长度: ${rawBase64.length}`);
-        transformed.push({
-          type: 'input_video',
-          input_video: { data: rawBase64 },
-        });
-      }
-      // 其他未知类型直接丢弃（静默）
-    }
-
-    if (errors.length > 0) {
-      // 格式错误的附件转为占位文本
-      transformed.push({ type: 'text', text: `[${errors.join('；')}]` });
-    }
-    if (transformed.length === 0) {
-      return [{ type: 'text', text: '[此消息含不支持的媒体附件]' }];
-    }
-    return transformed;
-  };
-
-  const sanitizedMessages = options.messages.map((msg) => ({
-    role: msg.role,
-    content: sanitizeContent(msg.content),
-  }));
-
-  const messages: ChatCompletionMessage[] = options.config.systemPrompt.trim()
-    ? [{ role: 'system', content: options.config.systemPrompt.trim() }, ...sanitizedMessages]
-    : sanitizedMessages;
-
-  // 调试：打印翻译后的消息结构，验证 audio_url/video_url 是否正确转成 input_audio/input_video
-  const hasLegacyParts = messages.some(m => Array.isArray(m.content) && m.content.some((p: ChatMessageContentPart) => p.type === 'audio_url' || p.type === 'video_url'));
-  if (hasLegacyParts) {
-    logWarn('multimodal', '发现未翻译的 audio_url/video_url，翻译可能失败');
-    logDebug('multimodal', '原始消息结构', options.messages);
-  }
-  const hasTranslatedParts = messages.some(m => Array.isArray(m.content) && m.content.some((p: ChatMessageContentPart) => p.type === 'input_audio' || p.type === 'input_video'));
-  if (hasTranslatedParts) {
-    logInfo('multimodal', '成功翻译 audio_url/video_url → input_audio/input_video');
-    logDebug('multimodal', '翻译后消息结构', messages);
-  }
   const requestStartedAt = performance.now();
   let firstTokenAt: number | null = null;
   let latestUsage: Partial<ChatCompletionMetrics> = {};
   let reasoningContent = '';
   const localAbortController = new AbortController();
-  const abortSignal = mergeAbortSignals(localAbortController.signal, options.signal);
+  const { signal: abortSignal, cleanup: cleanupAbortListeners } = mergeAbortSignals(localAbortController.signal, options.signal);
   activeChatAbortController = localAbortController;
   try {
     throwIfAborted(abortSignal);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (options.apiKey?.trim()) {
+    headers.Authorization = `Bearer ${options.apiKey.trim()}`;
+  }
+  const hasAudio = messagesContainPart(options.messages, 'audio_url');
+  const hasVideo = messagesContainPart(options.messages, 'video_url');
+  const serverModalities = await getServerModalities(
+    options.port,
+    headers,
+    hasVideo,
+    options.videoSupport ?? 'none',
+    abortSignal,
+  );
+  validateMediaSupport(serverModalities, hasAudio, hasVideo);
+
+  const buildMessages = async (useNativeVideo: boolean): Promise<ChatCompletionMessage[]> => {
+    const sanitizedMessages = await sanitizeMessagesForLlama(options.messages, useNativeVideo);
+    return options.config.systemPrompt.trim()
+      ? [{ role: 'system', content: options.config.systemPrompt.trim() }, ...sanitizedMessages]
+      : sanitizedMessages;
+  };
+
+  const messages = await buildMessages(serverModalities.video);
+  logMultimodalMode(hasAudio, hasVideo, serverModalities);
 
   const reasoningMode = options.config.reasoningMode ?? 'auto';
   const reasoningBudget = Math.max(0, Math.round(Number(options.reasoningBudget ?? 0)));
@@ -936,12 +1235,6 @@ export async function streamChatCompletion(options: {
     && Boolean(options.supportsReasoning || reasoningMode === 'think' || reasoningMode === 'deep');
 
   const chatUrl = `http://127.0.0.1:${options.port}/v1/chat/completions`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (options.apiKey?.trim()) {
-    headers.Authorization = `Bearer ${options.apiKey.trim()}`;
-  }
   const serverModelId = await getServerModelId(options.port, headers, abortSignal);
   throwIfAborted(abortSignal);
   const requestModelName = serverModelId ?? options.modelName;
@@ -976,32 +1269,55 @@ export async function streamChatCompletion(options: {
     } : {}),
   };
 
+  let activeRequestBody = requestBody;
+  const apiStartedAt = performance.now();
   let response = await fetch(chatUrl, {
     method: 'POST',
     headers,
-    body: JSON.stringify(requestBody),
+    body: JSON.stringify(activeRequestBody),
     signal: abortSignal,
   });
   throwIfAborted(abortSignal);
+  void logDesktopEvent(
+    'info',
+    'api',
+    `POST ${chatUrl} → ${response.status}（${Math.round(performance.now() - apiStartedAt)} ms，模型 ${requestModelName}）`,
+  );
 
   if (!response.ok) {
-    // 首次失败：先把 body 读出来，否则后面 fetch 流就走不下去了。
-    const firstError = await response.text();
+    let firstError = await response.text();
     let retried = false;
+    if (hasVideo && serverModalities.video) {
+      logInfo('multimodal', '原生视频请求失败，自动改用图像帧兼容模式重试。');
+      activeRequestBody = {
+        ...requestBody,
+        messages: await buildMessages(false),
+      };
+      response = await fetch(chatUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(activeRequestBody),
+        signal: abortSignal,
+      });
+      retried = true;
+      if (!response.ok) firstError = await response.clone().text();
+    }
     const retryModelId = serverModelId ?? await getServerModelId(options.port, headers, abortSignal);
     if (retryModelId && retryModelId !== requestModelName && [400, 404, 422].includes(response.status)) {
       response = await fetch(chatUrl, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ...requestBody, model: retryModelId }),
+        body: JSON.stringify({ ...activeRequestBody, model: retryModelId }),
         signal: abortSignal,
       });
       retried = true;
     }
     if (!response.ok) {
-      // 只有真的重试了才再次读 body，否则会触发 "body stream already read"。
-      const retryError = retried ? await response.text() : '';
-      throw new Error(`llama-server 返回 ${response.status}: ${retryError || firstError}`);
+      const retryError = retried ? (await response.text()).slice(0, 500) : '';
+      const errorBody = `${retryError || firstError}`;
+      const truncated = errorBody.length > 500 ? errorBody.slice(0, 500) + '…（响应已截断）' : errorBody;
+      void logDesktopEvent('error', 'api', `POST ${chatUrl} 失败：HTTP ${response.status}，响应体：${truncated || '（空）'}`);
+      throw new Error(`llama-server 返回 ${response.status}: ${truncated}`);
     }
   }
 
@@ -1093,6 +1409,8 @@ export async function streamChatCompletion(options: {
   }
 
   throwIfAborted(abortSignal);
+  // 注意：decoder.decode() 会 flush 不完整的 UTF-8 序列，可能产生替换字符（U+FFFD）。
+  // 这只在流异常中断且最后一块数据截断在多字节字符中间时发生，概率极低。
   const tail = `${buffer}${decoder.decode()}`.trim();
   if (tail) {
     for (const line of tail.split('\n')) {
@@ -1120,6 +1438,7 @@ export async function streamChatCompletion(options: {
 
   return finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
   } finally {
+    cleanupAbortListeners();
     if (activeChatAbortController === localAbortController) {
       activeChatAbortController = null;
     }
@@ -1206,13 +1525,8 @@ function finalizeCompletionMetrics(
     ...(tokensPerSec && tokensPerSec > 0 ? { tokensPerSec } : {}),
     firstTokenDelay,
     genTime,
-  // ctxUsed 反映「整个对话当前累计占用的上下文窗口大小」。
-  // llama-server 返回的 prompt_tokens 是当次请求送入的全部历史消息 token 数，
-  // 已包含截至该轮的完整对话上下文，因此用它作为 ctx 已用量；
-  // 不能用 totalTokens（promptTokens + completionTokens），否则会把本次新生成的
-  // 输出也算进"已用上下文"，导致同一条对话内各轮 ctx% 参差不齐、且普遍虚高。
-  ctxUsed: promptTokens,
-  ctxTotal,
+    ctxUsed: promptTokens + completionTokens,
+    ctxTotal,
   };
 
   if (totalTokens > 0) {

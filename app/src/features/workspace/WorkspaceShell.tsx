@@ -1,4 +1,5 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
+﻿import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isTauri } from '@tauri-apps/api/core';
 import { Minus, Square, X } from 'lucide-react';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { useApp } from '@/context/AppContext';
@@ -10,14 +11,12 @@ const ChatPage = lazy(() => import('@/pages/ChatPage'));
 const SettingsWorkspace = lazy(() => import('@/features/settings/SettingsWorkspace'));
 const ModelWorkspace = lazy(() => import('@/features/model/ModelWorkspace'));
 const ApiStatusWorkspace = lazy(() => import('@/features/apiStatus/ApiStatusWorkspace'));
-const ImageWorkspace = lazy(() => import('@/features/image/ImageWorkspace'));
 
-type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus' | 'image';
+type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus';
 
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
   if (view === 'apiStatus') return 'apiStatus';
-  if (view === 'image') return 'image';
   if (view === 'settings' || view === 'tools' || view === 'logs') return 'settings';
   return 'model';
 }
@@ -34,16 +33,14 @@ export default function WorkspaceShell() {
         return <SettingsWorkspace />;
       case 'apiStatus':
         return <ApiStatusWorkspace />;
-      case 'image':
-        return <ImageWorkspace />;
       default:
         return <ModelWorkspace />;
     }
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#0F0E0C] dark:text-[#F3EBDD]">
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#0F0E0C]">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#0D0F14] dark:text-[#E2E8F2]">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#0D0F14]">
         <WindowTitleBar />
         <div className="min-h-0 flex-1 overflow-hidden p-2 pt-0">
           <Suspense fallback={<WorkspaceFallback />}>
@@ -57,37 +54,37 @@ export default function WorkspaceShell() {
 
 function WorkspaceFallback() {
   return (
-    <div className="flex h-full w-full items-center justify-center text-sm text-[#9A9082] dark:text-[#7A7264]">
+    <div className="flex h-full w-full items-center justify-center text-sm text-[#9A9082] dark:text-[#6B7688]">
       加载中…
     </div>
   );
 }
 
 function WindowTitleBar() {
-  const appWindow = getCurrentWindow();
+  const appWindow = isTauri() ? getCurrentWindow() : null;
   const handleMinimize = () => {
-    void appWindow.minimize();
+    void appWindow?.minimize();
   };
   const handleToggleMaximize = () => {
-    void appWindow.toggleMaximize();
+    void appWindow?.toggleMaximize();
   };
   const handleClose = () => {
-    void appWindow.close();
+    void appWindow?.close();
   };
 
   return (
     <header
       data-tauri-drag-region
-      onDoubleClick={handleToggleMaximize}
-      className="flex h-10 flex-shrink-0 items-center border-b border-[#D8D2C5] bg-[#F8F6F1]/95 pl-4 text-[#2F2C26] dark:border-white/[0.08] dark:bg-[#15130F]/95 dark:text-[#F3EBDD]"
+      onDoubleClick={appWindow ? handleToggleMaximize : undefined}
+      className="flex h-10 flex-shrink-0 items-center border-b border-[#D8D2C5] bg-[#F8F6F1]/95 pl-4 text-[#2F2C26] dark:border-white/[0.08] dark:bg-[#12151C]/95 dark:text-[#E2E8F2]"
     >
       <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2">
-        <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[#E8E3D8] text-[10px] font-semibold text-[#D7663E] dark:bg-white/[0.07] dark:text-[#F0B18D]">
+        <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[#E8E3D8] text-[10px] font-semibold text-[#D7663E] dark:bg-white/[0.07] dark:text-[#6EA8DC]">
           晓
         </div>
         <div className="min-w-0 truncate text-xs font-semibold">Agent LLM</div>
       </div>
-      <nav className="flex h-full flex-shrink-0 items-stretch">
+      {appWindow && <nav className="flex h-full flex-shrink-0 items-stretch">
         <WindowControlButton label="最小化" onClick={handleMinimize}>
           <Minus className="h-3.5 w-3.5" />
         </WindowControlButton>
@@ -97,7 +94,7 @@ function WindowTitleBar() {
         <WindowControlButton label="关闭" tone="danger" onClick={handleClose}>
           <X className="h-4 w-4" />
         </WindowControlButton>
-      </nav>
+      </nav>}
     </header>
   );
 }
@@ -116,8 +113,8 @@ function WindowControlButton({ label, tone = 'neutral', onClick, children }: {
       onClick={onClick}
       className={`grid w-11 place-items-center transition-colors ${
         tone === 'danger'
-          ? 'text-[#625B50] hover:bg-[#C44E36] hover:text-white dark:text-[#D8D0C3] dark:hover:bg-[#C44E36]'
-          : 'text-[#625B50] hover:bg-[#E8E3D8] dark:text-[#D8D0C3] dark:hover:bg-white/[0.08]'
+          ? 'text-[#625B50] hover:bg-[#C44E36] hover:text-white dark:text-[#B8C2D4] dark:hover:bg-[#C44E36]'
+          : 'text-[#625B50] hover:bg-[#E8E3D8] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]'
       }`}
     >
       {children}

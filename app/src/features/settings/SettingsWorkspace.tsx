@@ -1,21 +1,19 @@
-import { motion } from 'framer-motion';
-import { ArrowLeft, Settings, Terminal, Wrench } from 'lucide-react';
+﻿import { motion } from 'framer-motion';
+import { ArrowLeft, Settings, Wrench } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
 import SettingsPage from '@/pages/SettingsPage';
 import ToolsPage from '@/pages/ToolsPage';
-import LogsPage from '@/pages/LogsPage';
 
 const settingsTabs: Array<{ id: ViewType; label: string; icon: ComponentType<{ className?: string }> }> = [
   { id: 'settings', label: '设置', icon: Settings },
   { id: 'tools', label: '工具', icon: Wrench },
-  { id: 'logs', label: '运行日志', icon: Terminal },
 ];
 
 export default function SettingsWorkspace() {
   const { state, dispatch } = useApp();
-  const activeView = state.currentView === 'tools' || state.currentView === 'logs'
+  const activeView = state.currentView === 'tools'
     ? state.currentView
     : 'settings';
   const returnToModel = () => {
@@ -31,8 +29,6 @@ export default function SettingsWorkspace() {
 
   const renderPanel = () => {
     switch (activeView) {
-      case 'logs':
-        return <LogsPage />;
       case 'tools':
         return <ToolsPage />;
       default:
@@ -41,8 +37,8 @@ export default function SettingsWorkspace() {
   };
 
   return (
-    <div className="paper-surface flex h-full min-h-0 overflow-hidden rounded-2xl border border-[#E2DFD6] bg-[#FBFAF6] text-[#403C32] shadow-sm dark:border-white/[0.08] dark:bg-[#11100E] dark:text-[#F3EBDD]">
-      <aside className="hidden w-56 flex-shrink-0 border-r border-[#E2DFD6] bg-[#F1EFE8] p-3 dark:border-white/[0.08] dark:bg-[#15130F] md:block">
+    <div className="paper-surface flex h-full min-h-0 overflow-hidden rounded-lg border border-[#E2DFD6] bg-[#FBFAF6] text-[#403C32] shadow-sm dark:border-white/[0.08] dark:bg-[#10131A] dark:text-[#E2E8F2]">
+      <aside className="hidden w-60 flex-shrink-0 border-r border-[#E2DFD6] bg-[#F1EFE8] p-3 dark:border-white/[0.08] dark:bg-[#12151C] md:block">
         <div className="px-2 py-3">
           <button
             onClick={returnToModel}
@@ -75,7 +71,7 @@ export default function SettingsWorkspace() {
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <div className="flex flex-shrink-0 items-center gap-2 overflow-x-auto border-b border-[#E2DFD6] bg-[#FBFAF6] px-4 py-3 dark:border-white/[0.08] dark:bg-[#171512] md:hidden">
+        <div className="flex flex-shrink-0 items-center gap-2 overflow-x-auto border-b border-[#E2DFD6] bg-[#FBFAF6] px-4 py-3 dark:border-white/[0.08] dark:bg-[#141720] md:hidden">
           {settingsTabs.map((tab) => {
             const selected = activeView === tab.id;
             return (

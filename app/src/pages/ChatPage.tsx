@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowDown,
@@ -6,6 +7,7 @@ import {
   CheckCircle2,
   FileText,
   FileWarning,
+  Info,
   MoreHorizontal,
   PanelRightClose,
   Plus,
@@ -21,7 +23,8 @@ import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion } from '@/lib/desktop';
+import { effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion } from '@/lib/desktop';
+import { modelVideoSupport } from '@/lib/modelCapabilities';
 import type { ChatMessageContentPart } from '@/types';
 import {
   CHAT_HISTORY_MODEL_ID,
@@ -46,9 +49,10 @@ import {
   type PendingAttachment,
   type TextAttachment,
 } from '@/features/chat/chatUtils';
-import type { ChatSession } from '@/types';
+import type { ChatSession, Message } from '@/types';
 import type { ReasoningMode } from '@/types';
 import { toolLabel } from '@/lib/llamaTools';
+import useMediaQuery from '@/hooks/useMediaQuery';
 
 const REASONING_OPTIONS: Array<{ mode: ReasoningMode; label: string; description: string }> = [
   { mode: 'off', label: '关闭', description: '不请求 thinking 输出' },
@@ -79,16 +83,6 @@ function readFileAsDataUrl(file: File): Promise<string> {
 function classifyAttachmentByName(name: string): AttachmentKind | null {
   const fakeFile = { name, type: '', size: 0 };
   return classifyAttachment(fakeFile);
-}
-
-// llama-server 的 input_audio 只接受 wav / mp3 两种格式（OpenAI Audio API 子集）。
-// 用户上传 m4a / flac / ogg / aac / opus 时会被这里拦截，给出明确的转换提示。
-const SUPPORTED_AUDIO_EXTS = new Set(['wav', 'mp3']);
-
-function validateAudioExt(name: string): string | null {
-  const ext = fileExtension(name);
-  if (SUPPORTED_AUDIO_EXTS.has(ext)) return null;
-  return `${name} 暂不支持：llama-server 只接受 wav / mp3 音频（当前是 ${ext || '未知格式'}），请先转码。`;
 }
 
 function elapsedRequestStats(startTime: number, ctxTotal = 0) {
@@ -130,11 +124,28 @@ export default function ChatPage() {
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const reasoningMenuRef = useRef<HTMLDivElement>(null);
+  // 按会话保存中止句柄。曾经这里只有单个槽位，切到另一个会话再发送时
+  // 前一个会话的 controller 引用会被覆盖并永久丢失，那条流既停不掉也无从追踪。
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const shouldStickToBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
 
   const activeModel = state.models.find((m) => m.id === state.activeModelId);
+  const activeVideoSupport = modelVideoSupport(activeModel);
+  const attachmentNotice = useMemo(() => {
+    if (!pendingAttachments.some((attachment) => attachment.kind === 'video')) return null;
+    if (activeVideoSupport === 'candidate') {
+      return '当前模型属于视频候选：ffmpeg/ffprobe 就绪时使用原生视频，否则自动改用抽帧兼容。';
+    }
+    if (activeVideoSupport === 'frames') {
+      return '当前模型未验证原生视频，将最多抽取 8 帧作为图片分析，不能保证动作和时间关系。';
+    }
+    if (activeVideoSupport === 'none') {
+      return '当前模型不支持视频输入，请切换到已验证的视频模型。';
+    }
+    return null;
+  }, [activeVideoSupport, pendingAttachments]);
   const loadedModel = activeModel?.status === 'loaded'
     ? activeModel
     : state.models.find((model) => model.status === 'loaded');
@@ -168,11 +179,34 @@ export default function ChatPage() {
     : undefined;
   const modelMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
   const streamingMessage = modelMessages.find((message) => message.isStreaming);
+  // 当前会话是否在生成——决定本会话的输入区状态。
   const isGenerating = Boolean(streamingMessage);
+  // 是否有任意会话在生成——决定「停止生成」按钮是否出现、以及能否再发起新请求。
+  // 只看当前会话会让用户切换会话后失去中止入口，并且能并发发起第二条流。
+  const isAnyGenerating = useMemo(
+    () =>
+      Object.values(state.chatSessions).some((sessions) =>
+        sessions.some((session) => session.messages.some((message) => message.isStreaming))
+      ),
+    [state.chatSessions]
+  );
   const lastMessage = modelMessages[modelMessages.length - 1];
   const lastMessageContent = lastMessage?.content;
   const lastMessageReasoningContent = lastMessage?.reasoningContent;
   const lastMessageStreaming = lastMessage?.isStreaming;
+
+  // 聊天消息虚拟化：仅渲染可见区域的消息，减少长对话 DOM 开销
+  const virtualizer = useVirtualizer({
+    count: modelMessages.length,
+    getScrollElement: () => messagesViewportRef.current,
+    estimateSize: () => 120,
+    overscan: 5,
+    // 流式输出时持续测量以跟踪高度变化
+    measureElement: (el) => {
+      const rowEl = el as HTMLElement;
+      return rowEl.getBoundingClientRect().height;
+    },
+  });
 
   const filteredSessions = useMemo(() => {
     const query = sessionSearch.trim().toLowerCase();
@@ -190,19 +224,69 @@ export default function ChatPage() {
     return Array.from(groups.entries());
   }, [filteredSessions]);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+  // 使用 IntersectionObserver 检测用户是否在底部
+  useEffect(() => {
+    const endEl = messagesEndRef.current;
+    if (!endEl) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        shouldStickToBottomRef.current = entry.isIntersecting;
+      },
+      { root: messagesViewportRef.current, threshold: 0.1 }
+    );
+    observer.observe(endEl);
+    return () => observer.disconnect();
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
     if (!shouldStickToBottomRef.current) return;
-    requestAnimationFrame(() => {
-      const viewport = messagesViewportRef.current;
-      if (!viewport) return;
-      // 单次滚动，避免嵌套 rAF 在流式 token 高频触发时产生抖动与"往下拽"的生硬感。
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior });
-      lastScrollTopRef.current = viewport.scrollTop;
-    });
+    const count = virtualizer.options.count;
+    if (count === 0) return;
+    virtualizer.scrollToIndex(count - 1, { align: 'end', behavior });
+  }, [virtualizer]);
+
+  // 自动滚动节流：100ms 内最多滚一次，但必须保证「最后一次变化」也会滚动（尾随触发）。
+  // 早先的实现用一个布尔闭锁 + cleanup 里 clearTimeout，流式输出时依赖每几毫秒变一次，
+  // cleanup 会清掉唯一负责复位闭锁的 timer，而 effect 又因闭锁为 true 直接 return，
+  // 于是闭锁永久为 true，此后该 effect 再也不会滚动。
+  const scrollThrottleRef = useRef<{ lastRunAt: number; timer: number | null }>({
+    lastRunAt: 0,
+    timer: null,
+  });
+
+  useEffect(() => {
+    const throttle = scrollThrottleRef.current;
+    const controllers = abortControllersRef.current;
+    return () => {
+      if (throttle.timer !== null) {
+        window.clearTimeout(throttle.timer);
+        throttle.timer = null;
+      }
+      // 卸载时中止所有在途请求，避免流继续往已销毁的组件派发。
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+    };
   }, []);
 
   useLayoutEffect(() => {
-    scrollToBottom('auto');
+    const SCROLL_THROTTLE_MS = 100;
+    const throttle = scrollThrottleRef.current;
+    const elapsed = Date.now() - throttle.lastRunAt;
+
+    if (elapsed >= SCROLL_THROTTLE_MS) {
+      throttle.lastRunAt = Date.now();
+      scrollToBottom('auto');
+      return;
+    }
+
+    if (throttle.timer !== null) {
+      window.clearTimeout(throttle.timer);
+    }
+    throttle.timer = window.setTimeout(() => {
+      throttle.timer = null;
+      throttle.lastRunAt = Date.now();
+      scrollToBottom('auto');
+    }, SCROLL_THROTTLE_MS - elapsed);
   }, [modelMessages.length, lastMessageContent, lastMessageReasoningContent, lastMessageStreaming, scrollToBottom]);
 
   useLayoutEffect(() => {
@@ -233,6 +317,18 @@ export default function ChatPage() {
     };
   }, [isGenerating]);
 
+  useEffect(() => {
+    if (!reasoningMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (reasoningMenuOpen && target && !reasoningMenuRef.current?.contains(target)) {
+        setReasoningMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [reasoningMenuOpen]);
+
   const handleMessagesScroll = () => {
     const viewport = messagesViewportRef.current;
     if (!viewport) return;
@@ -247,13 +343,18 @@ export default function ChatPage() {
   };
 
   const jumpToBottom = useCallback(() => {
-    const viewport = messagesViewportRef.current;
-    if (!viewport) return;
     shouldStickToBottomRef.current = true;
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
-    lastScrollTopRef.current = viewport.scrollTop;
+    virtualizer.scrollToIndex(modelMessages.length - 1, { align: 'end', behavior: 'smooth' });
     setShowJumpToBottom(false);
-  }, []);
+  }, [modelMessages.length, virtualizer]);
+
+  const jumpToMessage = useCallback((messageId: string) => {
+    const index = modelMessages.findIndex((msg) => msg.id === messageId);
+    if (index < 0) return;
+    shouldStickToBottomRef.current = false;
+    virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
+    setShowJumpToBottom(true);
+  }, [modelMessages, virtualizer]);
 
   const releaseAutoScroll = () => {
     shouldStickToBottomRef.current = false;
@@ -295,14 +396,6 @@ export default function ChatPage() {
         errors.push(`${file.name} 超过媒体附件 ${formatFileSize(MAX_MEDIA_BYTES)} 限制。`);
         continue;
       }
-      // 音频格式校验：llama-server 只接受 wav / mp3
-      if (kind === 'audio') {
-        const audioError = validateAudioExt(file.name);
-        if (audioError) {
-          errors.push(audioError);
-          continue;
-        }
-      }
       const dataUrl = await readFileAsDataUrl(file);
       nextAttachments.push({
         id: `${file.name}-${file.lastModified}-${file.size}`,
@@ -339,14 +432,6 @@ export default function ChatPage() {
           if (media.byte_size > MAX_MEDIA_BYTES) {
             errors.push(`${name} 超过媒体附件 ${formatFileSize(MAX_MEDIA_BYTES)} 限制。`);
             continue;
-          }
-          // 音频格式校验：llama-server 只接受 wav / mp3
-          if (kind === 'audio') {
-            const audioError = validateAudioExt(name);
-            if (audioError) {
-              errors.push(audioError);
-              continue;
-            }
           }
           nextAttachments.push({
             id: `${path}-${Date.now()}-${nextAttachments.length}`,
@@ -385,6 +470,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     void listenDesktopFileDrops((payload) => {
       if (payload.type === 'enter' || payload.type === 'over') {
         if (!isGenerating) setDraggingFiles(true);
@@ -403,9 +489,11 @@ export default function ChatPage() {
         void processAttachmentPaths(payload.paths ?? []);
       }
     }).then((nextUnlisten) => {
+      if (cancelled) { nextUnlisten?.(); return; }
       unlisten = nextUnlisten;
     });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [isGenerating, processAttachmentPaths]);
@@ -459,7 +547,9 @@ export default function ChatPage() {
   };
 
   const handleSend = async () => {
-    if ((!inputText.trim() && pendingAttachments.length === 0) || !activeModel || !canChat || isGenerating) return;
+    // 用 isAnyGenerating 而非 isGenerating：否则切换会话后能并发发起第二条流，
+    // 两条请求会抢同一个 llama-server slot。
+    if ((!inputText.trim() && pendingAttachments.length === 0) || !activeModel || !canChat || isAnyGenerating) return;
     shouldStickToBottomRef.current = true;
 
     const textAttachments = pendingAttachments.filter((a): a is TextAttachment => a.kind === 'text');
@@ -489,10 +579,19 @@ export default function ChatPage() {
       return;
     }
     // 媒体附件能力校验
-    const imageOrVideoParts = mediaAttachments.filter((a) => a.kind === 'image' || a.kind === 'video');
+    const imageParts = mediaAttachments.filter((a) => a.kind === 'image');
+    const videoParts = mediaAttachments.filter((a) => a.kind === 'video');
     const audioParts = mediaAttachments.filter((a) => a.kind === 'audio');
-    if (imageOrVideoParts.length > 0 && !activeModel.supportsVision) {
-      setAttachmentError('当前模型不支持图片/视频输入（未检测到 mmproj 文件）。');
+    if (imageParts.length > 0 && !activeModel.supportsVision) {
+      setAttachmentError('当前模型不支持图片输入（未检测到视觉 mmproj）。');
+      return;
+    }
+    if (videoParts.length > 0 && !activeModel.supportsVision) {
+      setAttachmentError('当前模型没有视觉 mmproj，无法处理视频或视频抽帧。');
+      return;
+    }
+    if (videoParts.length > 0 && activeVideoSupport === 'none') {
+      setAttachmentError('当前模型未检测到视频能力，请切换到已验证的视频模型。');
       return;
     }
     if (audioParts.length > 0 && !activeModel.supportsAudio) {
@@ -537,7 +636,7 @@ export default function ChatPage() {
     const assistantMsgId = `msg-${Date.now()}-assistant`;
     const startTime = performance.now();
     const abortController = new AbortController();
-    abortControllerRef.current = abortController;
+    abortControllersRef.current.set(sessionId, abortController);
 
       dispatch({
         type: 'ADD_MESSAGE',
@@ -559,36 +658,40 @@ export default function ChatPage() {
     });
 
     let streamedContent = '';
+    const updateAssistantContent = (content: string) => {
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content },
+      });
+      scrollToBottom('auto');
+    };
     try {
       const metrics = await streamChatCompletion({
-        port: activeModel.serverPort ?? state.serverPort,
-        modelName: activeModel.name,
-        config: state.chatConfig,
-        ctxTotal: activeModel.loadConfig.ctxLength,
-        supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
-        reasoningBudget: activeModel.loadConfig.reasoningBudget,
-        apiKey: state.apiConfig.apiKey,
-        signal: abortController.signal,
-        messages: [...modelMessages, userMsg].map((msg) => ({
-          role: msg.role,
-          content: msg.multimodalContent ?? msg.content,
-        })),
-        onToken: (token) => {
-          streamedContent += token;
-          dispatch({
-            type: 'UPDATE_MESSAGE',
-            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content: streamedContent },
+            port: activeModel.serverPort ?? state.serverPort,
+            modelName: activeModel.name,
+            config: state.chatConfig,
+            ctxTotal: activeModel.loadConfig.ctxLength,
+            supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
+            reasoningBudget: activeModel.loadConfig.reasoningBudget,
+            videoSupport: activeVideoSupport,
+            apiKey: effectiveRequestApiKey(state.apiConfig),
+            signal: abortController.signal,
+            messages: [...modelMessages, userMsg].map((msg) => ({
+              role: msg.role,
+              content: msg.multimodalContent ?? msg.content,
+            })),
+            onToken: (token) => {
+              streamedContent += token;
+              updateAssistantContent(streamedContent);
+            },
+            onReasoningDelta: (reasoningContent) => {
+              dispatch({
+                type: 'UPDATE_MESSAGE',
+                payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
+              });
+              scrollToBottom('auto');
+            },
           });
-          scrollToBottom('auto');
-        },
-        onReasoningDelta: (reasoningContent) => {
-          dispatch({
-            type: 'UPDATE_MESSAGE',
-            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
-          });
-          scrollToBottom('auto');
-        },
-      });
 
       const genTime = (performance.now() - startTime) / 1000;
       if (metrics.totalTokens > 0) {
@@ -640,7 +743,7 @@ export default function ChatPage() {
           },
         });
       } else {
-        const message = `本地推理请求失败：${String(error instanceof Error ? error.message : error)}\n\n请确认模型已经加载完成，llama-server 正在运行。`;
+        const message = `本地推理请求失败：${String(error instanceof Error ? error.message : error)}\n\n${serverErrorHint(error)}`;
         dispatch({
           type: 'UPDATE_MESSAGE',
           payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content: message, reasoningContent: '' },
@@ -657,14 +760,14 @@ export default function ChatPage() {
         });
       }
     } finally {
-      if (abortControllerRef.current === abortController) {
-        abortControllerRef.current = null;
+      if (abortControllersRef.current.get(sessionId) === abortController) {
+        abortControllersRef.current.delete(sessionId);
       }
     }
   };
 
   const handleEditAndResend = async (messageId: string, content: string) => {
-    if (!activeSession || !activeModel || !canChat || isGenerating) return;
+    if (!activeSession || !activeModel || !canChat || isAnyGenerating) return;
     const messageIndex = modelMessages.findIndex((message) => message.id === messageId && message.role === 'user');
     if (messageIndex === -1) return;
 
@@ -672,10 +775,18 @@ export default function ChatPage() {
     setStopMessage(null);
     setAttachmentError(null);
 
+    const originalMultimodal = modelMessages[messageIndex].multimodalContent;
     const editedUserMessage = {
       ...modelMessages[messageIndex],
       content,
       timestamp: Date.now(),
+      multimodalContent: originalMultimodal
+        ? originalMultimodal.some((part) => part.type === 'text')
+          ? originalMultimodal.map((part) =>
+              part.type === 'text' ? { ...part, text: content } : part
+            )
+          : [{ type: 'text' as const, text: content }, ...originalMultimodal]
+        : undefined,
     };
     const nextHistory = [
       ...modelMessages.slice(0, messageIndex),
@@ -697,7 +808,7 @@ export default function ChatPage() {
     const assistantMsgId = `msg-${Date.now()}-assistant`;
     const startTime = performance.now();
     const abortController = new AbortController();
-    abortControllerRef.current = abortController;
+    abortControllersRef.current.set(sessionId, abortController);
 
     dispatch({
       type: 'ADD_MESSAGE',
@@ -719,36 +830,40 @@ export default function ChatPage() {
     });
 
     let streamedContent = '';
+    const updateAssistantContent = (content: string) => {
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content },
+      });
+      scrollToBottom('auto');
+    };
     try {
       const metrics = await streamChatCompletion({
-        port: activeModel.serverPort ?? state.serverPort,
-        modelName: activeModel.name,
-        config: state.chatConfig,
-        ctxTotal: activeModel.loadConfig.ctxLength,
-        supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
-        reasoningBudget: activeModel.loadConfig.reasoningBudget,
-        apiKey: state.apiConfig.apiKey,
-        signal: abortController.signal,
-        messages: nextHistory.map((message) => ({
-          role: message.role,
-          content: message.multimodalContent ?? message.content,
-        })),
-        onToken: (token) => {
-          streamedContent += token;
-          dispatch({
-            type: 'UPDATE_MESSAGE',
-            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content: streamedContent },
+            port: activeModel.serverPort ?? state.serverPort,
+            modelName: activeModel.name,
+            config: state.chatConfig,
+            ctxTotal: activeModel.loadConfig.ctxLength,
+            supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
+            reasoningBudget: activeModel.loadConfig.reasoningBudget,
+            videoSupport: activeVideoSupport,
+            apiKey: effectiveRequestApiKey(state.apiConfig),
+            signal: abortController.signal,
+            messages: nextHistory.map((message) => ({
+              role: message.role,
+              content: message.multimodalContent ?? message.content,
+            })),
+            onToken: (token) => {
+              streamedContent += token;
+              updateAssistantContent(streamedContent);
+            },
+            onReasoningDelta: (reasoningContent) => {
+              dispatch({
+                type: 'UPDATE_MESSAGE',
+                payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
+              });
+              scrollToBottom('auto');
+            },
           });
-          scrollToBottom('auto');
-        },
-        onReasoningDelta: (reasoningContent) => {
-          dispatch({
-            type: 'UPDATE_MESSAGE',
-            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
-          });
-          scrollToBottom('auto');
-        },
-      });
 
       const genTime = (performance.now() - startTime) / 1000;
       if (metrics.totalTokens > 0) {
@@ -798,7 +913,7 @@ export default function ChatPage() {
           },
         });
       } else {
-        const message = `重新发送失败：${String(error instanceof Error ? error.message : error)}\n\n请确认模型已经加载完成，llama-server 正在运行。`;
+        const message = `重新发送失败：${String(error instanceof Error ? error.message : error)}\n\n${serverErrorHint(error)}`;
         dispatch({
           type: 'UPDATE_MESSAGE',
           payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content: message, reasoningContent: '' },
@@ -815,14 +930,17 @@ export default function ChatPage() {
         });
       }
     } finally {
-      if (abortControllerRef.current === abortController) {
-        abortControllerRef.current = null;
+      if (abortControllersRef.current.get(sessionId) === abortController) {
+        abortControllersRef.current.delete(sessionId);
       }
     }
   };
 
   const handleStopGeneration = () => {
-    abortControllerRef.current?.abort();
+    // 中止全部在途请求：用户可能已经切换过会话，
+    // 只停当前会话会留下停不掉的后台流。
+    abortControllersRef.current.forEach((controller) => controller.abort());
+    abortControllersRef.current.clear();
     stopActiveChatCompletion();
     if (activeSession && streamingMessage) {
       dispatch({
@@ -854,7 +972,7 @@ export default function ChatPage() {
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
-    if (isGenerating) return;
+    if (isAnyGenerating) return;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       void handleSend();
@@ -975,7 +1093,9 @@ export default function ChatPage() {
   const activeHeaderModelName = activeSessionModelName
     ?? (activeSession && modelMessages.length > 0 ? '未记录模型' : activeModel?.name);
   const chatBubbleModelName = activeSessionModelName ?? '未记录模型';
-  const sidebarWidth = state.sidebarCollapsed ? 76 : 292;
+  const compactSidebar = useMediaQuery('(max-width: 959px)');
+  const sidebarCollapsed = state.sidebarCollapsed || compactSidebar;
+  const sidebarWidth = sidebarCollapsed ? 64 : 288;
   const currentReasoningOption = REASONING_OPTIONS.find((item) => item.mode === state.chatConfig.reasoningMode) ?? REASONING_OPTIONS[1];
   const enabledToolsText = state.chatConfig.enabledTools.length > 0
     ? state.chatConfig.enabledTools.map(toolLabel).join('、')
@@ -984,7 +1104,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-[#F6F2EA] text-[15.5px] text-[#26231D] shadow-sm dark:border-white/[0.08] dark:bg-[#11100E] dark:text-[#F3EBDD]"
+      className="relative flex h-full min-h-0 overflow-hidden bg-[#FAFAF9] text-[15.5px] text-[#202123] dark:bg-[#0D0F14] dark:text-[#E2E8F2]"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -996,12 +1116,12 @@ export default function ChatPage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-2xl border border-dashed border-[#D7663E] bg-[#FBFAF6]/95 dark:bg-[#15130F]/95"
+            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border border-dashed border-[#D7663E] bg-[#FAFAF9]/95 dark:bg-[#0D0F14]/95"
           >
-            <div className="rounded-xl border border-[#E2DFD6] bg-[#FBFAF6] px-5 py-4 text-center shadow-lg dark:border-white/10 dark:bg-[#1C1A16]">
+            <div className="rounded-lg bg-white px-5 py-4 text-center dark:bg-[#171B24]">
               <FileText className="mx-auto mb-2 h-6 w-6 text-[#D7663E]" />
-              <div className="text-[15px] font-semibold text-[#403C32] dark:text-[#F3EBDD]">松开即可上传到当前对话</div>
-              <div className="mt-1 text-[13px] text-[#8C8576] dark:text-[#A9A095]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
+              <div className="text-[15px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">松开即可上传到当前对话</div>
+              <div className="mt-1 text-[13px] text-[#8C8576] dark:text-[#8E99AD]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
             </div>
           </motion.div>
         )}
@@ -1009,7 +1129,8 @@ export default function ChatPage() {
       <ChatSidebar
         activeModel={sidebarModel}
         canChat={canChat}
-        collapsed={state.sidebarCollapsed}
+        collapsed={sidebarCollapsed}
+        collapseLocked={compactSidebar}
         selectionMode={selectionMode}
         selectedSessionIds={selectedSessionIds}
         sessionSearch={sessionSearch}
@@ -1038,12 +1159,12 @@ export default function ChatPage() {
         vramPercent={vramPercent}
       />
 
-      <section className="relative grid min-w-0 flex-1 grid-rows-[64px_minmax(0,1fr)] overflow-hidden bg-[#FFFDF8] dark:bg-[#24211D]">
-        <header className="flex min-w-0 items-center justify-between border-b border-[#E4E0D6] px-5 dark:border-white/[0.08]">
-          <div className="flex min-w-0 items-center gap-3">
+      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[#FAFAF9] dark:bg-[#0D0F14]">
+        <header className="flex min-w-0 items-center justify-between border-b border-black/[0.055] px-5 dark:border-white/[0.055]">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold text-[#403C32] dark:text-[#F3EBDD]">{activeTitle}</h1>
-              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[#969083] dark:text-[#A9A095]">
+              <h1 className="truncate text-base font-semibold text-[#403C32] dark:text-[#E2E8F2]">{activeTitle}</h1>
+              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[#969083] dark:text-[#8E99AD]">
                 <span className="truncate">{compactModelName(activeHeaderModelName)}</span>
                 <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[#B8B1A3] dark:bg-white/30" />
                 <span className="truncate">{canChat ? 'llama-server 已连接' : '历史对话可查看'}</span>
@@ -1051,20 +1172,20 @@ export default function ChatPage() {
             </div>
           </div>
 
-          <div className="flex min-w-0 items-center gap-1.5">
+          <div className="flex flex-shrink-0 items-center gap-1.5">
             <span
-              className={`mr-1 hidden h-8 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors sm:inline-flex ${
+              className={`mr-1 hidden h-8 flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium transition-colors sm:inline-flex ${
                 isGenerating
-                    ? 'bg-[#F5E2D6] text-[#B76540] dark:bg-[#3A241C] dark:text-[#F0B18D]'
+                    ? 'text-[#B76540] dark:text-[#6EA8DC]'
                     : canChat
-                      ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1F3224] dark:text-[#98D19C]'
-                      : 'bg-[#ECE7DC] text-[#817A6D] dark:bg-white/[0.06] dark:text-[#A9A095]'
+                      ? 'text-[#4E7751] dark:text-[#7EC8A0]'
+                      : 'text-[#817A6D] dark:text-[#8E99AD]'
               }`}
             >
               <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
               {runtimeStatusText}
             </span>
-            {isGenerating && (
+            {isAnyGenerating && (
               <IconButton icon={Square} label="停止生成" tone="danger" onClick={handleStopGeneration} />
             )}
             <IconButton icon={Power} label="卸载模型" tone="danger" onClick={() => void handleUnloadModel()} disabled={!activeModel || !state.serverRunning} />
@@ -1090,7 +1211,7 @@ export default function ChatPage() {
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 28, opacity: 0 }}
                 transition={{ duration: 0.18 }}
-                className="h-full w-full max-w-sm rounded-l-2xl border-l border-[#DED9CC] bg-[#FBFAF6] p-5 shadow-2xl dark:border-white/[0.08] dark:bg-[#171512]"
+                className="h-full w-full max-w-sm border-l border-[#DED9CC] bg-[#F4F4F2] p-5 shadow-xl dark:border-white/[0.08] dark:bg-[#11141B]"
                 onClick={(event) => event.stopPropagation()}
               >
                 <ChatSettingsPanel onClose={() => setShowSettings(false)} />
@@ -1099,185 +1220,222 @@ export default function ChatPage() {
           )}
         </AnimatePresence>
 
-        <div
-          ref={messagesViewportRef}
-          onScroll={handleMessagesScroll}
-          onWheel={(event) => {
-            if (event.deltaY < 0) releaseAutoScroll();
-          }}
-          onTouchMove={releaseAutoScroll}
-          onKeyDown={(event) => {
-            if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) releaseAutoScroll();
-          }}
-          tabIndex={-1}
-          className="min-h-0 overflow-y-auto px-[clamp(22px,6vw,88px)] pb-[clamp(120px,16vh,180px)] pt-8"
-        >
-          {modelMessages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-center">
-              <div className="max-w-md px-8 py-9">
-                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[#E3DED2] bg-[#F1EDE4] text-lg text-[#D7663E] dark:border-white/[0.08] dark:bg-white/[0.06]">LL</div>
-                <h2 className="mb-2 text-xl font-semibold text-[#403C32] dark:text-[#F3EBDD]">{activeTitle}</h2>
-                <p className="text-sm leading-relaxed text-[#817A6D] dark:text-[#A9A095]">{emptyMessage}</p>
-              </div>
-            </div>
-          ) : (
-            <div className="mx-auto grid w-full max-w-[860px] min-w-0 gap-7">
-              <AnimatePresence initial={false}>
-                {modelMessages.map((msg) => (
-                  <ChatBubble
-                    key={msg.id}
-                    message={msg}
-                    modelId={activeSessionModelId}
-                    sessionId={activeSession?.id ?? ''}
-                    sessionModelName={chatBubbleModelName}
-                    sessionModelColor={activeSessionModelColor}
-                    onEditAndResend={canChat && !isGenerating ? handleEditAndResend : undefined}
-                  />
-                ))}
-              </AnimatePresence>
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
-
-        <AnimatePresence>
-          {showJumpToBottom && (
-            <motion.button
-              key="jump-to-bottom"
-              initial={{ opacity: 0, scale: 0.8, y: 6 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.8, y: 6 }}
-              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-              onClick={jumpToBottom}
-              className="absolute bottom-[clamp(120px,16vh,180px)] right-[clamp(22px,6vw,88px)] z-30 flex h-10 w-10 items-center justify-center rounded-full border border-[#D8D2C5] bg-[#FBFAF6] text-[#6F685A] shadow-[0_4px_14px_rgba(64,60,50,0.18)] transition-colors hover:bg-[#F1EDE4] hover:text-[#403C32] dark:border-white/[0.12] dark:bg-[#1F1D19] dark:text-[#D8D0C3] dark:hover:bg-white/[0.12] dark:hover:text-[#F3EBDD]"
-              title="滚动到最底部"
+        <div className="relative min-h-0 overflow-hidden">
+            <ConversationQuickRail
+              messages={modelMessages}
+              activeMessageId={lastMessage?.id}
+              onSelect={jumpToMessage}
+            />
+            <div
+              ref={messagesViewportRef}
+              onScroll={handleMessagesScroll}
+              onWheel={(event) => {
+                if (event.deltaY < 0) releaseAutoScroll();
+              }}
+              onTouchMove={releaseAutoScroll}
+              onKeyDown={(event) => {
+                if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) releaseAutoScroll();
+              }}
+              tabIndex={-1}
+              className="h-full min-h-0 overflow-y-auto px-[clamp(18px,5vw,72px)] pb-[clamp(138px,19vh,208px)] pt-7"
             >
-              <ArrowDown className="h-4 w-4" />
-            </motion.button>
-          )}
-        </AnimatePresence>
-
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-[clamp(16px,5vw,56px)] pb-4 pt-3">
-          <div className="pointer-events-auto mx-auto w-full max-w-[860px] min-w-0">
-            {(pendingAttachments.length > 0 || attachmentError || stopMessage) && (
-              <div className="mb-2 space-y-2">
-                {pendingAttachments.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {pendingAttachments.map((file) => (
-                      <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-lg border border-[#DED9CC] bg-[#F7F4EC] px-3 py-2 text-xs text-[#756E61] shadow-sm dark:border-white/[0.08] dark:bg-[#2D2923] dark:text-[#A9A095]">
-                        <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[#D7663E]" />
-                        <span className="max-w-[220px] truncate text-[#403C32] dark:text-[#F3EBDD]">{file.name}</span>
-                        <span className="mono-font flex-shrink-0">{formatFileSize(file.size)}</span>
-                        <button
-                          onClick={() => removeAttachment(file.id)}
-                          className="rounded-md p-0.5 transition-colors hover:bg-[#E7E2D6] dark:hover:bg-white/[0.08]"
-                          title="移除附件"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))}
+              {modelMessages.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-center">
+                  <div className="max-w-md px-8 py-9">
+                    <div className="mx-auto mb-4 text-sm font-semibold tracking-[0.22em] text-[#D7663E] dark:text-[#6EA8DC]">LOCAL LLM</div>
+                    <h2 className="mb-2 text-xl font-semibold text-[#403C32] dark:text-[#E2E8F2]">{activeTitle}</h2>
+                    <p className="text-sm leading-relaxed text-[#817A6D] dark:text-[#8E99AD]">{emptyMessage}</p>
                   </div>
-                )}
-                {attachmentError && (
-                  <div className="flex items-center gap-2 text-xs text-[#C44E36] dark:text-[#F0987C]">
-                    <FileWarning className="h-3.5 w-3.5 flex-shrink-0" />
-                    <span>{attachmentError}</span>
-                  </div>
-                )}
-                {stopMessage && (
-                  <div className="text-xs text-[#8C8576] dark:text-[#A9A095]">{stopMessage}</div>
-                )}
-              </div>
-            )}
-
-            <div className="min-h-[88px] rounded-xl border border-[#DCD7CC] bg-[#F7F4EC] shadow-[0_10px_28px_rgba(64,60,50,0.10)] dark:border-white/[0.09] dark:bg-[#2D2923] dark:shadow-[0_10px_28px_rgba(0,0,0,0.26)]">
-              <textarea
-                ref={textareaRef}
-                value={inputText}
-                onChange={(event) => setInputText(event.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={inputPlaceholder}
-                disabled={!canChat}
-                rows={2}
-                className="max-h-[180px] min-h-[64px] w-full resize-none bg-transparent px-4 pt-4 text-sm leading-6 text-[#403C32] outline-none [overflow-wrap:anywhere] placeholder:text-[#A69E8D] disabled:opacity-60 dark:text-[#F3EBDD] dark:placeholder:text-[#82786B]"
-              />
-              <div className="flex min-w-0 items-center gap-2 px-4 pb-3">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.cs,.php,.rb,.swift,.kt,.kts,.sql,.toml,.yaml,.yml,.ini,.env,.bat,.ps1,.sh,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.wav,.mp3,.m4a,.aac,.ogg,.flac,.opus,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ogv,text/*,application/json,application/xml,image/*,audio/*,video/*"
-                  className="hidden"
-                  onChange={(event) => void handleAttachFiles(event)}
-                />
-                <InputToolButton icon={Plus} label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={isGenerating} />
-                <div className="relative flex-shrink-0">
-                  <button
-                    onClick={() => setReasoningMenuOpen((value) => !value)}
-                    disabled={!canChat}
-                    className="flex h-9 items-center gap-1.5 rounded-lg border border-[#E1DCD0] bg-[#FBFAF6] px-2.5 text-xs font-medium text-[#716A5E] transition-colors hover:bg-[#E8E3D8] disabled:opacity-40 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#D8D0C3] dark:hover:bg-white/[0.09]"
-                    title="思考强度"
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    <span>{currentReasoningOption.label}</span>
-                  </button>
-                  <AnimatePresence>
-                    {reasoningMenuOpen && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 6, scale: 0.98 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 6, scale: 0.98 }}
-                        transition={{ duration: 0.14 }}
-                        className="absolute bottom-10 left-0 z-20 w-44 overflow-hidden rounded-xl border border-[#DDD8CC] bg-[#FBFAF6] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[#211E19]"
-                      >
-                        {REASONING_OPTIONS.map((item) => (
-                          <button
-                            key={item.mode}
-                            onClick={() => {
-                              dispatch({ type: 'SET_CHAT_CONFIG', payload: { reasoningMode: item.mode } });
-                              setReasoningMenuOpen(false);
-                            }}
-                            className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
-                              state.chatConfig.reasoningMode === item.mode
-                                ? 'bg-[#F1E7DE] text-[#D7663E] dark:bg-[#3A241C] dark:text-[#F0B18D]'
-                                : 'text-[#403C32] hover:bg-[#F1EEE7] dark:text-[#F3EBDD] dark:hover:bg-white/[0.07]'
-                            }`}
-                          >
-                            <div className="text-sm font-semibold">{item.label}</div>
-                            <div className="mt-0.5 text-xs text-[#8C8576] dark:text-[#A9A095]">{item.description}</div>
-                          </button>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
                 </div>
-                <InputToolButton
-                  icon={Wrench}
-                  label={`工具设置：${enabledToolsText}`}
-                  onClick={handleOpenToolsSettings}
-                />
-                <InputToolButton icon={Trash2} label="清除上下文" onClick={handleClearContext} disabled={!activeSession || isGenerating} />
-                <span className="ml-auto hidden min-w-0 truncate px-2 text-xs text-[#8F887A] dark:text-[#82786B] sm:block">
-                  Enter 发送，Shift + Enter 换行
-                </span>
-                <button
-                  onClick={isGenerating ? handleStopGeneration : () => void handleSend()}
-                  disabled={isGenerating ? false : ((!inputText.trim() && pendingAttachments.length === 0) || !canChat)}
-                  className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
-                    isGenerating
-                      ? 'bg-[#403C32] text-white hover:bg-[#2F2C25] dark:bg-[#F0B18D] dark:text-[#171512] dark:hover:bg-[#F6C6A9]'
-                      : (inputText.trim() || pendingAttachments.length > 0) && canChat
-                        ? 'bg-[#E5A088] text-white hover:bg-[#D98E74] dark:bg-[#D7663E] dark:text-white dark:hover:bg-[#E27750]'
-                        : 'bg-[#E6E1D6] text-[#9A9282] dark:bg-white/[0.06] dark:text-[#82786B]'
-                  }`}
-                  title={isGenerating ? '停止生成' : '发送'}
-                >
-                  {isGenerating ? <Square className="h-4 w-4 fill-current" /> : <ArrowUp className="h-4 w-4" />}
-                </button>
+              ) : (
+                <div style={{ position: 'relative', width: '100%', maxWidth: 768, margin: '0 auto', minWidth: 0 }}>
+                  <div style={{ height: virtualizer.getTotalSize() }} />
+                  {virtualizer.getVirtualItems().map((virtualRow) => {
+                    const msg = modelMessages[virtualRow.index];
+                    return (
+                      <div
+                        key={msg.id}
+                        data-index={virtualRow.index}
+                        ref={virtualizer.measureElement}
+                        id={`chat-message-${msg.id}`}
+                        className="anim-fade-in"
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${virtualRow.start}px)`,
+                        }}
+                      >
+                        <ChatBubble
+                          message={msg}
+                          modelId={activeSessionModelId}
+                          sessionId={activeSession?.id ?? ''}
+                          sessionModelName={chatBubbleModelName}
+                          sessionModelColor={activeSessionModelColor}
+                          onEditAndResend={canChat && !isAnyGenerating ? handleEditAndResend : undefined}
+                        />
+                      </div>
+                    );
+                  })}
+                  <div ref={messagesEndRef} />
+                </div>
+              )}
+            </div>
+
+            <div className="pointer-events-none absolute bottom-[clamp(132px,18vh,198px)] left-1/2 z-30 -translate-x-1/2">
+              <AnimatePresence>
+                {showJumpToBottom && (
+                  <motion.button
+                    key="jump-to-bottom"
+                    initial={{ opacity: 0, scale: 0.8, y: 6 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.8, y: 6 }}
+                    transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                    onClick={jumpToBottom}
+                    className="pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full border border-black/[0.10] bg-[#FAFAF9] text-[#6F685A] transition-colors hover:bg-[#EEEEEC] hover:text-[#403C32] dark:border-white/[0.10] dark:bg-[#171B24] dark:text-[#B8C2D4] dark:hover:bg-[#222733] dark:hover:text-[#E2E8F2]"
+                    title="滚动到最底部"
+                  >
+                    <ArrowDown className="h-4 w-4" />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
+
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-[#FAFAF9] via-[#FAFAF9]/95 to-transparent px-[clamp(12px,4vw,48px)] pb-4 pt-10 dark:from-[#0D0F14] dark:via-[#0D0F14]/95">
+              <div className="pointer-events-auto mx-auto w-full max-w-3xl min-w-0">
+                {(pendingAttachments.length > 0 || attachmentError || attachmentNotice || stopMessage) && (
+                  <div className="mb-2 space-y-2">
+                    {pendingAttachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {pendingAttachments.map((file) => (
+                          <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-md bg-black/[0.045] px-3 py-2 text-xs text-[#756E61] dark:bg-white/[0.055] dark:text-[#8E99AD]">
+                            <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[#D7663E]" />
+                            <span className="max-w-[220px] truncate text-[#403C32] dark:text-[#E2E8F2]">{file.name}</span>
+                            <span className="mono-font flex-shrink-0">{formatFileSize(file.size)}</span>
+                            <button
+                              onClick={() => removeAttachment(file.id)}
+                              className="rounded-md p-0.5 transition-colors hover:bg-[#E7E2D6] dark:hover:bg-white/[0.08]"
+                              title="移除附件"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {attachmentError && (
+                      <div className="flex items-center gap-2 text-xs text-[#C44E36] dark:text-[#5A96D0]">
+                        <FileWarning className="h-3.5 w-3.5 flex-shrink-0" />
+                        <span>{attachmentError}</span>
+                      </div>
+                    )}
+                    {attachmentNotice && !attachmentError && (
+                      <div className="flex items-center gap-2 text-xs text-[#9B664C] dark:text-[#6EA8DC]">
+                        <Info className="h-3.5 w-3.5 flex-shrink-0" />
+                        <span>{attachmentNotice}</span>
+                      </div>
+                    )}
+                    {stopMessage && (
+                      <div className="text-xs text-[#8C8576] dark:text-[#8E99AD]">{stopMessage}</div>
+                    )}
+                  </div>
+                )}
+
+                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.10] dark:bg-[#171B24] dark:focus-within:border-[#6EA8DC]/45">
+                  <textarea
+                    ref={textareaRef}
+                    value={inputText}
+                    onChange={(event) => setInputText(event.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={inputPlaceholder}
+                    disabled={!canChat}
+                    rows={2}
+                    className="chat-composer-input max-h-[180px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-[#202123] outline-none [overflow-wrap:anywhere] placeholder:text-[#8B8B94] disabled:opacity-60 dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
+                  />
+                  <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2.5">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.cs,.php,.rb,.swift,.kt,.kts,.sql,.toml,.yaml,.yml,.ini,.env,.bat,.ps1,.sh,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.wav,.mp3,.m4a,.aac,.ogg,.flac,.opus,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ogv,text/*,application/json,application/xml,image/*,audio/*,video/*"
+                      className="hidden"
+                      onChange={(event) => void handleAttachFiles(event)}
+                    />
+                    <InputToolButton icon={Plus} label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={isGenerating} />
+                    <div ref={reasoningMenuRef} className="relative flex-shrink-0">
+                      <button
+                        onClick={() => {
+                          setReasoningMenuOpen((value) => !value);
+                        }}
+                        disabled={!canChat}
+                        className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+                          state.chatConfig.reasoningMode === 'deep'
+                            ? 'border-[#B88CFF]/55 bg-[#F4ECFF] text-[#6E3BD1] hover:bg-[#EEE2FF] dark:border-[#A78BFA]/35 dark:bg-[#25183D] dark:text-[#A8B8F0] dark:hover:bg-[#2E1F4A]'
+                            : 'border-transparent bg-transparent text-[#5F5F67] hover:bg-black/[0.055] dark:text-[#B8C2D4] dark:hover:bg-[#222733]'
+                        }`}
+                        title="思考强度"
+                      >
+                        <Sparkles className="h-4 w-4" />
+                        <span>{currentReasoningOption.label}</span>
+                      </button>
+                      <AnimatePresence>
+                        {reasoningMenuOpen && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                            transition={{ duration: 0.14 }}
+                            className="absolute bottom-10 left-0 z-20 w-44 overflow-hidden rounded-xl border border-[#DDD8CC] bg-[#FBFAF6] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[#1A1E28]"
+                          >
+                            {REASONING_OPTIONS.map((item) => (
+                              <button
+                                key={item.mode}
+                                onClick={() => {
+                                  dispatch({ type: 'SET_CHAT_CONFIG', payload: { reasoningMode: item.mode } });
+                                  setReasoningMenuOpen(false);
+                                }}
+                                className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                                  state.chatConfig.reasoningMode === item.mode
+                                    ? 'bg-[#F1E7DE] text-[#D7663E] dark:bg-[#1C2836] dark:text-[#6EA8DC]'
+                                    : 'text-[#403C32] hover:bg-[#F1EEE7] dark:text-[#E2E8F2] dark:hover:bg-white/[0.07]'
+                                }`}
+                              >
+                                <div className="text-sm font-semibold">{item.label}</div>
+                                <div className="mt-0.5 text-xs text-[#8C8576] dark:text-[#8E99AD]">{item.description}</div>
+                              </button>
+                            ))}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                    <InputToolButton
+                      icon={Wrench}
+                      label={`工具设置：${enabledToolsText}`}
+                      onClick={handleOpenToolsSettings}
+                    />
+                    <InputToolButton icon={Trash2} label="清除上下文" onClick={handleClearContext} disabled={!activeSession || isGenerating} />
+                    <span className="ml-auto hidden min-w-0 truncate px-2 text-xs text-[#716A5E] dark:text-[#8E99AD] min-[960px]:block">
+                      Enter 发送，Shift + Enter 换行
+                    </span>
+                    <button
+                      onClick={isAnyGenerating ? handleStopGeneration : () => void handleSend()}
+                      disabled={isAnyGenerating ? false : ((!inputText.trim() && pendingAttachments.length === 0) || !canChat)}
+                      className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
+                        isAnyGenerating
+                          ? 'bg-red-500/10 text-red-600 hover:bg-red-500/15 dark:text-red-400'
+                          : (inputText.trim() || pendingAttachments.length > 0) && canChat
+                            ? 'bg-[#202020] text-white hover:bg-black dark:bg-[#6EA8DC] dark:text-[#0D0F14] dark:hover:bg-[#8BBDE8]'
+                            : 'bg-[#E4E4E7] text-[#99999F] dark:bg-white/[0.08] dark:text-[#6F6F6F]'
+                      }`}
+                      title={isAnyGenerating ? '停止生成' : '发送'}
+                    >
+                      {isAnyGenerating ? <Square className="h-4 w-4 fill-current" /> : <ArrowUp className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
         </div>
       </section>
 
@@ -1288,7 +1446,7 @@ export default function ChatPage() {
             animate={{ width: 344, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="hidden min-h-0 flex-shrink-0 overflow-hidden border-l border-[#E2DFD6] bg-[#F1EFE8] dark:border-white/[0.08] dark:bg-[#15130F] xl:block"
+            className="hidden min-h-0 flex-shrink-0 overflow-hidden border-l border-black/[0.06] bg-[#F4F4F2] dark:border-white/[0.06] dark:bg-[#11141B] xl:block"
           >
             <div className="h-full w-[344px] p-5">
               <ChatSettingsPanel onClose={() => setShowSettings(false)} />
@@ -1311,15 +1469,156 @@ function IconButton({ icon: Icon, label, onClick, disabled, tone = 'neutral' }: 
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
+      className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
         tone === 'danger'
-          ? 'text-[#C44E36] hover:bg-[#F0DDD6] dark:text-[#F0987C] dark:hover:bg-[#3A241C]'
-          : 'text-[#6F685A] hover:bg-[#EEEAE1] dark:text-[#D8D0C3] dark:hover:bg-white/[0.08]'
+          ? 'text-[#C44E36] hover:bg-[#F0DDD6] dark:text-[#5A96D0] dark:hover:bg-[#1C2836]'
+          : 'text-[#6F685A] hover:bg-[#EEEAE1] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]'
       }`}
       title={label}
     >
       <Icon className="h-4 w-4" />
     </button>
+  );
+}
+
+function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
+  messages: Message[];
+  activeMessageId?: string;
+  onSelect: (messageId: string) => void;
+}) {
+  const turns = useMemo(() => {
+    const grouped: Array<{
+      id: string;
+      messages: Message[];
+      targetMessageId: string;
+      questionPreview: string;
+      answerPreview: string;
+    }> = [];
+    const messagePreview = (message: Message) => (
+      (message.content || message.reasoningContent || '').replace(/\s+/g, ' ').trim()
+    );
+
+    messages.forEach((message) => {
+      if (message.role === 'user' || grouped.length === 0) {
+        grouped.push({
+          id: message.id,
+          messages: [message],
+          targetMessageId: message.id,
+          questionPreview: message.role === 'user' ? messagePreview(message) : '',
+          answerPreview: message.role === 'assistant' ? messagePreview(message) : '',
+        });
+        return;
+      }
+
+      const currentTurn = grouped[grouped.length - 1];
+      currentTurn.messages.push(message);
+      if (!currentTurn.answerPreview) {
+        currentTurn.answerPreview = messagePreview(message);
+      }
+    });
+
+    return grouped;
+  }, [messages]);
+  const currentTurnId = useMemo(
+    () => turns.find((turn) => turn.messages.some((message) => message.id === activeMessageId))?.id,
+    [activeMessageId, turns]
+  );
+  const [hoveredTurnId, setHoveredTurnId] = useState<string | null>(null);
+
+  if (turns.length === 0) return null;
+
+  const hoveredIndex = turns.findIndex((turn) => turn.id === hoveredTurnId);
+  const rowPitch = turns.length <= 8 ? 26 : turns.length <= 16 ? 22 : turns.length <= 28 ? 16 : turns.length <= 48 ? 11 : 7;
+  const railHeight = Math.max(26, turns.length * rowPitch);
+  const baseWidth = turns.length > 48 ? 5 : turns.length > 28 ? 6 : 8;
+
+  return (
+    <div className="pointer-events-none absolute bottom-[clamp(138px,19vh,208px)] left-2 top-6 z-20 hidden w-9 items-center md:flex">
+      <div
+        className="pointer-events-auto grid min-h-0 w-full overflow-visible"
+        style={{
+          height: `min(100%, ${railHeight}px)`,
+          gridTemplateRows: `repeat(${turns.length}, minmax(0, 1fr))`,
+        }}
+        role="navigation"
+        aria-label="对话问答刻度"
+      >
+      {turns.map((turn, index) => {
+        const distance = hoveredIndex >= 0 ? Math.abs(index - hoveredIndex) : Number.POSITIVE_INFINITY;
+        const hovered = turn.id === hoveredTurnId;
+        const current = turn.id === currentTurnId;
+        const influenced = hoveredIndex >= 0 && distance <= 3;
+        const tickWidth = hovered ? 27 : distance === 1 ? 21 : distance === 2 ? 16 : distance === 3 ? 12 : baseWidth;
+        const tickOpacity = hovered ? 1 : distance === 1 ? 0.82 : distance === 2 ? 0.64 : distance === 3 ? 0.48 : current ? 0.78 : 0.38;
+        const questionPreview = turn.questionPreview || '未记录提问';
+        const answerPreview = turn.answerPreview || (turn.messages.some((message) => message.isStreaming) ? '正在回答...' : '暂无回答');
+        return (
+          <button
+            key={turn.id}
+            type="button"
+            onClick={() => onSelect(turn.targetMessageId)}
+            onMouseEnter={() => setHoveredTurnId(turn.id)}
+            onMouseLeave={() => setHoveredTurnId(null)}
+            onFocus={() => setHoveredTurnId(turn.id)}
+            onBlur={() => setHoveredTurnId(null)}
+            className="relative flex min-h-0 w-full items-center justify-start rounded-sm pl-1"
+            aria-label={`跳转到第 ${index + 1} 组问答。提问：${questionPreview.slice(0, 48)}。回答：${answerPreview.slice(0, 48)}`}
+            aria-current={current ? 'true' : undefined}
+          >
+            <motion.span
+              className={`block rounded-full ${
+                hovered
+                  ? 'bg-[#D7663E] dark:bg-[#6EA8DC]'
+                  : influenced
+                    ? 'bg-[#C98A70] dark:bg-[#C98F70]'
+                    : current
+                      ? 'bg-[#D7663E] dark:bg-[#6EA8DC]'
+                    : 'bg-[#9C9486] dark:bg-[#81796D]'
+              }`}
+              initial={false}
+              animate={{
+                width: tickWidth,
+                height: hovered ? 3 : influenced && distance <= 2 ? 2 : 1.5,
+                opacity: tickOpacity,
+              }}
+              transition={{ type: 'spring', stiffness: 520, damping: 36, mass: 0.32 }}
+            />
+            <AnimatePresence>
+              {hovered && (
+                <motion.span
+                  key={`${turn.id}-preview`}
+                  aria-hidden="true"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.12 }}
+                  className={`pointer-events-none absolute left-10 z-40 w-[min(300px,calc(100vw-148px))] rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] p-3 text-left shadow-[0_8px_24px_rgba(61,53,42,0.16)] dark:border-white/[0.10] dark:bg-[#1A1E28] ${
+                    index === 0
+                      ? 'top-0'
+                      : index === turns.length - 1
+                        ? 'bottom-0'
+                        : 'top-1/2 -translate-y-1/2'
+                  }`}
+                >
+                  <span className="mb-2 block text-[11px] font-semibold text-[#8C8576] dark:text-[#8E99AD]">
+                    第 {index + 1} 组问答
+                  </span>
+                  <span className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#F0E7E1] text-[11px] font-semibold text-[#D7663E] dark:bg-[#1C2836] dark:text-[#6EA8DC]">问</span>
+                    <span className="line-clamp-2 text-xs leading-5 text-[#403C32] dark:text-[#E2E8F2]">{questionPreview}</span>
+                  </span>
+                  <span className="mt-2 flex items-start gap-2 border-t border-[#E4E0D8] pt-2 dark:border-white/[0.08]">
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#ECEAE4] text-[11px] font-semibold text-[#716A5E] dark:bg-white/[0.06] dark:text-[#B8C2D4]">答</span>
+                    <span className="line-clamp-2 text-xs leading-5 text-[#625B50] dark:text-[#B8C2D4]">{answerPreview}</span>
+                  </span>
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </button>
+        );
+      })}
+      </div>
+    </div>
   );
 }
 
@@ -1341,64 +1640,64 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="mb-5 flex items-center justify-between border-b border-[#E2DFD6] pb-4 dark:border-white/[0.08]">
+      <div className="mb-4 flex items-center justify-between">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 truncate text-sm font-semibold text-[#403C32] dark:text-[#F3EBDD]">
+          <h2 className="flex items-center gap-2 truncate text-sm font-semibold text-[#403C32] dark:text-[#E2E8F2]">
             <SlidersHorizontal className="h-4 w-4 flex-shrink-0 text-[#D7663E]" />
             对话参数
           </h2>
-          <p className="mt-1 truncate text-xs text-[#8C8576] dark:text-[#A9A095]">当前会话 · 默认预设</p>
+          <p className="mt-1 truncate text-xs text-[#8C8576] dark:text-[#8E99AD]">当前会话 · 默认预设</p>
         </div>
         <button
           onClick={onClose}
           aria-label="关闭对话参数"
           title="关闭对话参数"
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-[#756E61] transition-colors hover:bg-[#E7E2D6] dark:text-[#D8D0C3] dark:hover:bg-white/[0.08]"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-[#756E61] transition-colors hover:bg-[#E7E2D6] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="space-y-4">
-          <div className="rounded-xl border border-[#E1DDD2] bg-[#F7F4EC] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-            <label className="mb-2 block text-sm font-medium text-[#403C32] dark:text-[#F3EBDD]">系统提示词</label>
+        <div>
+          <div className="border-b border-black/[0.06] pb-5 dark:border-white/[0.06]">
+            <label className="mb-2 block text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">系统提示词</label>
             <textarea
               value={state.chatConfig.systemPrompt}
               onChange={(event) => dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: event.target.value } })}
               rows={7}
               placeholder="为当前对话设置角色、规则或输出格式"
-              className="w-full resize-none rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm leading-6 text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD] dark:placeholder:text-[#82786B]"
+              className="w-full resize-none rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm leading-6 text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
             />
             <div className="mt-3 flex min-w-0 gap-2">
               <input
                 value={presetTitle}
                 onChange={(event) => setPresetTitle(event.target.value)}
                 placeholder="预设名称"
-                className="min-w-0 flex-1 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD] dark:placeholder:text-[#82786B]"
+                className="min-w-0 flex-1 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
               />
               <button
                 type="button"
                 onClick={handleSavePreset}
                 disabled={!currentPrompt}
-                className="h-10 flex-shrink-0 rounded-lg bg-[#403C32] px-3 text-sm font-medium text-[#FBFAF6] transition-colors hover:bg-[#2F2C25] disabled:cursor-not-allowed disabled:bg-[#D8D2C5] disabled:text-[#8C8576] dark:bg-[#F0B18D] dark:text-[#171512] dark:hover:bg-[#F6C6A9] dark:disabled:bg-white/[0.08] dark:disabled:text-[#82786B]"
+                className="h-10 flex-shrink-0 rounded-lg bg-[#403C32] px-3 text-sm font-medium text-[#FBFAF6] transition-colors hover:bg-[#2F2C25] disabled:cursor-not-allowed disabled:bg-[#D8D2C5] disabled:text-[#8C8576] dark:bg-[#6EA8DC] dark:text-[#0D0F14] dark:hover:bg-[#8BBDE8] dark:disabled:bg-white/[0.08] dark:disabled:text-[#6B7688]"
               >
                 保存
               </button>
             </div>
             {state.systemPromptPresets.length > 0 && (
               <div className="mt-3 space-y-2">
-                <div className="text-xs font-medium text-[#8C8576] dark:text-[#A9A095]">提示词预设</div>
+                <div className="text-xs font-medium text-[#8C8576] dark:text-[#8E99AD]">提示词预设</div>
                 <div className="grid gap-2">
                   {state.systemPromptPresets.map((preset) => {
                     const selected = preset.prompt === state.chatConfig.systemPrompt;
                     return (
                       <div
                         key={preset.id}
-                          className={`flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 transition-colors ${
+                          className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 transition-colors ${
                           selected
-                            ? 'border-[#E4B59E] bg-[#F8EDE7] dark:border-[#73432F] dark:bg-[#3A241C]'
-                            : 'border-[#E1DDD2] bg-[#FBFAF6] dark:border-white/[0.08] dark:bg-[#171512]'
+                            ? 'bg-[#F8EDE7] dark:bg-[#1C2836]'
+                            : 'bg-black/[0.025] hover:bg-black/[0.045] dark:bg-white/[0.025] dark:hover:bg-white/[0.045]'
                         }`}
                       >
                         <button
@@ -1407,13 +1706,13 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                           className="min-w-0 flex-1 text-left"
                           title={preset.prompt}
                         >
-                          <div className="truncate text-sm font-medium text-[#403C32] dark:text-[#F3EBDD]">{preset.title}</div>
-                          <div className="mt-0.5 truncate text-xs text-[#8C8576] dark:text-[#A9A095]">{preset.prompt}</div>
+                          <div className="truncate text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">{preset.title}</div>
+                          <div className="mt-0.5 truncate text-xs text-[#8C8576] dark:text-[#8E99AD]">{preset.prompt}</div>
                         </button>
                         <button
                           type="button"
                           onClick={() => dispatch({ type: 'DELETE_SYSTEM_PROMPT_PRESET', payload: { presetId: preset.id } })}
-                          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-[#8A8374] transition-colors hover:bg-[#F0DDD6] hover:text-[#C44E36] dark:text-[#A9A095] dark:hover:bg-[#3A241C] dark:hover:text-[#F0987C]"
+                          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-[#8A8374] transition-colors hover:bg-[#F0DDD6] hover:text-[#C44E36] dark:text-[#8E99AD] dark:hover:bg-[#1C2836] dark:hover:text-[#5A96D0]"
                           title="删除预设"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
@@ -1474,7 +1773,7 @@ function InputToolButton({ icon: Icon, label, onClick, disabled }: {
     <button
       onClick={onClick}
       disabled={disabled}
-      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-[#716A5E] transition-colors hover:bg-[#E8E3D8] disabled:opacity-40 dark:text-[#D8D0C3] dark:hover:bg-white/[0.08]"
+      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[#5F5F67] transition-colors hover:bg-black/[0.055] disabled:opacity-40 dark:text-[#B8C2D4] dark:hover:bg-[#222733]"
       title={label}
     >
       <Icon className="h-4 w-4" />
@@ -1482,8 +1781,9 @@ function InputToolButton({ icon: Icon, label, onClick, disabled }: {
   );
 }
 
-function ChatNumberSetting({ label, value, min, max, step, onChange }: {
+function ChatNumberSetting({ label, description, value, min, max, step, onChange }: {
   label: string;
+  description?: string;
   value: number;
   min: number;
   max: number;
@@ -1493,9 +1793,9 @@ function ChatNumberSetting({ label, value, min, max, step, onChange }: {
   const safeValue = Math.min(max, Math.max(min, value));
   const percent = max === min ? 0 : ((safeValue - min) / (max - min)) * 100;
   return (
-    <div className="rounded-xl border border-[#E1DDD2] bg-[#F7F4EC] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+    <div className="border-b border-black/[0.06] py-4 last:border-b-0 dark:border-white/[0.06]">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <label className="text-sm font-medium text-[#403C32] dark:text-[#F3EBDD]">{label}</label>
+        <label className="text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">{label}</label>
         <input
           type="number"
           value={safeValue}
@@ -1506,9 +1806,12 @@ function ChatNumberSetting({ label, value, min, max, step, onChange }: {
             const next = Number(event.target.value);
             if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, next)));
           }}
-          className="mono-font w-24 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-2 py-1 text-right text-sm text-[#403C32] outline-none transition-colors focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+          className="mono-font w-24 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-2 py-1 text-right text-sm text-[#403C32] outline-none transition-colors focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
         />
       </div>
+      {description && (
+        <p className="mb-3 text-xs leading-5 text-[#7D766B] dark:text-[#8E99AD]">{description}</p>
+      )}
       <input
         type="range"
         value={safeValue}

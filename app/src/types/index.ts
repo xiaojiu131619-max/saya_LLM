@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'image';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs';
 export type ThemeType = 'dark' | 'light';
 export type SortType = 'default' | 'name' | 'size' | 'updated';
 export type GridColumnType = 1 | 2;
@@ -18,6 +18,7 @@ export interface ModelLoadConfig {
   kvUnified: boolean;
   mmap: boolean;
   mlock: boolean;
+  noWarmup: boolean;
   cacheTypeKEnabled: boolean;
   cacheTypeK: string;
   cacheTypeVEnabled: boolean;
@@ -28,7 +29,7 @@ export interface ModelLoadConfig {
   ropeFreqScale: number;
   seedEnabled: boolean;
   seed: number;
-  // 推测解码 / 多 token 预测（MTP）：'off' 关闭；'mtp' 使用同目录扫描到的 mtp 草稿模型。
+  // 推测解码 / 多 token 预测（MTP）：可使用内置 MTP 层或兼容的独立 head。
   speculativeDecoding: 'off' | 'mtp';
   chatTemplate: string;
   rememberSettings: boolean;
@@ -104,6 +105,9 @@ export interface ModelInfo {
   releaseDate: string;
   license: string;
   filePath?: string;
+  splitPart?: number;
+  splitCount?: number;
+  splitTotalSizeGb?: number;
   source?: 'catalog' | 'local';
   architecture?: string;
   blockCount?: number;
@@ -113,23 +117,48 @@ export interface ModelInfo {
   headCountKv?: number;
   keyLength?: number;
   valueLength?: number;
+  ggufVersion?: number;
+  tensorCount?: number;
+  mtpTensorCount?: number;
+  nextnPredictLayers?: number;
+  hasEmbeddedMtp?: boolean;
+  mtpArchitectureSupported?: boolean;
+  vocabSize?: number;
+  tensorTypeSummary?: Array<[string, number]>;
+  ropeFreqBase?: number;
+  ropeDimensionCount?: number;
+  ropeScalingType?: string;
+  ropeScalingFactor?: number;
+  ropeScalingOriginalContextLength?: number;
+  tokenizerModel?: string;
+  tokenizerBosId?: number;
+  tokenizerEosId?: number;
+  tokenizerPadId?: number;
   mmprojPath?: string;
+  mmprojSupportsVision?: boolean;
+  mmprojSupportsAudio?: boolean;
+  mmprojProjectorType?: string;
+  mmprojVisionProjectorType?: string;
+  mmprojAudioProjectorType?: string;
   mtpDraftPath?: string;
   ggufMetadata?: Array<{ key: string; value: string }>;
   avgTokensPerSec?: number;
   serverPort?: number;
   // 能力标记：用于模型卡片上的能力徽章。
-  // 视觉：是否多模态（看图）；音频：是否支持音频输入；视频：是否支持视频输入；
+  // 视频必须区分已验证、候选和抽帧兼容，不能由视觉能力直接推导。
   // 思考：是否支持 think 模式开关（如 Qwen3）；
   // 工具：是否支持函数调用 / 工具调用；推理：是否为 R1/QwQ 类强推理模型。
   supportsVision?: boolean;
   supportsAudio?: boolean;
   supportsVideo?: boolean;
+  videoSupport?: VideoSupportLevel;
   supportsThinking?: boolean;
   supportsTools?: boolean;
   supportsReasoning?: boolean;
   supportsMtp?: boolean;
 }
+
+export type VideoSupportLevel = 'verified' | 'candidate' | 'frames' | 'none';
 
 export interface Message {
   id: string;
@@ -150,7 +179,13 @@ export type ChatMessageContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
   | { type: 'audio_url'; audio_url: { url: string } }
-  | { type: 'video_url'; video_url: { url: string } }
+  | {
+      type: 'video_url';
+      video_url: {
+        url: string;
+        frames?: Array<{ url: string; timestampSeconds: number }>;
+      };
+    }
   | { type: 'input_audio'; input_audio: { data: string; format: 'wav' | 'mp3' } }
   | { type: 'input_video'; input_video: { data: string } };
 

@@ -21,10 +21,10 @@ export function SettingSection({ title, icon: Icon, children, delay = 0 }: Setti
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay, ease: [0.16, 1, 0.3, 1] }}
-      className="glass-panel p-5"
+      className="glass-panel p-4"
     >
-      <div className="flex items-center gap-2.5 mb-4">
-        <Icon className="w-4.5 h-4.5 text-[#5A6CFF]" />
+      <div className="mb-3 flex items-center gap-2.5">
+        <Icon className="h-4.5 w-4.5 text-[#D7663E]" />
         <h2 className="text-[15px] font-semibold text-primary-custom">{title}</h2>
       </div>
       <div className="space-y-4">{children}</div>

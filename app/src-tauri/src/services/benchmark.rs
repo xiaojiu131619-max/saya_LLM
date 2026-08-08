@@ -92,6 +92,7 @@ pub fn build_server_config(
     ServerConfig {
         executable_path: base.executable_path.clone(),
         model_path: base.model_path.clone(),
+        model_alias: None,
         port: base.port,
         host: "127.0.0.1".to_string(),
         api_key: None,
@@ -106,6 +107,7 @@ pub fn build_server_config(
         kv_unified: true,
         mmap: base.mmap,
         mlock: base.mlock,
+        no_warmup: false,
         cache_type_k: ctk.to_string(),
         cache_type_v: ctv.to_string(),
         cache_type_k_enabled: kv != "f16",
@@ -161,7 +163,10 @@ pub async fn restart_server_and_wait(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             Ok(())
         }
-        Ok(Err(_)) => Err(anyhow::anyhow!("服务器就绪信号丢失")),
+        Ok(Err(_)) => {
+            let _ = process_manager::stop_server();
+            Err(anyhow::anyhow!("服务器就绪信号丢失"))
+        }
         Err(_) => {
             let _ = process_manager::stop_server();
             Err(anyhow::anyhow!("服务器启动超时"))

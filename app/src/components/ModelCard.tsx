@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from 'react';
+﻿import { useState, type ReactNode } from 'react';
 import { Play, Box, Layers, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles, Mic, Film } from 'lucide-react';
 import type { ModelInfo } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { isDesktopRuntime, listenDesktopEvent, revealDesktopPath, startDesktopServer } from '@/lib/desktop';
+import { modelVideoSupport, videoSupportTitle } from '@/lib/modelCapabilities';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 
 interface ModelCardProps {
@@ -123,59 +124,65 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
 
   if (isSingleColumn) {
     return (
-      <div
+      <article
         style={{ animationDelay: `${Math.min(index * 10, 80)}ms` }}
-        onClick={handleClick}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        className={`anim-card-rise hover-rise model-glass-card group flex min-h-[48px] w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2 ${
+        className={`anim-card-rise hover-rise model-glass-card group flex min-h-[52px] w-full items-center gap-2 rounded-lg px-3 py-2 ${
           isHighlighted ? 'model-glass-card--active' : ''
         } ${model.status === 'loading' ? 'model-glass-card--loading' : ''}`}
       >
-        <div className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#EEEAE2]">
-          <div
-            className="absolute inset-0 rounded-full opacity-20"
-            style={{ background: model.themeColorSolid }}
-          />
-          <span className="relative text-sm font-semibold" style={{ color: model.themeColorSolid }}>
-            {themeGroup.icon}
-          </span>
-          <span
-            className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#FAF9F5] ${statusClass}`}
-            title={statusLabel}
-          />
-        </div>
-
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[#2F2C26]">{model.name}</h3>
-          <CompactPill>{model.params}</CompactPill>
-          <CompactPill className="hidden sm:inline-flex">{model.quant}</CompactPill>
-          <CompactPill className="hidden md:inline-flex">
-            {model.modelType === 'moe' ? 'MoE' : '稠密'}
-          </CompactPill>
-          <span className="hidden lg:inline-flex">
-            <CapabilityBadges model={model} dense onlyActive />
-          </span>
-          {recentUsedAt && (
+        <button
+          type="button"
+          onClick={handleClick}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+          aria-label={`打开 ${model.name} 的加载参数`}
+        >
+          <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#EEEAE2]">
             <span
-              className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 text-[11px] leading-6 text-[#B76540] sm:inline-flex dark:border-[#E8C9BD]/30 dark:bg-[#3A241C]/80 dark:text-[#F0B18D]"
-              title={recentTitle}
-            >
-              <History className="h-3 w-3" />
-              最近使用
+              className="absolute inset-0 rounded-full opacity-20"
+              style={{ background: model.themeColorSolid }}
+            />
+            <span className="relative text-sm font-semibold" style={{ color: model.themeColorSolid }}>
+              {themeGroup.icon}
             </span>
-          )}
-          <CompactPill className="hidden lg:inline-flex">
-            {model.avgTokensPerSec ? `${model.avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'}
-          </CompactPill>
-        </div>
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#FAF9F5] ${statusClass}`}
+              title={statusLabel}
+            />
+          </span>
+
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.name}</span>
+            <CompactPill>{model.params}</CompactPill>
+            <CompactPill className="hidden sm:inline-flex">{model.quant}</CompactPill>
+            <CompactPill className="hidden md:inline-flex">
+              {model.modelType === 'moe' ? 'MoE' : '稠密'}
+            </CompactPill>
+            <span className="hidden lg:inline-flex">
+              <CapabilityBadges model={model} dense onlyActive />
+            </span>
+            {recentUsedAt && (
+              <span
+                className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 text-[11px] leading-6 text-[#B76540] sm:inline-flex dark:border-[#E8C9BD]/30 dark:bg-[#1C2836]/80 dark:text-[#6EA8DC]"
+                title={recentTitle}
+              >
+                <History className="h-3 w-3" />
+                最近使用
+              </span>
+            )}
+            <CompactPill className="hidden lg:inline-flex">
+              {model.avgTokensPerSec ? `${model.avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'}
+            </CompactPill>
+          </span>
+        </button>
 
         <div className="flex flex-shrink-0 items-center gap-1">
           {launchMemory && (
             <button
               onClick={(event) => void handleQuickLaunch(event)}
               disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
               title={formatLaunchMemoryTitle(launchMemory.config)}
             >
               {quickStarting ? (
@@ -188,7 +195,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
           {model.status === 'loaded' && (
             <button
               onClick={handleQuickChat}
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
               title="开始对话"
             >
               <Play className="ml-0.5 h-3.5 w-3.5 text-[#D06646]" />
@@ -198,31 +205,43 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             <button
               onClick={handleReveal}
               disabled={!isDesktopRuntime()}
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
               title="在资源管理器中显示"
             >
               <FolderSearch className="h-3.5 w-3.5 text-[#7D766B]" />
             </button>
           )}
         </div>
-      </div>
+      </article>
     );
   }
 
   return (
-    <div
+    <article
       style={{ animationDelay: `${Math.min(index * 15, 80)}ms` }}
-      onClick={handleClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className={`anim-card-rise hover-rise-lg model-glass-card w-full cursor-pointer overflow-hidden rounded-xl ${
+      className={`anim-card-rise hover-rise-lg model-glass-card w-full overflow-hidden rounded-lg ${
         isHighlighted ? 'model-glass-card--active' : ''
       } ${
         model.status === 'loading' ? 'model-glass-card--loading' : ''
       } ${
-        isSingleColumn ? 'max-w-none self-stretch' : 'max-w-[360px] self-start'
+        isSingleColumn ? 'max-w-none self-stretch' : 'max-w-none self-stretch'
       }`}
     >
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={handleClick}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleClick();
+          }
+        }}
+        className="block w-full text-left"
+        aria-label={`打开 ${model.name} 的加载参数`}
+      >
       <div className={`border-b border-[#E5E1D8] ${isSingleColumn ? 'px-3 py-3' : 'p-4'}`}>
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
@@ -238,7 +257,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               </span>
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-[15px] font-semibold leading-snug text-[#2F2C26] [overflow-wrap:anywhere] dark:text-[#F3EBDD]">{model.name}</h3>
+              <h3 className="text-[15px] font-semibold leading-snug text-[#2F2C26] [overflow-wrap:anywhere] dark:text-[#E2E8F2]">{model.name}</h3>
               <p className={`mt-1 text-xs leading-relaxed text-[#7D766B] ${isSingleColumn ? 'line-clamp-1' : 'line-clamp-2'}`}>
                 {model.description}
               </p>
@@ -254,7 +273,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             </div>
             {recentUsedAt && (
               <div
-                className="flex items-center gap-1 rounded-full border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 py-1 text-[10px] font-medium text-[#B76540] dark:border-[#E8C9BD]/30 dark:bg-[#3A241C]/80 dark:text-[#F0B18D]"
+                className="flex items-center gap-1 rounded-full border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 py-1 text-[10px] font-medium text-[#B76540] dark:border-[#E8C9BD]/30 dark:bg-[#1C2836]/80 dark:text-[#6EA8DC]"
                 title={recentTitle}
               >
                 <History className="h-3 w-3" />
@@ -305,8 +324,11 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
           <CapabilityBadges model={model} dense={isSingleColumn} onlyActive={isSingleColumn} />
         </div>
 
-        <div className={`flex items-center gap-2 ${isSingleColumn ? 'justify-end' : 'justify-between'}`}>
-          <button className={`${isSingleColumn ? 'hidden' : 'rounded-md text-xs font-medium text-[#D06646] hover:underline'}`}>
+      </div>
+      </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-[#E5E1D8] px-4 py-3">
+          <button type="button" onClick={handleClick} className="flex h-9 items-center rounded-md px-2 text-xs font-semibold text-[#D06646] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]">
             查看参数
           </button>
           <div className="flex flex-shrink-0 items-center gap-1">
@@ -314,7 +336,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               <button
                 onClick={(event) => void handleQuickLaunch(event)}
                 disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
                 title={formatLaunchMemoryTitle(launchMemory.config)}
               >
                 {quickStarting ? (
@@ -327,7 +349,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             {model.status === 'loaded' && (
               <button
                 onClick={handleQuickChat}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
                 title="开始对话"
               >
                 <Play className="ml-0.5 h-3.5 w-3.5 text-[#D06646]" />
@@ -337,7 +359,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               <button
                 onClick={handleReveal}
                 disabled={!isDesktopRuntime()}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
                 title="在资源管理器中显示"
               >
                 <FolderSearch className="h-3.5 w-3.5 text-[#7D766B]" />
@@ -345,8 +367,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </article>
   );
 }
 
@@ -368,6 +389,7 @@ function CompactPill({ children, className = '' }: { children: ReactNode; classN
 }
 
 type CapabilityKey = 'vision' | 'audio' | 'video' | 'thinking' | 'tools' | 'mtp';
+type CapabilityState = 'on' | 'partial' | 'off';
 
 interface CapabilityDef {
   key: CapabilityKey;
@@ -387,33 +409,35 @@ const CAPABILITY_DEFS: CapabilityDef[] = [
   { key: 'mtp',       label: 'MTP',  icon: Sparkles, active: 'bg-[#EEF6FF]', activeText: 'text-[#2F6FB0]', activeBorder: 'border-[#C7DDF4]' },
 ];
 
-function modelCapabilityFlags(model: ModelInfo): Record<CapabilityKey, boolean> {
+function modelCapabilityStates(model: ModelInfo): Record<CapabilityKey, CapabilityState> {
   // 思考与推理合并为单一"思考"标签：任一为 true 即显示
   const thinking = !!model.supportsThinking || !!model.supportsReasoning;
+  const videoSupport = modelVideoSupport(model);
   return {
-    vision: !!model.supportsVision,
-    audio: !!model.supportsAudio,
-    video: !!model.supportsVideo,
-    thinking,
-    tools: !!model.supportsTools,
-    mtp: !!model.supportsMtp,
+    vision: model.supportsVision ? 'on' : 'off',
+    audio: model.supportsAudio ? 'on' : 'off',
+    video: videoSupport === 'verified' ? 'on' : videoSupport === 'candidate' ? 'partial' : 'off',
+    thinking: thinking ? 'on' : 'off',
+    tools: model.supportsTools ? 'on' : 'off',
+    mtp: model.supportsMtp ? 'on' : 'off',
   };
 }
 
 function CapabilityBadges({ model, dense = false, onlyActive = false }: { model: ModelInfo; dense?: boolean; onlyActive?: boolean }) {
-  const flags = modelCapabilityFlags(model);
+  const states = modelCapabilityStates(model);
+  const videoSupport = modelVideoSupport(model);
   const sizeClasses = dense
     ? 'h-5 px-1.5 text-[10px] gap-0.5'
     : 'h-6 px-2 text-[11px] gap-1';
   const iconSize = dense ? 'h-2.5 w-2.5' : 'h-3 w-3';
   const visibleDefs = onlyActive
-    ? CAPABILITY_DEFS.filter((def) => flags[def.key])
+    ? CAPABILITY_DEFS.filter((def) => states[def.key] === 'on')
     : CAPABILITY_DEFS;
 
   // 单列/onlyActive 模式下没有命中的能力时，直接不渲染（避免空占位文字挤压排版）。
   if (onlyActive && visibleDefs.length === 0) {
     return dense ? null : (
-      <span className="text-[11px] text-[#8D867A] dark:text-[#7A7263]">无能力徽章</span>
+      <span className="text-[11px] text-[#8D867A] dark:text-[#6B7688]">无能力徽章</span>
     );
   }
 
@@ -421,19 +445,25 @@ function CapabilityBadges({ model, dense = false, onlyActive = false }: { model:
     <div className="flex flex-shrink-0 flex-wrap items-center gap-1">
       {visibleDefs.map((def) => {
         const Icon = def.icon;
-        const on = flags[def.key];
+        const state = states[def.key];
+        const title = def.key === 'video'
+          ? videoSupportTitle(videoSupport)
+          : `${def.label}${state === 'on' ? '：支持' : '：未检测到'}`;
+        const label = def.key === 'video' && state === 'partial' ? '视频候选' : def.label;
         return (
           <span
             key={def.key}
-            title={`${def.label}${on ? '：支持' : '：未检测到'}`}
+            title={title}
             className={`inline-flex items-center rounded-md border transition-colors ${sizeClasses} ${
-              on
+              state === 'on'
                 ? `${def.activeBorder} ${def.active} ${def.activeText} font-semibold dark:bg-white/[0.06]`
-                : 'border-[#E5E1D8] bg-[#F4F1EA] text-[#B8B0A0] opacity-55 dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#5C5447] dark:opacity-50'
+                : state === 'partial'
+                  ? 'border-dashed border-[#DDBFAE] bg-[#FAF3EC] text-[#9B664C] dark:border-[#3A5570] dark:bg-[#1E2A3A] dark:text-[#6EA8DC]'
+                : 'border-[#E5E1D8] bg-[#F4F1EA] text-[#B8B0A0] opacity-55 dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#5C6474] dark:opacity-50'
             }`}
           >
             <Icon className={iconSize} />
-            <span>{def.label}</span>
+            <span>{label}</span>
           </span>
         );
       })}

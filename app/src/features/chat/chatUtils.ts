@@ -272,7 +272,8 @@ export function downloadFile(content: string, filename: string, mimeType: string
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  // 延迟撤销 URL，确保下载已开始（部分浏览器/WebView2 需要）
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function dayLabel(timestamp: number) {
@@ -318,4 +319,50 @@ export function ctxUsagePercent(stats: MessageStats | undefined): number | undef
   const total = stats?.ctxTotal ?? 0;
   if (!Number.isFinite(used) || !Number.isFinite(total) || used <= 0 || total <= 0) return undefined;
   return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+export function formatCtxUsageWithPercent(stats: MessageStats | undefined) {
+  if (!stats || stats.ctxUsed <= 0 || stats.ctxTotal <= 0) return 'ctx 未返回';
+  const percent = Math.min(999, Math.max(0, (stats.ctxUsed / stats.ctxTotal) * 100));
+  const percentText = percent.toFixed(percent >= 10 ? 0 : 1);
+  return `${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()} ctx（${percentText}%）`;
+}
+
+export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: number): MessageStats | undefined {
+  if (!Number.isFinite(ctxTotal) || ctxTotal <= 0) return undefined;
+
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let tokensPerSec = 0;
+
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const line = logs[index];
+    if (completionTokens <= 0 && !/prompt eval time/i.test(line)) {
+      const evalMatch = line.match(/\beval time\s*=\s*[\d.]+\s*ms\s*\/\s*(\d+)\s*(?:runs|tokens?)\b.*?([\d.]+)\s*tokens per second/i);
+      if (evalMatch) {
+        completionTokens = Math.max(0, Math.round(Number(evalMatch[1]) || 0));
+        tokensPerSec = Math.max(0, Number(evalMatch[2]) || 0);
+      }
+    }
+
+    if (promptTokens <= 0) {
+      const promptMatch = line.match(/prompt eval time\s*=\s*[\d.]+\s*ms\s*\/\s*(\d+)\s*tokens?\b/i)
+        ?? line.match(/prompt processing progress.*?n_tokens\s*=\s*(\d+)/i);
+      if (promptMatch) {
+        promptTokens = Math.max(0, Math.round(Number(promptMatch[1]) || 0));
+      }
+    }
+
+    if (promptTokens > 0 && (completionTokens > 0 || tokensPerSec > 0)) break;
+  }
+
+  if (promptTokens <= 0) return undefined;
+  return {
+    ctxUsed: promptTokens + completionTokens,
+    ctxTotal,
+    outputTokens: completionTokens,
+    firstTokenDelay: 0,
+    tokensPerSec,
+    genTime: 0,
+  };
 }

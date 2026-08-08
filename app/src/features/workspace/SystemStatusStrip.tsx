@@ -53,7 +53,7 @@ export default function SystemStatusStrip() {
               {state.apiConfig.hasApiKey && <ShieldCheck className="h-3.5 w-3.5" />}
             </span>
           )}
-          <span className="mono-font">{state.backendAvailable ? 'Backend ready' : 'Desktop backend offline'}</span>
+          <span>{state.backendAvailable ? '桌面后端就绪' : '桌面后端离线'}</span>
         </div>
       </button>
 

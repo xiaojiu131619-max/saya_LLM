@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react';
-import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, Info, Square, ChevronRight } from 'lucide-react';
+﻿import { useRef, useState } from 'react';
+import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, Info, Square, ChevronRight, Settings2 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
-import { isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
+import { getServerApiKey, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
 import type { ModelInfo, ModelLoadConfig } from '@/types';
 import type { LucideIcon } from 'lucide-react';
 import { DEFAULT_GPU_LAYERS_WHEN_UNKNOWN, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
@@ -19,6 +19,7 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     kvUnified: true,
     mmap: true,
     mlock: false,
+    noWarmup: false,
     cacheTypeKEnabled: false,
     cacheTypeK: 'f16',
     cacheTypeVEnabled: false,
@@ -29,7 +30,7 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     ropeFreqScale: 0,
     seedEnabled: false,
     seed: -1,
-    speculativeDecoding: model.supportsMtp ? 'mtp' : 'off',
+    speculativeDecoding: 'off',
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -79,8 +80,108 @@ function formatTag(tag: string) {
   const labels: Record<string, string> = {
     Local: '本地',
     Reasoning: '推理',
+    'Split GGUF': '分片 GGUF',
   };
   return labels[tag] ?? tag;
+}
+
+type RecommendedLoadPreset = {
+  title: string;
+  description: string;
+  config: Partial<ModelLoadConfig>;
+  items: Array<{ label: string; value: string }>;
+  tone: 'normal' | 'warning';
+};
+
+function modelSizeGb(model: ModelInfo) {
+  return model.splitTotalSizeGb ?? model.fileSizeBytes / 1024 / 1024 / 1024;
+}
+
+function buildRecommendedLoadPreset(model: ModelInfo): RecommendedLoadPreset {
+  const sizeGb = modelSizeGb(model);
+  const layerCount = Math.max(0, model.blockCount ?? 0);
+  const isSplitModel = Boolean(model.splitCount && model.splitCount > 1);
+
+  if (isSplitModel && sizeGb > 100) {
+    return {
+      title: '超大分片模型推荐',
+      description: `已识别 ${model.splitCount} 个分片，总大小约 ${formatGb(sizeGb)}。首次验证建议用单 slot、短上下文并跳过预热，确认能加载后再逐步调高参数。`,
+      tone: 'warning',
+      config: {
+        ctxLength: 512,
+        gpuLayers: 0,
+        batchSize: 512,
+        physicalBatchSize: 512,
+        parallel: 1,
+        fastAttention: true,
+        kvCache: true,
+        kvUnified: true,
+        mmap: true,
+        mlock: false,
+        noWarmup: true,
+      },
+      items: [
+        { label: '上下文长度', value: '512 token' },
+        { label: 'GPU 卸载', value: '0 层' },
+        { label: 'parallel', value: '1' },
+        { label: '启动预热', value: '跳过' },
+      ],
+    };
+  }
+
+  if (sizeGb >= 40) {
+    return {
+      title: '大模型稳妥推荐',
+      description: `模型体积约 ${formatGb(sizeGb)}。建议先用较短上下文和单 slot 验证加载稳定性，再根据内存、显存余量调高。`,
+      tone: 'warning',
+      config: {
+        ctxLength: 4096,
+        gpuLayers: 0,
+        batchSize: 512,
+        physicalBatchSize: 512,
+        parallel: 1,
+        fastAttention: true,
+        kvCache: true,
+        kvUnified: true,
+        mmap: true,
+        mlock: false,
+        noWarmup: true,
+      },
+      items: [
+        { label: '上下文长度', value: '4K token' },
+        { label: 'GPU 卸载', value: '0 层' },
+        { label: 'parallel', value: '1' },
+        { label: '启动预热', value: '跳过' },
+      ],
+    };
+  }
+
+  const ctxLength = clamp(model.ctxLength || RECOMMENDED_CTX_LENGTH, 512, RECOMMENDED_CTX_LENGTH);
+  const gpuLayers = recommendedGpuLayers(model.blockCount);
+  return {
+    title: '常规模型推荐',
+    description: '适合大多数本地 GGUF 模型的默认推荐，优先使用 GPU、保持 mmap，并让 llama-server 自动管理并发 slot。',
+    tone: 'normal',
+    config: {
+      ctxLength,
+      gpuLayers,
+      batchSize: 512,
+      physicalBatchSize: 512,
+      parallel: -1,
+      fastAttention: true,
+      kvCache: true,
+      kvUnified: true,
+      mmap: true,
+      mlock: false,
+      noWarmup: false,
+    },
+    items: [
+      { label: '上下文长度', value: formatCtx(ctxLength) },
+      { label: 'GPU 卸载', value: layerCount > 0 ? `${gpuLayers} / ${layerCount} 层` : '自动尽量使用 GPU' },
+      { label: 'parallel', value: '自动' },
+      { label: '启动预热', value: '启用' },
+    ],
+  };
 }
 
 export default function ModelLoadPage() {
@@ -95,8 +196,8 @@ export default function ModelLoadPage() {
 
   if (!model) {
     return (
-      <div className="flex h-full flex-1 items-center justify-center bg-[#FBFAF6] dark:bg-[#171512]">
-        <p className="text-sm text-[#7D766B] dark:text-[#A9A095]">未选择模型</p>
+      <div className="flex h-full flex-1 items-center justify-center bg-[#FBFAF6] dark:bg-[#141720]">
+        <p className="text-sm text-[#7D766B] dark:text-[#8E99AD]">未选择模型</p>
       </div>
     );
   }
@@ -137,6 +238,17 @@ export default function ModelLoadPage() {
         await startDesktopServer(model, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools);
         setLoadProgressPercent((current) => Math.max(current, 12));
         await Promise.race([ready, cancelled]);
+
+        if (state.apiConfig.enabled) {
+          const activeApiKey = await getServerApiKey().catch(() => null);
+          dispatch({
+            type: 'SET_API_CONFIG',
+            payload: {
+              hasApiKey: Boolean(activeApiKey),
+              apiKey: activeApiKey ?? undefined,
+            },
+          });
+        }
 
         setLoadProgressPercent(100);
         if (model.loadConfig.rememberSettings) {
@@ -188,6 +300,16 @@ export default function ModelLoadPage() {
   const layerCount = Math.max(0, model.blockCount ?? 0);
   const ctxMax = Math.max(512, RECOMMENDED_CTX_LENGTH, model.ctxLength || 0, config.ctxLength || 0);
   const vramPrediction = predictVramUsage(model, config);
+  const recommendedPreset = buildRecommendedLoadPreset(model);
+  const applyRecommendedConfig = () => {
+    dispatch({
+      type: 'UPDATE_MODEL_CONFIG',
+      payload: {
+        modelId: model.id,
+        config: recommendedPreset.config,
+      },
+    });
+  };
   const headerCards = [
     { icon: Cpu, label: '架构', value: model.architecture ?? '未读取' },
     { icon: Layers, label: '层数（block_count）', value: formatNumber(model.blockCount) },
@@ -203,7 +325,7 @@ export default function ModelLoadPage() {
   ];
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#171512]">
+    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#141720]">
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1180px]">
           <ModelLoadTopBar
@@ -228,15 +350,15 @@ export default function ModelLoadPage() {
                   {model.family[0]}
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{model.family}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#7D766B] dark:text-[#A9A095]">
+                  <div className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.family}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#7D766B] dark:text-[#8E99AD]">
                     <span className="mono-font">{model.params}</span>
                     <span>·</span>
                     <span>{model.quant}</span>
                     <span>·</span>
                     <span>{model.fileSize}</span>
                     <span className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
-                      model.modelType === 'moe' ? 'bg-[#F2F0FF] text-[#6C5DD3] dark:bg-[#262044] dark:text-[#BEB8FF]' : 'bg-[#EEF8F2] text-[#2C8B58] dark:bg-[#173024] dark:text-[#98D19C]'
+                      model.modelType === 'moe' ? 'bg-[#F2F0FF] text-[#6C5DD3] dark:bg-[#262044] dark:text-[#A8B8F0]' : 'bg-[#EEF8F2] text-[#2C8B58] dark:bg-[#173024] dark:text-[#7EC8A0]'
                     }`}>
                       {formatModelType(model.modelType)}
                     </span>
@@ -251,7 +373,7 @@ export default function ModelLoadPage() {
                       key={tab.id}
                       onClick={() => setActiveTab(tab.id)}
                       className={`relative flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
-                        activeTab === tab.id ? 'text-[#D06646] dark:text-[#F0B18D]' : 'text-[#4E4941] hover:bg-[#F1EEE7] dark:text-[#D8D0C3] dark:hover:bg-white/[0.07]'
+                        activeTab === tab.id ? 'text-[#D06646] dark:text-[#6EA8DC]' : 'text-[#4E4941] hover:bg-[#F1EEE7] dark:text-[#B8C2D4] dark:hover:bg-white/[0.07]'
                       }`}
                     >
                       {activeTab === tab.id && (
@@ -269,206 +391,235 @@ export default function ModelLoadPage() {
           </div>
 
           {activeTab === 'params' ? (
-            <div className="grid grid-cols-1 gap-4">
-              <div className="min-w-0 overflow-hidden rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]">
-                <IdleAutoUnloadParamRow
-                  checked={config.idleAutoUnload}
-                  minutes={config.idleAutoUnloadMinutes}
-                  onToggle={(v) => updateConfig('idleAutoUnload', v)}
-                  onMinutesChange={(v) => updateConfig('idleAutoUnloadMinutes', v)}
-                />
-                <SliderParamRow
-                  label="上下文长度"
-                  description={model.ctxLength > 0 ? `模型最多支持 ${model.ctxLength.toLocaleString()} 个 token` : 'GGUF 未读取到 context_length'}
-                  value={config.ctxLength}
-                  onChange={(v) => updateConfig('ctxLength', v)}
-                  min={512}
-                  max={ctxMax}
-                  step={512}
-                  suffix="token"
-                />
-                <SliderParamRow
-                  label="GPU 卸载"
-                  description={layerCount > 0 ? `模型层数 ${layerCount.toLocaleString()}` : 'GGUF 未读取到 block_count，默认尽量使用 GPU'}
-                  value={config.gpuLayers}
-                  onChange={(v) => updateConfig('gpuLayers', v)}
-                  min={0}
-                  max={layerCount > 0 ? layerCount : DEFAULT_GPU_LAYERS_WHEN_UNKNOWN}
-                  step={1}
-                />
-                <NumberParamRow
-                  label="物理批处理大小（ubatch）"
-                  description="--ubatch-size / -ub"
-                  value={config.physicalBatchSize}
-                  onChange={(v) => updateConfig('physicalBatchSize', v)}
-                  min={1}
-                  max={8192}
-                  step={64}
-                />
-                <ToggleParamRow
-                  label="将 KV 缓存卸载到 GPU 内存"
-                  description="--kv-offload / --no-kv-offload"
-                  checked={config.kvCache}
-                  onChange={(v) => updateConfig('kvCache', v)}
-                />
-                <ToggleParamRow
-                  label="快速注意力"
-                  description="--flash-attn"
-                  checked={config.fastAttention}
-                  onChange={(v) => updateConfig('fastAttention', v)}
-                />
-                {model.modelType === 'moe' && (
+            <div className="space-y-4">
+              <RecommendedParamsCard preset={recommendedPreset} onApply={applyRecommendedConfig} />
+
+              <div className="grid items-start gap-4 lg:grid-cols-2">
+                <ParamSection title="推理与显存" icon={Cpu}>
                   <SliderParamRow
-                    label="强制 MoE 权重留在 CPU 的层数"
-                    description="-ncmoe / --n-cpu-moe"
-                    badge="实验"
-                    value={config.moeCpuLayers}
-                    onChange={(v) => updateConfig('moeCpuLayers', v)}
+                    label="上下文长度"
+                    description={model.ctxLength > 0 ? `模型最多支持 ${model.ctxLength.toLocaleString()} 个 token` : 'GGUF 未读取到 context_length'}
+                    value={config.ctxLength}
+                    onChange={(v) => updateConfig('ctxLength', v)}
+                    min={512}
+                    max={ctxMax}
+                    step={512}
+                    suffix="token"
+                  />
+                  <SliderParamRow
+                    label="GPU 卸载"
+                    description={layerCount > 0 ? `模型层数 ${layerCount.toLocaleString()}` : 'GGUF 未读取到 block_count，默认尽量使用 GPU'}
+                    value={config.gpuLayers}
+                    onChange={(v) => updateConfig('gpuLayers', v)}
                     min={0}
-                    max={layerCount}
+                    max={layerCount > 0 ? layerCount : DEFAULT_GPU_LAYERS_WHEN_UNKNOWN}
                     step={1}
                   />
-                )}
-                <CacheTypeParamRow
-                  label="K 缓存量化类型"
-                  description="-ctk / --cache-type-k"
-                  badge="实验"
-                  enabled={config.cacheTypeKEnabled}
-                  value={config.cacheTypeK}
-                  onToggle={(v) => updateConfig('cacheTypeKEnabled', v)}
-                  onChange={(v) => updateConfig('cacheTypeK', v)}
-                />
-                <CacheTypeParamRow
-                  label="V 缓存量化类型"
-                  description="-ctv / --cache-type-v"
-                  badge="实验"
-                  enabled={config.cacheTypeVEnabled}
-                  value={config.cacheTypeV}
-                  onToggle={(v) => updateConfig('cacheTypeVEnabled', v)}
-                  onChange={(v) => updateConfig('cacheTypeV', v)}
-                />
-                <CheckboxParamRow
-                  label={`记住 ${model.name} 的加载设置`}
-                  checked={config.rememberSettings}
-                  onChange={(v) => updateConfig('rememberSettings', v)}
-                />
-                <ToggleParamRow
-                  label="显示高级设置"
-                  checked={config.showAdvancedSettings}
-                  onChange={(v) => updateConfig('showAdvancedSettings', v)}
-                />
-                {config.showAdvancedSettings && (
-                  <div className="bg-[#F8F6F1] dark:bg-white/[0.03]">
-                    <div className="border-b border-[#E3DFD6] px-3 py-2 text-xs font-semibold text-[#7D766B] dark:border-white/[0.08] dark:text-[#A9A095]">
-                      高级参数
-                    </div>
-                    <NumberParamRow
-                      label="CPU 线程池大小"
-                      description="--threads；自动时不传该参数"
-                      value={config.threads}
-                      onChange={(v) => updateConfig('threads', v)}
-                      min={-1}
-                      max={256}
-                      step={1}
-                      autoLabel="自动"
-                    />
+                  <NumberParamRow
+                    label="物理批处理大小（ubatch）"
+                    description="--ubatch-size / -ub"
+                    value={config.physicalBatchSize}
+                    onChange={(v) => updateConfig('physicalBatchSize', v)}
+                    min={1}
+                    max={8192}
+                    step={64}
+                  />
+                  <ToggleParamRow
+                    label="将 KV 缓存卸载到 GPU 内存"
+                    description="--kv-offload / --no-kv-offload"
+                    checked={config.kvCache}
+                    onChange={(v) => updateConfig('kvCache', v)}
+                  />
+                  <ToggleParamRow
+                    label="快速注意力"
+                    description="--flash-attn"
+                    checked={config.fastAttention}
+                    onChange={(v) => updateConfig('fastAttention', v)}
+                  />
+                </ParamSection>
+
+                <ParamSection title="缓存与运行行为" icon={Database}>
+                  <CacheTypeParamRow
+                    label="K 缓存量化类型"
+                    description="-ctk / --cache-type-k"
+                    badge="实验"
+                    enabled={config.cacheTypeKEnabled}
+                    value={config.cacheTypeK}
+                    onToggle={(v) => updateConfig('cacheTypeKEnabled', v)}
+                    onChange={(v) => updateConfig('cacheTypeK', v)}
+                  />
+                  <CacheTypeParamRow
+                    label="V 缓存量化类型"
+                    description="-ctv / --cache-type-v"
+                    badge="实验"
+                    enabled={config.cacheTypeVEnabled}
+                    value={config.cacheTypeV}
+                    onToggle={(v) => updateConfig('cacheTypeVEnabled', v)}
+                    onChange={(v) => updateConfig('cacheTypeV', v)}
+                  />
+                  {model.modelType === 'moe' && (
                     <SliderParamRow
-                      label="评估批处理大小"
-                      description="--batch-size / -b"
-                      value={config.batchSize}
-                      onChange={(v) => updateConfig('batchSize', v)}
-                      min={1}
-                      max={8192}
-                      step={64}
-                    />
-                    <NumberParamRow
-                      label="最大并发预测数（parallel）"
-                      description="--parallel / -np；自动时不传该参数"
+                      label="强制 MoE 权重留在 CPU 的层数"
+                      description="-ncmoe / --n-cpu-moe"
                       badge="实验"
-                      value={config.parallel}
-                      onChange={(v) => updateConfig('parallel', v)}
-                      min={-1}
-                      max={128}
+                      value={config.moeCpuLayers}
+                      onChange={(v) => updateConfig('moeCpuLayers', v)}
+                      min={0}
+                      max={layerCount}
                       step={1}
-                      autoLabel="自动"
                     />
-                    <OptionalNumberParamRow
-                      label="RoPE 频率基"
-                      description="--rope-freq-base；关闭时从 GGUF 读取"
-                      enabled={config.ropeFreqBaseEnabled}
-                      value={config.ropeFreqBase}
-                      onToggle={(enabled) => updateConfig('ropeFreqBaseEnabled', enabled)}
-                      onChange={(v) => updateConfig('ropeFreqBase', v)}
-                      step={1000}
-                      autoLabel="自动"
-                    />
-                    <OptionalNumberParamRow
-                      label="RoPE 频率比例"
-                      description="--rope-freq-scale；关闭时从 GGUF 读取"
-                      enabled={config.ropeFreqScaleEnabled}
-                      value={config.ropeFreqScale}
-                      onToggle={(enabled) => updateConfig('ropeFreqScaleEnabled', enabled)}
-                      onChange={(v) => updateConfig('ropeFreqScale', v)}
-                      step={0.01}
-                      autoLabel="自动"
-                    />
-                    <ReadOnlyParamRow
-                      label="专家数量"
-                      description="从 GGUF expert_count 读取"
-                      value={model.modelType === 'moe' ? formatNumber(model.expertCount) : '稠密模型'}
-                    />
-                    {model.supportsMtp && (
-                      <ToggleParamRow
-                        label="推测解码（MTP）"
-                        description={
-                          model.mtpDraftPath
-                            ? `启用同目录草稿模型：${fileNameFromPath(model.mtpDraftPath)}`
-                            : '未检测到 mtp 草稿模型，无法启用'
-                        }
-                        badge="实验"
-                        checked={config.speculativeDecoding === 'mtp' && Boolean(model.mtpDraftPath)}
-                        onChange={(v) => updateConfig('speculativeDecoding', v && model.mtpDraftPath ? 'mtp' : 'off')}
+                  )}
+                  <IdleAutoUnloadParamRow
+                    checked={config.idleAutoUnload}
+                    minutes={config.idleAutoUnloadMinutes}
+                    onToggle={(v) => updateConfig('idleAutoUnload', v)}
+                    onMinutesChange={(v) => updateConfig('idleAutoUnloadMinutes', v)}
+                  />
+                  <CheckboxParamRow
+                    label={`记住 ${model.name} 的加载设置`}
+                    checked={config.rememberSettings}
+                    onChange={(v) => updateConfig('rememberSettings', v)}
+                  />
+                </ParamSection>
+              </div>
+
+              <div className="min-w-0 overflow-hidden rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <button
+                  type="button"
+                  onClick={() => updateConfig('showAdvancedSettings', !config.showAdvancedSettings)}
+                  className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[#F8F6F1] dark:hover:bg-white/[0.04]"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Settings2 className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
+                    <span className="text-[13px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">高级参数</span>
+                    <span className="hidden truncate text-[11px] text-[#8C8576] dark:text-[#8E99AD] sm:inline">线程、批处理、RoPE、聊天模板等</span>
+                  </span>
+                  <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[#8C8576] transition-transform duration-200 dark:text-[#8E99AD] ${config.showAdvancedSettings ? 'rotate-90' : ''}`} />
+                </button>
+                {config.showAdvancedSettings && (
+                  <div className="grid border-t border-[#E3DFD6] dark:border-white/[0.08] lg:grid-cols-2">
+                    <div className="min-w-0 lg:border-r lg:border-[#E3DFD6] dark:lg:border-white/[0.08]">
+                      <NumberParamRow
+                        label="CPU 线程池大小"
+                        description="--threads；自动时不传该参数"
+                        value={config.threads}
+                        onChange={(v) => updateConfig('threads', v)}
+                        min={-1}
+                        max={256}
+                        step={1}
+                        autoLabel="自动"
                       />
-                    )}
-                    <TextParamRow
-                      label="聊天模板"
-                      description="留空时使用 GGUF 元数据（metadata）中的模板"
-                      value={config.chatTemplate}
-                      onChange={(v) => updateConfig('chatTemplate', v)}
-                      placeholder="自动"
-                    />
-                    <ToggleParamRow
-                      label="统一 KV 缓存"
-                      description="--kv-unified"
-                      badge="实验"
-                      checked={config.kvUnified}
-                      onChange={(v) => updateConfig('kvUnified', v)}
-                    />
-                    <ToggleParamRow
-                      label="保持模型在内存中"
-                      description="--mlock"
-                      checked={config.mlock}
-                      onChange={(v) => updateConfig('mlock', v)}
-                    />
-                    <ToggleParamRow
-                      label="尝试 mmap()"
-                      description="--mmap / --no-mmap"
-                      checked={config.mmap}
-                      onChange={(v) => updateConfig('mmap', v)}
-                    />
-                    <OptionalNumberParamRow
-                      label="种子"
-                      description="--seed；关闭时使用随机种子"
-                      enabled={config.seedEnabled}
-                      value={config.seed}
-                      onToggle={(enabled) => {
-                        updateConfig('seedEnabled', enabled);
-                        if (enabled && config.seed < 0) updateConfig('seed', 0);
-                      }}
-                      onChange={(v) => updateConfig('seed', v)}
-                      step={1}
-                      autoLabel="随机种子"
-                    />
+                      <SliderParamRow
+                        label="评估批处理大小"
+                        description="--batch-size / -b"
+                        value={config.batchSize}
+                        onChange={(v) => updateConfig('batchSize', v)}
+                        min={1}
+                        max={8192}
+                        step={64}
+                      />
+                      <NumberParamRow
+                        label="最大并发预测数（parallel）"
+                        description="--parallel / -np；自动时不传该参数"
+                        badge="实验"
+                        value={config.parallel}
+                        onChange={(v) => updateConfig('parallel', v)}
+                        min={-1}
+                        max={128}
+                        step={1}
+                        autoLabel="自动"
+                      />
+                      <ToggleParamRow
+                        label="统一 KV 缓存"
+                        description="--kv-unified"
+                        badge="实验"
+                        checked={config.kvUnified}
+                        onChange={(v) => updateConfig('kvUnified', v)}
+                      />
+                      <ToggleParamRow
+                        label="保持模型在内存中"
+                        description="--mlock"
+                        checked={config.mlock}
+                        onChange={(v) => updateConfig('mlock', v)}
+                      />
+                      <ToggleParamRow
+                        label="跳过启动预热"
+                        description="--no-warmup；超大模型首次验证时可显著缩短等待时间"
+                        badge="实验"
+                        checked={config.noWarmup}
+                        onChange={(v) => updateConfig('noWarmup', v)}
+                      />
+                      <ToggleParamRow
+                        label="尝试 mmap()"
+                        description="--mmap / --no-mmap"
+                        checked={config.mmap}
+                        onChange={(v) => updateConfig('mmap', v)}
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <OptionalNumberParamRow
+                        label="RoPE 频率基"
+                        description="--rope-freq-base；关闭时从 GGUF 读取"
+                        enabled={config.ropeFreqBaseEnabled}
+                        value={config.ropeFreqBase}
+                        onToggle={(enabled) => updateConfig('ropeFreqBaseEnabled', enabled)}
+                        onChange={(v) => updateConfig('ropeFreqBase', v)}
+                        step={1000}
+                        autoLabel="自动"
+                      />
+                      <OptionalNumberParamRow
+                        label="RoPE 频率比例"
+                        description="--rope-freq-scale；关闭时从 GGUF 读取"
+                        enabled={config.ropeFreqScaleEnabled}
+                        value={config.ropeFreqScale}
+                        onToggle={(enabled) => updateConfig('ropeFreqScaleEnabled', enabled)}
+                        onChange={(v) => updateConfig('ropeFreqScale', v)}
+                        step={0.01}
+                        autoLabel="自动"
+                      />
+                      <ReadOnlyParamRow
+                        label="专家数量"
+                        description="从 GGUF expert_count 读取"
+                        value={model.modelType === 'moe' ? formatNumber(model.expertCount) : '稠密模型'}
+                      />
+                      {model.supportsMtp ? (
+                        <ToggleParamRow
+                          label="推测解码（MTP）"
+                          description={model.mtpDraftPath
+                            ? `使用兼容的独立 MTP head：${fileNameFromPath(model.mtpDraftPath)}`
+                            : `使用主 GGUF 内置的 ${model.nextnPredictLayers ?? 1} 个 NextN 层，不传 -md`}
+                          badge="实验"
+                          checked={config.speculativeDecoding === 'mtp'}
+                          onChange={(v) => updateConfig('speculativeDecoding', v ? 'mtp' : 'off')}
+                        />
+                      ) : (model.nextnPredictLayers ?? 0) > 0 ? (
+                        <ReadOnlyParamRow
+                          label="NextN / MTP 元数据"
+                          description="GGUF 含 NextN 声明，但当前 llama.cpp 没有该架构的 MTP graph，或缺少可执行的 MTP tensor。"
+                          value="当前不可用"
+                        />
+                      ) : null}
+                      <TextParamRow
+                        label="聊天模板"
+                        description="留空时使用 GGUF 元数据（metadata）中的模板"
+                        value={config.chatTemplate}
+                        onChange={(v) => updateConfig('chatTemplate', v)}
+                        placeholder="自动"
+                      />
+                      <OptionalNumberParamRow
+                        label="种子"
+                        description="--seed；关闭时使用随机种子"
+                        enabled={config.seedEnabled}
+                        value={config.seed}
+                        onToggle={(enabled) => {
+                          updateConfig('seedEnabled', enabled);
+                          if (enabled && config.seed < 0) updateConfig('seed', 0);
+                        }}
+                        onChange={(v) => updateConfig('seed', v)}
+                        step={1}
+                        autoLabel="随机种子"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
@@ -476,8 +627,8 @@ export default function ModelLoadPage() {
           ) : (
             <div className="max-w-5xl space-y-4">
               <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">模型介绍</h3>
-                <p className="text-sm leading-relaxed text-[#7D766B] dark:text-[#A9A095]">{model.longDescription}</p>
+                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">模型介绍</h3>
+                <p className="text-sm leading-relaxed text-[#7D766B] dark:text-[#8E99AD]">{model.longDescription}</p>
               </div>
 
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -489,8 +640,8 @@ export default function ModelLoadPage() {
 
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">GGUF 表头摘要</h3>
-                  <span className="text-xs text-[#7D766B] dark:text-[#A9A095]">{model.ggufMetadata?.length ?? 0} 个字段</span>
+                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">GGUF 表头摘要</h3>
+                  <span className="text-xs text-[#7D766B] dark:text-[#8E99AD]">{model.ggufMetadata?.length ?? 0} 个字段</span>
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   {headerCards.map((item) => (
@@ -501,11 +652,11 @@ export default function ModelLoadPage() {
 
               {model.benchmarks && (
                 <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                  <h3 className="mb-3 text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">基准测试</h3>
+                  <h3 className="mb-3 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">基准测试</h3>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                     {Object.entries(model.benchmarks).map(([key, value]) => (
                       <div key={key} className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-3 text-center dark:border-white/[0.08] dark:bg-white/[0.04]">
-                        <div className="mb-1 text-xs text-[#7D766B] dark:text-[#A9A095]">{key}</div>
+                        <div className="mb-1 text-xs text-[#7D766B] dark:text-[#8E99AD]">{key}</div>
                         <div className="mono-font text-lg font-semibold text-[#D06646]">{value}</div>
                       </div>
                     ))}
@@ -514,18 +665,18 @@ export default function ModelLoadPage() {
               )}
 
               <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">标签</h3>
+                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">标签</h3>
                 <div className="flex flex-wrap items-center gap-2">
                   {model.tags.map((tag) => (
-                    <span key={tag} className="rounded-md bg-[#F1E8E1] px-2.5 py-1 text-xs font-medium text-[#D06646] dark:bg-[#3A241C] dark:text-[#F0B18D]">{formatTag(tag)}</span>
+                    <span key={tag} className="rounded-md bg-[#F1E8E1] px-2.5 py-1 text-xs font-medium text-[#D06646] dark:bg-[#1C2836] dark:text-[#6EA8DC]">{formatTag(tag)}</span>
                   ))}
                 </div>
               </div>
 
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">GGUF 表头字段</h3>
-                  <span className="text-xs text-[#7D766B] dark:text-[#A9A095]">仅展示真实读取到的元数据（metadata）</span>
+                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">GGUF 表头字段</h3>
+                  <span className="text-xs text-[#7D766B] dark:text-[#8E99AD]">仅展示真实读取到的元数据（metadata）</span>
                 </div>
                 {model.ggufMetadata && model.ggufMetadata.length > 0 ? (
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -534,7 +685,7 @@ export default function ModelLoadPage() {
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 text-sm text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[#A9A095]">
+                  <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 text-sm text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[#8E99AD]">
                     未从该 GGUF 文件读取到可展示的表头元数据。
                   </div>
                 )}
@@ -616,15 +767,15 @@ function ParamLabel({ label, description, badge }: { label: string; description?
   return (
     <div className="min-w-0">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-sm font-medium text-[#2F2C26] dark:text-[#F3EBDD]">{label}</span>
-        <Info className="h-3.5 w-3.5 flex-shrink-0 text-[#8C8576] dark:text-[#A9A095]" />
+        <span className="text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2]">{label}</span>
+        <Info className="h-3.5 w-3.5 flex-shrink-0 text-[#8C8576] dark:text-[#8E99AD]" />
         {badge && (
-          <span className="flex-shrink-0 rounded-md border border-[#D8D2C5] bg-[#F1EEE7] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#A9A095]">
+          <span className="flex-shrink-0 rounded-md border border-[#D8D2C5] bg-[#F1EEE7] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
             {badge}
           </span>
         )}
       </div>
-      {description && <div className="mt-0.5 text-xs text-[#7D766B] dark:text-[#A9A095]">{description}</div>}
+      {description && <div className="mt-0.5 text-xs text-[#7D766B] dark:text-[#8E99AD]">{description}</div>}
     </div>
   );
 }
@@ -723,6 +874,64 @@ function predictVramUsage(model: ModelInfo, config: ModelLoadConfig): VramPredic
   };
 }
 
+function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPreset; onApply: () => void }) {
+  const warning = preset.tone === 'warning';
+  return (
+    <div className={`rounded-xl border p-4 ${
+      warning
+        ? 'border-[#E8CFA6] bg-[#FFF7E8] dark:border-[#6D4E1D] dark:bg-[#2A2113]'
+        : 'border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]'
+    }`}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className={`flex items-center gap-2 text-sm font-semibold ${
+            warning ? 'text-[#7A4D16] dark:text-[#7AB8E8]' : 'text-[#403C32] dark:text-[#E2E8F2]'
+          }`}>
+            <Info className="h-4 w-4 flex-shrink-0" />
+            {preset.title}
+          </div>
+          <div className={`mt-2 text-sm leading-relaxed ${
+            warning ? 'text-[#6F5A35] dark:text-[#E8D3A6]' : 'text-[#7D766B] dark:text-[#8E99AD]'
+          }`}>
+            {preset.description}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+            {preset.items.map((item) => (
+              <div key={item.label} className="rounded-lg border border-black/[0.06] bg-white/55 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
+                <div className="text-[11px] text-[#8C8576] dark:text-[#8E99AD]">{item.label}</div>
+                <div className="mt-1 truncate text-xs font-semibold text-[#403C32] dark:text-[#E2E8F2]">{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onApply}
+          className="flex-shrink-0 rounded-lg bg-[#D06646] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#BE5C3E]"
+        >
+          应用推荐参数
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ParamSection({ title, icon: Icon, children }: {
+  title: string;
+  icon: LucideIcon;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="min-w-0 overflow-hidden rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="flex items-center gap-2 border-b border-[#E3DFD6] bg-[#F8F6F1] px-3 py-2.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+        <Icon className="h-4 w-4 text-[#D06646]" />
+        <h3 className="text-[13px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">{title}</h3>
+      </div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
 function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercent, isError, onReset, onLoad, onStop }: {
   model: ModelInfo;
   prediction: VramPrediction;
@@ -740,7 +949,7 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
   const progressText = loadMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
 
   return (
-    <div className="sticky top-0 z-40 mb-3 overflow-hidden rounded-xl border border-[#D8D2C5] bg-[#FBFAF6] px-3 py-2 shadow-[0_8px_22px_rgba(64,60,50,0.08)] dark:border-white/[0.08] dark:bg-[#1C1A16] dark:shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
+    <div className="model-load-summary sticky top-0 z-40 mb-3 overflow-hidden rounded-lg border border-[#D8D2C5] bg-[#FBFAF6] px-3 py-2 shadow-[0_8px_22px_rgba(64,60,50,0.08)] dark:border-white/[0.08] dark:bg-[#1A1E28] dark:shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
       <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div
@@ -750,8 +959,8 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
             {model.family[0]}
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{model.name}</h1>
-            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#7D766B] dark:text-[#A9A095]">
+            <h1 className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.name}</h1>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#7D766B] dark:text-[#8E99AD]">
               <span className="mono-font">{model.params}</span>
               <span>·</span>
               <span>{model.quant}</span>
@@ -761,16 +970,16 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           </div>
         </div>
 
-        <div className="grid min-w-0 gap-1.5 sm:grid-cols-[auto_minmax(0,1fr)] xl:w-[560px] xl:flex-shrink-0">
+        <div className="model-load-summary-metrics xl:w-[560px] xl:flex-shrink-0">
           <div className="flex items-center gap-2 rounded-md border border-[#E2DCD1] bg-[#F4F0E8] px-2.5 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
             <HardDrive className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
             <div className="min-w-0">
-              <div className="text-[10px] text-[#7D766B] dark:text-[#A9A095]">预计 GPU 显存</div>
+              <div className="text-[10px] text-[#7D766B] dark:text-[#8E99AD]">预计 GPU 显存</div>
               <div className="mono-font text-base font-semibold leading-tight text-[#D06646]">{formatGb(prediction.totalGb)}</div>
             </div>
           </div>
 
-          <div className="grid min-w-0 grid-cols-3 gap-1.5 sm:grid-cols-6">
+          <div className="model-load-summary-pills">
             <PredictionPill label="权重" value={formatGb(prediction.weightsGpuGb)} />
             <PredictionPill label="KV" value={prediction.kvGb === null ? '缺表头' : formatGb(prediction.kvGb)} />
             <PredictionPill label="计算" value={formatGb(prediction.computeGb)} />
@@ -784,9 +993,9 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           <button
             onClick={onReset}
             disabled={isLoading}
-            className="flex h-9 items-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#F3EBDD] dark:hover:bg-white/[0.09]"
+            className="flex h-9 items-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.09]"
           >
-            <RotateCcw className="h-4 w-4 text-[#7D766B] dark:text-[#A9A095]" />
+            <RotateCcw className="h-4 w-4 text-[#7D766B] dark:text-[#8E99AD]" />
             重置
           </button>
           <button
@@ -800,7 +1009,7 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           {isLoading && (
             <button
               onClick={onStop}
-              className="flex h-9 items-center gap-2 rounded-lg border border-[#E8C9BD] bg-[#F8EDE7] px-3 text-sm text-[#C44E36] transition-colors hover:bg-[#F2DED4] dark:border-[#E8C9BD]/30 dark:bg-[#3A241C] dark:text-[#F0987C] dark:hover:bg-[#4A2D22]"
+              className="flex h-9 items-center gap-2 rounded-lg border border-[#E8C9BD] bg-[#F8EDE7] px-3 text-sm text-[#C44E36] transition-colors hover:bg-[#F2DED4] dark:border-[#E8C9BD]/30 dark:bg-[#1C2836] dark:text-[#5A96D0] dark:hover:bg-[#4A2D22]"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
               停止
@@ -811,9 +1020,9 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
 
       <div className="mt-2 grid gap-1.5">
         <div className="flex min-w-0 items-center gap-2 text-xs">
-          <Info className={`h-3.5 w-3.5 flex-shrink-0 ${isError ? 'text-[#C44E36] dark:text-[#F0987C]' : 'text-[#8C8576] dark:text-[#A9A095]'}`} />
-          <span className={`min-w-0 truncate ${isError ? 'text-[#C44E36] dark:text-[#F0987C]' : 'text-[#7D766B] dark:text-[#A9A095]'}`}>{progressText}</span>
-          <span className="mono-font ml-auto flex-shrink-0 text-[#7D766B] dark:text-[#A9A095]">{safePercent.toFixed(0)}%</span>
+          <Info className={`h-3.5 w-3.5 flex-shrink-0 ${isError ? 'text-[#C44E36] dark:text-[#5A96D0]' : 'text-[#8C8576] dark:text-[#8E99AD]'}`} />
+          <span className={`min-w-0 truncate ${isError ? 'text-[#C44E36] dark:text-[#5A96D0]' : 'text-[#7D766B] dark:text-[#8E99AD]'}`}>{progressText}</span>
+          <span className="mono-font ml-auto flex-shrink-0 text-[#7D766B] dark:text-[#8E99AD]">{safePercent.toFixed(0)}%</span>
         </div>
         <div className="h-1 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.08]">
           <div
@@ -822,7 +1031,7 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           />
         </div>
         {prediction.missing.length > 0 && (
-          <div className="truncate text-[11px] text-[#9A6700] dark:text-[#F3C66E]">
+          <div className="truncate text-[11px] text-[#9A6700] dark:text-[#7AB8E8]">
             预测缺少表头: {Array.from(new Set(prediction.missing)).join(', ')}
           </div>
         )}
@@ -834,8 +1043,8 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
 function PredictionPill({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-md border border-[#E3DFD6] bg-[#FBFAF6] px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
-      <div className="truncate text-[10px] text-[#8C8576] dark:text-[#A9A095]">{label}</div>
-      <div className="mono-font truncate text-[11px] font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{value}</div>
+      <div className="truncate text-[10px] text-[#8C8576] dark:text-[#8E99AD]">{label}</div>
+      <div className="mono-font truncate text-[11px] font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
     </div>
   );
 }
@@ -853,38 +1062,38 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
 
   return (
     <div className={`${rowBorderClass()} px-3 py-3`}>
-      <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_minmax(260px,0.9fr)] lg:items-center">
+      <div className="mb-2.5">
         <ParamLabel label={label} description={description} badge={badge} />
-        <div className="min-w-0">
-          <div className="mb-2 flex items-center gap-3">
+      </div>
+      <div className="min-w-0">
+        <div className="mb-1.5 flex items-center gap-3">
+          <input
+            type="range"
+            min={min}
+            max={safeMax}
+            step={step}
+            value={sliderValue}
+            disabled={safeMax === min && min === 0}
+            onChange={(e) => onChange(clamp(Number(e.target.value), min, safeMax))}
+            className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full accent-[#D06646] transition-[background] duration-200"
+            style={{
+              background: `linear-gradient(to right, #D06646 ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
+            }}
+          />
+          <div className="flex w-28 flex-shrink-0 items-center gap-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 transition-colors focus-within:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720]">
             <input
-              type="range"
-              min={min}
-              max={safeMax}
+              type="number"
+              value={value}
+              onChange={handleInputChange}
               step={step}
-              value={sliderValue}
-              disabled={safeMax === min && min === 0}
-              onChange={(e) => onChange(clamp(Number(e.target.value), min, safeMax))}
-              className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full accent-[#D06646] transition-[background] duration-200"
-              style={{
-                background: `linear-gradient(to right, #D06646 ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
-              }}
+              className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[#2F2C26] outline-none dark:text-[#E2E8F2]"
             />
-            <div className="flex w-32 flex-shrink-0 items-center gap-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 transition-colors focus-within:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512]">
-              <input
-                type="number"
-                value={value}
-                onChange={handleInputChange}
-                step={step}
-                className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[#2F2C26] outline-none dark:text-[#F3EBDD]"
-              />
-              {suffix && <span className="text-[11px] text-[#7D766B] dark:text-[#A9A095]">{suffix}</span>}
-            </div>
+            {suffix && <span className="text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{suffix}</span>}
           </div>
-          <div className="flex justify-between">
-            <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#A9A095]">{min.toLocaleString()}</span>
-            <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#A9A095]">{safeMax.toLocaleString()}</span>
-          </div>
+        </div>
+        <div className="flex justify-between">
+          <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{min.toLocaleString()}</span>
+          <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{safeMax.toLocaleString()}</span>
         </div>
       </div>
     </div>
@@ -908,7 +1117,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
       />
       <div className="flex flex-wrap items-center gap-2 lg:justify-end">
         <ToggleSwitch checked={checked} onChange={onToggle} ariaLabel="空闲时自动卸载" />
-        <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[#2F2C26] dark:text-[#F3EBDD]' : 'text-[#8C8576] dark:text-[#A9A095]'}`}>
+        <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[#2F2C26] dark:text-[#E2E8F2]' : 'text-[#8C8576] dark:text-[#8E99AD]'}`}>
           <span className="whitespace-nowrap">没有消息输入和输出的</span>
           <input
             type="number"
@@ -918,7 +1127,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
             step={1}
             disabled={!checked}
             onChange={(event) => handleMinuteChange(event.target.value)}
-            className="mono-font h-8 w-16 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+            className="mono-font h-8 w-16 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
           />
           <span className="whitespace-nowrap">分钟后自动卸载</span>
         </div>
@@ -955,7 +1164,7 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
           <button
             type="button"
             onClick={() => onChange(-1)}
-            className="rounded-md border border-[#DCD8CF] bg-[#F1EEE7] px-2.5 py-1.5 text-xs text-[#4E4941] transition-colors hover:bg-[#E8E2D7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#D8D0C3] dark:hover:bg-white/[0.09]"
+            className="rounded-md border border-[#DCD8CF] bg-[#F1EEE7] px-2.5 py-1.5 text-xs text-[#4E4941] transition-colors hover:bg-[#E8E2D7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
           >
             {autoLabel}
           </button>
@@ -968,7 +1177,7 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
           max={max}
           step={step}
           onChange={(event) => handleChange(event.target.value)}
-          className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+          className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
         />
       </div>
     </div>
@@ -992,10 +1201,10 @@ function OptionalNumberParamRow({ label, description, enabled, value, onToggle, 
               const next = Number(event.target.value);
               if (!Number.isNaN(next)) onChange(next);
             }}
-            className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+            className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
           />
         ) : (
-          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#A9A095]">{autoLabel}</span>
+          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#8E99AD]">{autoLabel}</span>
         )}
       </div>
     </div>
@@ -1006,7 +1215,7 @@ function ReadOnlyParamRow({ label, description, value }: { label: string; descri
   return (
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
-      <span className="mono-font text-sm font-medium text-[#2F2C26] dark:text-[#F3EBDD] lg:justify-self-end lg:text-right">{value}</span>
+      <span className="mono-font text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2] lg:justify-self-end lg:text-right">{value}</span>
     </div>
   );
 }
@@ -1022,9 +1231,9 @@ function TextParamRow({ label, description, value, onChange, placeholder }: {
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
-          className="h-9 min-w-0 flex-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD] dark:placeholder:text-[#82786B]"
+          className="h-9 min-w-0 flex-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
         />
-        <ChevronRight className="h-4 w-4 flex-shrink-0 text-[#8C8576] dark:text-[#A9A095]" />
+        <ChevronRight className="h-4 w-4 flex-shrink-0 text-[#8C8576] dark:text-[#8E99AD]" />
       </div>
     </div>
   );
@@ -1042,14 +1251,14 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
           <select
             value={value}
             onChange={(event) => onChange(event.target.value)}
-            className="h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+            className="h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
           >
             {CACHE_TYPES.map((type) => (
               <option key={type} value={type}>{type}</option>
             ))}
           </select>
         ) : (
-          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#A9A095]">默认 f16</span>
+          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#8E99AD]">默认 f16</span>
         )}
       </div>
     </div>
@@ -1058,7 +1267,7 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
 
 function CheckboxParamRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F8F6F1] dark:text-[#F3EBDD] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F8F6F1] dark:text-[#E2E8F2] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <span className="min-w-0 truncate font-medium">{label}</span>
       <div className="flex justify-end">
         <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
@@ -1071,8 +1280,8 @@ function InfoCard({ icon: Icon, label, value }: { icon: LucideIcon; label: strin
   return (
     <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
       <Icon className="mb-2 h-4 w-4 text-[#D06646]" />
-      <div className="mb-0.5 text-xs text-[#7D766B] dark:text-[#A9A095]">{label}</div>
-      <div className="break-words text-sm font-medium text-[#2F2C26] dark:text-[#F3EBDD]">{value}</div>
+      <div className="mb-0.5 text-xs text-[#7D766B] dark:text-[#8E99AD]">{label}</div>
+      <div className="break-words text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
     </div>
   );
 }
@@ -1085,7 +1294,7 @@ function MetadataCard({ name, value }: { name: string; value: string }) {
       <div className="mono-font truncate text-[11px] text-[#D06646]" title={name}>
         {name}
       </div>
-      <div className="mt-2 break-words text-xs leading-relaxed text-[#7D766B] dark:text-[#A9A095]" title={value}>
+      <div className="mt-2 break-words text-xs leading-relaxed text-[#7D766B] dark:text-[#8E99AD]" title={value}>
         {displayValue}
       </div>
     </div>

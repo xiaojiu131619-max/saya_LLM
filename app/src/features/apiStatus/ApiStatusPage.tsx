@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState, type ComponentType } from 'react';
-import { Activity, CheckCircle2, Clock3, KeyRound, Loader2, RefreshCw, Server, ShieldCheck, WifiOff, XCircle } from 'lucide-react';
-import { getDesktopServerLogs, pingLocalApi, type PingResult } from '@/lib/desktop';
+﻿import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, RefreshCw, Server, Terminal, WifiOff, XCircle, Zap } from 'lucide-react';
+import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
+import ExternalApiSection from '@/features/apiStatus/ExternalApiSection';
+import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions } from '@/features/chat/chatUtils';
+import PageHeader from '@/components/PageHeader';
 
 function formatTime(date: Date | null) {
   if (!date) return '尚未检测';
@@ -15,9 +18,22 @@ function statusText(result: PingResult | null, serverRunning: boolean) {
   return '接口异常';
 }
 
+function displayModelName(raw: string) {
+  const value = raw.trim();
+  if (!value) return value;
+  try {
+    const url = new URL(value);
+    const lastPart = url.pathname.split('/').filter(Boolean).pop();
+    return lastPart || url.hostname || value;
+  } catch {
+    const normalized = value.replace(/\\/g, '/');
+    return normalized.split('/').filter(Boolean).pop() ?? value;
+  }
+}
+
 function StatusPill({ ok, text }: { ok: boolean; text: string }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${ok ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1F3224] dark:text-[#98D19C]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#3A241C] dark:text-[#F0987C]'}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${ok ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1A2E28] dark:text-[#7EC8A0]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#1C2836] dark:text-[#5A96D0]'}`}>
       {ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
       {text}
     </span>
@@ -32,22 +48,50 @@ function InfoCard({ icon: Icon, label, value, note }: {
 }) {
   return (
     <div className="rounded-xl border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-      <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-[#7D766B] dark:text-[#BDB4A7]">
+      <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-[#7D766B] dark:text-[#A8B2C4]">
         <Icon className="h-4 w-4 text-[#D7663E]" />
         {label}
       </div>
-      <div className="mono-font break-all text-lg font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{value}</div>
-      {note && <div className="mt-1 text-xs text-[#8D867A] dark:text-[#A9A095]">{note}</div>}
+      <div className="mono-font break-all text-lg font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
+      {note && <div className="mt-1 text-xs text-[#8D867A] dark:text-[#8E99AD]">{note}</div>}
     </div>
   );
+}
+
+function LiveMetric({ icon: Icon, label, value, note }: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  note?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-[#E5DFD3] bg-[#FBFAF6] px-3 py-2.5 dark:border-white/[0.08] dark:bg-black/20">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold text-[#7D766B] dark:text-[#A8B2C4]">
+        <Icon className="h-3.5 w-3.5 text-[#D7663E]" />
+        {label}
+      </div>
+      <div className="mono-font truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
+      {note && <div className="mt-0.5 truncate text-[11px] text-[#8D867A] dark:text-[#8E99AD]">{note}</div>}
+    </div>
+  );
+}
+
+function formatLiveMetric(value: number | undefined, suffix: string, digits = 1) {
+  if (!value || !Number.isFinite(value) || value <= 0) return '暂无';
+  return `${value.toFixed(digits)}${suffix}`;
+}
+
+function formatCtxUsage(stats: ReturnType<typeof latestStatsForSessions>) {
+  if (!stats || stats.ctxUsed <= 0 || stats.ctxTotal <= 0) return '暂无';
+  return `${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()}`;
 }
 
 export default function ApiStatusPage() {
   const { state } = useApp();
   const [result, setResult] = useState<PingResult | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
   const [lastCheckedAt, setLastCheckedAt] = useState<Date | null>(null);
+  const [serverLogs, setServerLogs] = useState<string[]>([]);
   const checkingRef = useRef(false);
 
   const runCheck = async () => {
@@ -55,12 +99,8 @@ export default function ApiStatusPage() {
     checkingRef.current = true;
     setChecking(true);
     try {
-      const [nextResult, nextLogs] = await Promise.all([
-        pingLocalApi(),
-        getDesktopServerLogs(),
-      ]);
+      const nextResult = await pingLocalApi();
       setResult(nextResult);
-      setLogs(nextLogs.slice(-8));
       setLastCheckedAt(new Date());
     } finally {
       checkingRef.current = false;
@@ -70,45 +110,80 @@ export default function ApiStatusPage() {
 
   useEffect(() => {
     void runCheck();
-    const timer = window.setInterval(() => void runCheck(), 5000);
+    const timer = window.setInterval(() => void runCheck(), 2000);
     return () => window.clearInterval(timer);
   }, []);
 
-  const apiBase = `http://${state.apiConfig.host === '0.0.0.0' ? '127.0.0.1' : state.apiConfig.host}:${state.serverPort}`;
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    const refreshLogs = async () => {
+      try {
+        const lines = await getDesktopServerLogs();
+        if (!disposed) setServerLogs(lines.slice(-80));
+      } catch {
+        if (!disposed) setServerLogs([]);
+      }
+    };
+    void refreshLogs();
+    const timer = window.setInterval(() => void refreshLogs(), 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const bindHost = result?.bindHost?.trim();
+  const runningExternal = bindHost === '0.0.0.0'
+    || bindHost === '::'
+    || (Boolean(bindHost) && bindHost !== '127.0.0.1' && bindHost !== '::1' && bindHost !== 'localhost');
+  const apiBase = result?.externalBaseUrl
+    ?? (runningExternal ? '未识别到局域网 IP' : result?.baseUrl)
+    ?? `http://127.0.0.1:${state.serverPort}`;
   const healthy = Boolean(result?.reachable);
+  const activeModel = state.models.find((model) => model.id === state.activeModelId)
+    ?? state.models.find((model) => model.status === 'loaded');
+  const standards = result?.protocolStandards?.length ? result.protocolStandards.join(' / ') : '探测中…';
+  const healthStatusCode = result?.statusCode ? `/health ${result.statusCode}` : '/health 状态码 --';
+  const logRuntimeStats = useMemo(() => {
+    const ctxTotal = activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0;
+    return latestRuntimeStatsFromServerLogs(serverLogs, ctxTotal);
+  }, [activeModel, serverLogs]);
+  const latestStats = logRuntimeStats ?? latestStatsForSessions(Object.values(state.chatSessions).flat());
+  const ctxPercent = ctxUsagePercent(latestStats);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#171512] dark:text-[#F3EBDD]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-5xl">
-          <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-primary-custom">API 状态</h1>
-              <p className="mt-1 text-sm leading-6 text-secondary-custom">
-                每 5 秒自动检测本地 OpenAI 兼容接口，展示端点可达性、延迟和模型列表。
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => void runCheck()}
-              disabled={checking}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#DED8CC] bg-[#FAF9F5] px-4 py-2 text-sm font-semibold text-[#403C32] transition-colors hover:bg-[#F1EEE7] focus:outline-none focus:ring-2 focus:ring-[#D7663E]/40 disabled:opacity-60 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#F3EBDD] dark:hover:bg-white/[0.08]"
-            >
-              {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              立即检测
-            </button>
-          </div>
+          <PageHeader
+            icon={Activity}
+            title="API 状态"
+            description="每 2 秒检测本地 OpenAI / Anthropic 兼容接口，展示模型、地址、响应速度和 API key 状态。"
+            className="mb-6"
+            actions={(
+              <button
+                type="button"
+                onClick={() => void runCheck()}
+                disabled={checking}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[#DED8CC] bg-[#FAF9F5] px-4 text-sm font-semibold text-[#403C32] transition-colors hover:bg-[#F1EEE7] disabled:opacity-60 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.08]"
+              >
+                {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                立即检测
+              </button>
+            )}
+          />
 
-          <section className="mb-4 rounded-2xl border border-[#E1DCD0] bg-[#F8F6F1] p-5 shadow-sm dark:border-white/[0.08] dark:bg-[#1C1A16]">
+          <section className="mb-4 rounded-lg border border-[#E1DCD0] bg-[#F8F6F1] p-5 shadow-sm dark:border-white/[0.08] dark:bg-[#1A1E28]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex items-start gap-3">
-                <div className={`grid h-11 w-11 flex-shrink-0 place-items-center rounded-xl ${healthy ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1F3224] dark:text-[#98D19C]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#3A241C] dark:text-[#F0987C]'}`}>
+                <div className={`grid h-11 w-11 flex-shrink-0 place-items-center rounded-xl ${healthy ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1A2E28] dark:text-[#7EC8A0]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#1C2836] dark:text-[#5A96D0]'}`}>
                   {healthy ? <Activity className="h-5 w-5" /> : <WifiOff className="h-5 w-5" />}
                 </div>
                 <div>
-                  <div className="text-lg font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">{statusText(result, state.serverRunning)}</div>
-                  <div className="mt-1 text-sm text-[#8D867A] dark:text-[#A9A095]">上次检测：{formatTime(lastCheckedAt)}</div>
-                  {result?.error && <div className="mt-2 text-sm text-[#B4563B] dark:text-[#F0987C]">{result.error}</div>}
+                  <div className="text-lg font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{statusText(result, state.serverRunning)}</div>
+                  <div className="mt-1 text-sm text-[#8D867A] dark:text-[#8E99AD]">上次检测：{formatTime(lastCheckedAt)} · 兼容标准：{standards}</div>
+                  {result?.error && <div className="mt-2 text-sm text-[#B4563B] dark:text-[#5A96D0]">{result.error}</div>}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -120,53 +195,71 @@ export default function ApiStatusPage() {
           </section>
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <InfoCard icon={Server} label="接口地址" value={apiBase} note={state.apiConfig.enabled ? '已允许对外访问' : '仅本机访问'} />
+            <InfoCard icon={Server} label="当前接口地址" value={apiBase} note={runningExternal ? `当前监听 ${result?.bindHost ?? '0.0.0.0'}` : '当前仅本机访问'} />
             <InfoCard icon={Clock3} label="响应延迟" value={result?.latencyMs != null ? `${result.latencyMs} ms` : '--'} note="基于 /health 请求" />
-            <InfoCard icon={ShieldCheck} label="状态码" value={result?.statusCode ? String(result.statusCode) : '--'} note="/health HTTP 状态" />
-            <InfoCard icon={KeyRound} label="API Key" value={state.apiConfig.hasApiKey ? '已设置' : '未设置'} note={state.apiConfig.hasApiKey ? '外部请求需携带 Bearer Token' : '局域网开放时不建议留空'} />
+            <InfoCard icon={Activity} label="模型状态" value={activeModel ? activeModel.name : '未加载'} note={state.serverRunning ? healthStatusCode : '服务启动后可对话'} />
+            <InfoCard icon={KeyRound} label="当前鉴权" value={result?.apiKeyRequired ? '需要 API Key' : '无需 API Key'} note={result?.apiKeyRequired ? '软件内自动携带，外部请求使用 Bearer Token' : '当前运行实例未启用鉴权'} />
           </div>
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
+          <section className="mt-4 rounded-xl border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-[#403C32] dark:text-[#E2E8F2]">
+                <Gauge className="h-4 w-4 text-[#D7663E]" />
+                实时运行
+              </h2>
+              <span className="text-[11px] text-[#8C8576] dark:text-[#8E99AD]">自动刷新：状态 2 秒，日志 1 秒</span>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <LiveMetric icon={Gauge} label="ctx 使用" value={formatCtxUsage(latestStats)} note={ctxPercent !== undefined ? `${Math.round(ctxPercent)}%` : '等待生成统计'} />
+              <LiveMetric icon={Zap} label="输出速度" value={formatLiveMetric(latestStats?.tokensPerSec, ' tok/s')} note="最近一次响应" />
+              <LiveMetric icon={Clock3} label="首字延迟" value={formatLiveMetric(latestStats?.firstTokenDelay, 's', 2)} note="TTFT" />
+              <LiveMetric icon={Activity} label="接口延迟" value={result?.latencyMs != null ? `${result.latencyMs} ms` : '暂无'} note={formatTime(lastCheckedAt)} />
+            </div>
+            <div className="mt-3 rounded-lg border border-[#E5DFD3] bg-[#FBFAF6] p-3 dark:border-white/[0.08] dark:bg-black/20">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#6F675C] dark:text-[#B8C2D4]">
+                <Terminal className="h-4 w-4 text-[#D7663E]" />
+                最新运行日志
+              </div>
+              {serverLogs.length > 0 ? (
+                <div className="mono-font max-h-28 space-y-1 overflow-y-auto text-[11px] leading-5 text-[#5C554B] dark:text-[#B8C2D4]">
+                  {serverLogs.map((line, index) => (
+                    <div key={`${index}-${line}`} className="truncate">{line}</div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-[#8C8576] dark:text-[#8E99AD]">暂无运行日志。</div>
+              )}
+            </div>
+          </section>
+
+          <div className="mt-4">
             <section className="rounded-2xl border border-[#E1DCD0] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
               <div className="mb-4 flex items-center justify-between gap-3">
-                <h2 className="text-[15px] font-semibold text-primary-custom">模型端点</h2>
+                <h2 className="flex items-center gap-2 text-[15px] font-semibold text-primary-custom">
+                  <Globe2 className="h-4 w-4 text-[#D7663E]" />
+                  接口可用模型
+                </h2>
                 <span className="text-xs text-secondary-custom">{result?.models.length ?? 0} 个模型</span>
               </div>
               {result?.models.length ? (
                 <div className="space-y-2">
                   {result.models.map((model) => (
-                    <div key={model} className="mono-font rounded-lg bg-black/[0.04] px-3 py-2 text-xs text-[#403C32] dark:bg-white/[0.05] dark:text-[#F3EBDD]">
-                      {model}
+                    <div key={model} title={model} className="mono-font rounded-lg bg-black/[0.04] px-3 py-2 text-xs text-[#403C32] dark:bg-white/[0.05] dark:text-[#E2E8F2]">
+                      {displayModelName(model)}
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="rounded-xl border border-dashed border-[#DCD8CF] px-4 py-8 text-center text-sm text-secondary-custom dark:border-white/[0.10]">
-                  {state.serverRunning ? '暂无模型数据，等待 /v1/models 返回有效结果。' : '加载模型并启动服务后会显示模型列表。'}
-                </div>
-              )}
-            </section>
-
-            <section className="rounded-2xl border border-[#E1DCD0] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <h2 className="text-[15px] font-semibold text-primary-custom">服务日志摘要</h2>
-                <span className="text-xs text-secondary-custom">最近 {logs.length} 条</span>
-              </div>
-              {logs.length ? (
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
-                  {logs.map((line, index) => (
-                    <div key={`${index}-${line}`} className="mono-font rounded-lg bg-black/[0.04] px-3 py-2 text-[11px] leading-5 text-[#625B50] dark:bg-white/[0.05] dark:text-[#BDB4A7]">
-                      {line}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="rounded-xl border border-dashed border-[#DCD8CF] px-4 py-8 text-center text-sm text-secondary-custom dark:border-white/[0.10]">
-                  暂无服务日志。
+                  {state.serverRunning ? '接口可用后会显示 /v1/models 返回的模型。' : '服务未运行，暂无法读取模型列表。'}
                 </div>
               )}
             </section>
           </div>
+
+          <section className="mt-4 rounded-2xl border border-[#E1DCD0] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <ExternalApiSection embedded />
+          </section>
         </div>
       </div>
     </div>

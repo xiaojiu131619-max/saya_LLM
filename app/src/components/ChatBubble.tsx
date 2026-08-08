@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Check,
@@ -15,7 +15,9 @@ import {
 import type { Message } from '@/types';
 import { useApp } from '@/context/AppContext';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
-import { isDesktopRuntime, streamChatCompletion } from '@/lib/desktop';
+import { isDesktopRuntime, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
+import { modelVideoSupport } from '@/lib/modelCapabilities';
+import { formatCtxUsageWithPercent } from '@/features/chat/chatUtils';
 
 interface ChatBubbleProps {
   message: Message;
@@ -59,12 +61,6 @@ function elapsedRequestStats(startTime: number, ctxTotal = 0) {
     tokensPerSec: 0,
     genTime: Math.max(0, (performance.now() - startTime) / 1000),
   };
-}
-
-function formatCtxPercent(used: number, total: number) {
-  if (!Number.isFinite(used) || !Number.isFinite(total) || used <= 0 || total <= 0) return 'ctx 未返回';
-  const percent = Math.min(999, Math.max(0, (used / total) * 100));
-  return `${percent.toFixed(percent >= 10 ? 0 : 1)}% ctx`;
 }
 
 function formatMessageTime(timestamp: number) {
@@ -181,7 +177,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
     const history = msgs.slice(0, userMsgIndex + 1);
     dispatch({ type: 'DELETE_MESSAGE', payload: { modelId, sessionId, messageId: message.id } });
 
-    const assistantMsgId = `${message.id}-regenerated`;
+    const assistantMsgId = crypto.randomUUID();
     const startedAt = Date.now();
     const startTime = performance.now();
     dispatch({
@@ -212,6 +208,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         ctxTotal: activeModel.loadConfig.ctxLength,
         supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
         reasoningBudget: activeModel.loadConfig.reasoningBudget,
+        videoSupport: modelVideoSupport(activeModel),
         apiKey: state.apiConfig.apiKey,
         messages: history.map((msg) => ({
           role: msg.role,
@@ -280,7 +277,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         });
         return;
       }
-      const errorMessage = `重新生成失败：${String(error instanceof Error ? error.message : error)}\n\n请确认 llama-server 正在运行。`;
+      const errorMessage = `重新生成失败：${String(error instanceof Error ? error.message : error)}\n\n${serverErrorHint(error)}`;
       dispatch({
         type: 'UPDATE_MESSAGE',
         payload: { modelId, sessionId, messageId: assistantMsgId, content: errorMessage, reasoningContent: '' },
@@ -308,15 +305,15 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 10 }}
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-        className="grid w-full justify-items-end gap-2"
+        className="group grid w-full justify-items-end gap-1.5 pb-7"
       >
-        <div className="flex max-w-[min(620px,82%)] items-center gap-2 text-[13px] text-[#9B9485] dark:text-[#8E8578]">
-          <strong className="font-semibold text-[#6F685A] dark:text-[#D8D0C3]">你</strong>
+        <div className="flex max-w-[80%] items-center gap-2 text-[12px] text-[#8B8B94] dark:text-[#7A8598]">
+          <strong className="font-medium text-[#5F5F67] dark:text-[#B8C2D4]">你</strong>
           <span>{formatMessageTime(message.timestamp)}</span>
         </div>
 
         {editing ? (
-          <div className="w-full max-w-[min(640px,84%)] rounded-[16px_16px_4px_16px] border border-[#D8D2C5] bg-[#F7F4EC] p-2 shadow-[0_1px_3px_rgba(64,60,50,0.10)] dark:border-white/[0.1] dark:bg-[#2B2822]">
+          <div className="w-full max-w-[80%] rounded-[18px] border border-black/[0.08] bg-[#F4F4F4] p-2 shadow-none dark:border-white/[0.08] dark:bg-[#222733]">
             <textarea
               value={draftContent}
               onChange={(event) => setDraftContent(event.target.value)}
@@ -331,7 +328,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 }
               }}
               rows={Math.min(8, Math.max(3, draftContent.split('\n').length))}
-              className="max-h-[220px] min-h-[92px] w-full resize-y rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-3 py-2 text-[16px] leading-7 text-[#403C32] outline-none [overflow-wrap:anywhere] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#171512] dark:text-[#F3EBDD]"
+              className="max-h-[220px] min-h-[92px] w-full resize-y rounded-xl border border-black/[0.10] bg-white px-3 py-2 text-[15px] leading-7 text-[#202123] outline-none [overflow-wrap:anywhere] focus:border-black/25 dark:border-white/[0.10] dark:bg-[#141720] dark:text-[#E2E8F2] dark:focus:border-[#6EA8DC]/45"
               autoFocus
             />
             <div className="mt-2 flex items-center justify-end gap-2">
@@ -339,7 +336,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={cancelEdit}
                 disabled={savingEdit}
-                className="h-8 rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm text-[#625C50] transition-colors hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#D8D0C3]"
+                className="h-8 rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm text-[#625C50] transition-colors hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#B8C2D4]"
               >
                 取消
               </button>
@@ -354,7 +351,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
             </div>
           </div>
         ) : (
-          <div className="max-w-[min(640px,84%)] rounded-[16px_16px_4px_16px] bg-[#E8E1D5] px-4 py-3 text-[16px] leading-8 text-[#403C32] shadow-[0_1px_3px_rgba(64,60,50,0.10)] dark:bg-[#2B2822] dark:text-[#F3EBDD] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)]">
+          <div className="max-w-[78%] rounded-[16px] bg-black/[0.045] px-4 py-2.5 text-[15px] leading-7 text-[#202123] dark:bg-white/[0.065] dark:text-[#E2E8F2]">
             {message.content && (
               <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</p>
             )}
@@ -364,7 +361,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           </div>
         )}
 
-        <div className="flex items-center gap-1.5 text-[#625C50] dark:text-[#BDB4A7]">
+        <div className="flex items-center gap-0.5 text-[#71717A] opacity-55 transition-opacity group-hover:opacity-100 dark:text-[#8E99AD]">
           <ActionButton icon={copied ? Check : Copy} label={copied ? '已复制' : '复制'} onClick={() => void handleCopy()} />
           <ActionButton icon={Pencil} label="编辑" onClick={startEdit} disabled={!onEditAndResend || message.isStreaming || savingEdit} />
           <ActionButton icon={RotateCcw} label="重发" onClick={() => void submitEdit(message.content)} disabled={!onEditAndResend || message.isStreaming || savingEdit} />
@@ -380,11 +377,11 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
       transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-      className="grid w-full min-w-0 gap-2 text-[#403C32] dark:text-[#F3EBDD]"
+      className="group grid w-full min-w-0 gap-2.5 pb-9 text-[#202123] dark:text-[#E2E8F2]"
     >
-      <div className="flex min-w-0 items-center gap-2 text-[13px] text-[#9B9485] dark:text-[#8E8578]">
-        <strong className="truncate font-semibold text-[#403C32] dark:text-[#F3EBDD]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
-        <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[#B8B1A3]" />
+      <div className="flex min-w-0 items-center gap-2 text-[12px] text-[#8B8B94] dark:text-[#7A8598]">
+        <strong className="truncate font-semibold text-[#303036] dark:text-[#E2E8F2]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
+        <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[#B8B1A3] dark:bg-white/25" />
         <span className="truncate">{formatMessageTime(message.timestamp)}</span>
       </div>
 
@@ -394,18 +391,24 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
 
-      <div className="max-w-[820px] min-w-0 text-[16px] leading-8 text-[#403C32] dark:text-[#F3EBDD]">
+      <div className="min-w-0 text-[15.5px] leading-[1.9] text-[#2F2F35] dark:text-[#E2E8F2]">
         <MarkdownRenderer content={message.content} />
         {message.isStreaming && (
-          <div className="mt-2 flex items-center gap-1 py-1">
-            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8C8576] dark:bg-[#A9A095]" style={{ animationDelay: '0ms' }} />
-            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8C8576] dark:bg-[#A9A095]" style={{ animationDelay: '150ms' }} />
-            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8C8576] dark:bg-[#A9A095]" style={{ animationDelay: '300ms' }} />
+          <div className="mt-3 flex w-fit items-center gap-2 py-1 text-xs font-medium text-[#716A5E] dark:text-[#B8C2D4]">
+            <span className="relative flex h-4 w-4 items-center justify-center">
+              <span className="absolute h-4 w-4 rounded-full border-2 border-[#E4DDD1] dark:border-white/[0.14]" />
+              <motion.span
+                className="absolute h-4 w-4 rounded-full border-2 border-transparent border-t-[#D7663E] border-r-[#D7663E] dark:border-t-[#6EA8DC] dark:border-r-[#6EA8DC]"
+                animate={{ rotate: 360 }}
+                transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+              />
+            </span>
+            <span>输出中</span>
           </div>
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5 text-[#625C50] dark:text-[#BDB4A7]">
+      <div className="flex flex-wrap items-center gap-0.5 text-[#71717A] opacity-60 transition-opacity group-hover:opacity-100 dark:text-[#8E99AD]">
         <ActionButton icon={copied ? Check : Copy} label={copied ? '已复制' : '复制'} onClick={() => void handleCopy()} />
         <ActionButton icon={RotateCcw} label="重新生成" onClick={() => void handleRegenerate()} disabled={!canRegenerate} />
         <ActionButton icon={Languages} label="翻译" disabled />
@@ -414,14 +417,14 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       </div>
 
       {message.isStreaming && (
-        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[13px] text-[#6F685A]">
+        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[#71717A] dark:text-[#8E99AD]">
           <Metric icon={Clock} label={`已用 ${formatDuration(streamingElapsed)}`} />
         </div>
       )}
 
       {stats && !message.isStreaming && (
-        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[13px] text-[#6F685A]">
-          <Metric icon={Gauge} label={formatCtxPercent(stats.ctxUsed, stats.ctxTotal)} />
+        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[#71717A] dark:text-[#8E99AD]">
+          <Metric icon={Gauge} label={formatCtxUsageWithPercent(stats)} />
           <Metric icon={Zap} label={stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : 'tok 未返回'} />
           <Metric icon={Clock} label={stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : 'TTFT 未返回'} />
           <Metric icon={Clock} label={`${formatMetric(stats.tokensPerSec, ' tok/s')}`} />
@@ -443,8 +446,8 @@ function ActionButton({ icon: Icon, label, onClick, disabled, danger }: {
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-35 ${
-        danger ? 'hover:bg-[#F0DDD6] hover:text-[#C44E36] dark:hover:bg-[#3A241C] dark:hover:text-[#F0987C]' : 'hover:bg-[#ECE7DC] hover:text-[#403C32] dark:hover:bg-white/[0.08] dark:hover:text-[#F3EBDD]'
+      className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
+        danger ? 'hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400' : 'hover:bg-black/[0.055] hover:text-[#202123] dark:hover:bg-[#222733] dark:hover:text-[#E2E8F2]'
       }`}
       title={label}
     >
@@ -458,9 +461,9 @@ function Metric({ icon: Icon, label }: {
   label: string;
 }) {
   return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#DED8CB] bg-[#EEEAE1] px-2.5 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] dark:border-white/[0.08] dark:bg-white/[0.07] dark:shadow-none">
-      <Icon className="h-4 w-4 flex-shrink-0 text-[#9A9282] dark:text-[#A9A095]" />
-      <span className="font-medium tracking-normal text-[#4F493F] dark:text-[#F3EBDD]" style={{ fontVariantNumeric: 'tabular-nums' }}>
+    <span className="inline-flex max-w-full items-center gap-1.5 px-1 py-0.5">
+      <Icon className="h-3.5 w-3.5 flex-shrink-0 text-[#777780] dark:text-[#8E99AD]" />
+      <span className="font-medium tracking-normal text-[#5F5F67] dark:text-[#B8C2D4]" style={{ fontVariantNumeric: 'tabular-nums' }}>
         {label}
       </span>
     </span>
@@ -487,7 +490,7 @@ function MultimodalAttachments({ parts }: { parts: Array<{ type: string; text?: 
         }
         if (part.type === 'audio_url' && part.audio_url) {
           return (
-            <div key={idx} className="rounded-lg border border-[#D8D2C5] bg-[#FBFAF6] p-3 dark:border-white/[0.1] dark:bg-[#1C1A16]">
+            <div key={idx} className="rounded-lg border border-[#D8D2C5] bg-[#FBFAF6] p-3 dark:border-white/[0.1] dark:bg-[#1A1E28]">
               <audio
                 controls
                 src={part.audio_url.url}

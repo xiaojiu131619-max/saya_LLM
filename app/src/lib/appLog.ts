@@ -3,7 +3,7 @@
  *
  * 收集并展示应用运行过程中的关键日志：
  * - API 请求/响应（发给 llama-server 的请求 body、返回的状态/错误）
- * - 多模态翻译（audio_url/video_url → input_audio/input_video）
+ * - 多模态适配（音频转码、原生视频或旧版 server 抽帧兼容）
  * - 错误信息（网络错误、解析失败等）
  * - 调试输出（开发阶段的临时日志）
  */

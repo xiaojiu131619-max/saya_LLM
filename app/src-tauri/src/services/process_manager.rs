@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,17 +11,303 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use anyhow::Result;
+#[cfg(windows)]
+#[allow(non_snake_case, non_upper_case_globals, dead_code)]
+mod job_guard {
+    use std::sync::Mutex;
+
+    type HANDLE = *mut std::ffi::c_void;
+
+    // HANDLE 是裸指针，需要包装才能在线程间安全传递
+    struct JobHandle(HANDLE);
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x00002000;
+    const JOB_OBJECT_LIMIT_TERMINATE: u32 = 0x00000004;
+    const JobObjectExtendedLimitInformation: u32 = 9;
+
+    #[repr(C)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        PerProcessUserTimeLimit: i64,
+        PerJobUserTimeLimit: i64,
+        LimitFlags: u32,
+        MinimumWorkingSetSize: usize,
+        MaximumWorkingSetSize: usize,
+        ActiveProcessLimit: u32,
+        Affinity: usize,
+        ChildProcessCount: u32,
+        Reserved: [u32; 2],
+    }
+
+    #[repr(C)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        IoInfo: [u64; 6],
+        ProcessMemoryLimit: usize,
+        JobMemoryLimit: usize,
+        PeakProcessMemoryUsed: usize,
+        PeakJobMemoryUsed: usize,
+    }
+
+    extern "system" {
+        fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
+        fn SetInformationJobObject(
+            hJob: HANDLE,
+            JobObjectInfoClass: u32,
+            lpJobObjectInfo: *const u8,
+            cbJobObjectInfoLength: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
+        fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> i32;
+        fn CloseHandle(hObject: HANDLE) -> i32;
+    }
+
+    static JOB_HANDLE: Mutex<Option<JobHandle>> = Mutex::new(None);
+
+    pub fn attach(process_handle: HANDLE) {
+        unsafe {
+            // 创建一个无名 Job Object
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                eprintln!("[server] Job Object 创建失败");
+                return;
+            }
+
+            // 设置 KILL_ON_JOB_CLOSE：父进程退出时 OS 自动终止子进程
+            let mut info = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            let ret = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const u8,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ret == 0 {
+                eprintln!("[server] SetInformationJobObject 失败");
+                CloseHandle(job);
+                return;
+            }
+
+            // 将子进程附加到 Job Object
+            let ret = AssignProcessToJobObject(job, process_handle);
+            if ret == 0 {
+                eprintln!("[server] AssignProcessToJobObject 失败");
+                CloseHandle(job);
+                return;
+            }
+
+            if let Ok(mut guard) = JOB_HANDLE.lock() {
+                *guard = Some(JobHandle(job));
+            }
+            eprintln!("[server] Job Object 已附加到子进程");
+        }
+    }
+
+    pub fn terminate() {
+        if let Ok(mut guard) = JOB_HANDLE.lock() {
+            if let Some(JobHandle(job)) = guard.take() {
+                unsafe {
+                    TerminateJobObject(job, 1);
+                    CloseHandle(job);
+                }
+            }
+        }
+    }
+
+    pub fn cleanup() {
+        if let Ok(mut guard) = JOB_HANDLE.lock() {
+            if let Some(JobHandle(handle)) = guard.take() {
+                unsafe {
+                    CloseHandle(handle);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
+use anyhow::{bail, Result};
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use sysinfo::System;
 
-use crate::models::server_config::ServerConfig;
 use crate::models::ping_result::PingResult;
+use crate::models::server_config::ServerConfig;
+use crate::services::gguf_parser::parse_gguf_header;
+use crate::services::model_scanner::mtp_draft_is_compatible;
 
 static CHILD_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 static SERVER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static SYSTEM_LOGS: Lazy<Mutex<Vec<SystemLogEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static LAST_SERVER_CONFIG: Lazy<Mutex<Option<ServerConfig>>> = Lazy::new(|| Mutex::new(None));
+static SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 系统日志条目：统一日志中枢的最小单元。
+/// 所有来源（llama-server 输出、服务生命周期事件、API 请求）都汇聚到这里，
+/// 带真实时间戳与分类，供前端「系统日志」页按时间轴展示。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemLogEntry {
+    /// Unix 毫秒时间戳。
+    pub timestamp: u64,
+    /// 单调递增序列号，用于增量轮询时避免同毫秒日志丢失。
+    pub seq: u64,
+    /// debug | info | warn | error
+    pub level: String,
+    /// llama | server | api | app
+    pub category: String,
+    pub message: String,
+}
+
+const MAX_SYSTEM_LOGS: usize = 5000;
+
+/// 日志序列号计数器，用于增量轮询时避免同毫秒日志丢失。
+static LOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+const KNOWN_LLAMA_SERVER_TOOLS: &[&str] = &[
+    "read_file",
+    "file_glob_search",
+    "grep_search",
+    "exec_shell_command",
+    "write_file",
+    "edit_file",
+    "apply_diff",
+    "get_datetime",
+];
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ServerToolSelection {
+    enabled: Vec<String>,
+    ignored: Vec<String>,
+}
+
+fn parse_available_server_tools(help: &str) -> Option<HashSet<String>> {
+    let normalized = help.to_ascii_lowercase();
+    let (_, tail) = normalized.split_once("available tools:")?;
+    let section = tail.chars().take(1024).collect::<String>();
+    Some(
+        KNOWN_LLAMA_SERVER_TOOLS
+            .iter()
+            .filter(|tool| section.contains(**tool))
+            .map(|tool| (*tool).to_string())
+            .collect(),
+    )
+}
+
+fn probe_available_server_tools(exe: &str) -> std::io::Result<Option<HashSet<String>>> {
+    let mut command = Command::new(exe);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let output = command.arg("--help").output()?;
+    let help = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_available_server_tools(&help))
+}
+
+fn select_server_tools(
+    configured: Option<&str>,
+    available: Option<&HashSet<String>>,
+) -> ServerToolSelection {
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ServerToolSelection::default();
+    };
+    let fallback = KNOWN_LLAMA_SERVER_TOOLS
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect::<HashSet<_>>();
+    let available = available.unwrap_or(&fallback);
+    let mut selection = ServerToolSelection::default();
+    let mut seen = HashSet::new();
+
+    for requested in configured
+        .split(',')
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+    {
+        let requested = requested.to_ascii_lowercase();
+        if requested == "all" {
+            for tool in KNOWN_LLAMA_SERVER_TOOLS {
+                if available.contains(*tool) && seen.insert((*tool).to_string()) {
+                    selection.enabled.push((*tool).to_string());
+                }
+            }
+            continue;
+        }
+        if !KNOWN_LLAMA_SERVER_TOOLS.contains(&requested.as_str())
+            || !available.contains(&requested)
+        {
+            if seen.insert(format!("ignored:{requested}")) {
+                selection.ignored.push(requested);
+            }
+            continue;
+        }
+        if seen.insert(requested.clone()) {
+            selection.enabled.push(requested);
+        }
+    }
+    selection
+}
+
+fn server_tools_are_protected(host: &str, api_key: Option<&str>) -> bool {
+    if api_key.is_some_and(|key| !key.trim().is_empty()) {
+        return true;
+    }
+    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
+
+fn append_server_tools(
+    cmd: &mut Command,
+    exe: &str,
+    configured: Option<&str>,
+    host: &str,
+    api_key: Option<&str>,
+) {
+    if configured.is_some_and(|tools| !tools.trim().is_empty())
+        && !server_tools_are_protected(host, api_key)
+    {
+        let message = "[server] 已阻止在非本机监听且未设置 API key 时公开 llama.cpp 原生工具；Agent 本地工具不受影响。";
+        eprintln!("{}", message);
+        add_log(message);
+        return;
+    }
+    let available = match probe_available_server_tools(exe) {
+        Ok(Some(tools)) => Some(tools),
+        Ok(None) => Some(HashSet::new()),
+        Err(error) => {
+            let message = format!(
+                "[server] 无法读取 llama-server 工具能力，使用兼容白名单：{}",
+                error
+            );
+            eprintln!("{}", message);
+            add_log(&message);
+            None
+        }
+    };
+    let selection = select_server_tools(configured, available.as_ref());
+    if !selection.ignored.is_empty() {
+        let message = format!(
+            "[server] 已忽略非原生或当前内核不支持的工具：{}",
+            selection.ignored.join(", ")
+        );
+        eprintln!("{}", message);
+        add_log(&message);
+    }
+    if !selection.enabled.is_empty() {
+        cmd.arg("--tools").arg(selection.enabled.join(","));
+    }
+}
 
 #[derive(Clone, Serialize)]
 pub struct ServerProgress {
@@ -56,9 +343,56 @@ fn build_redacted_command_line(exe: &str, cmd: &Command) -> String {
     s
 }
 
-fn resolve_exe_path(path: &str) -> String {
+fn is_allowed_exe_name(name: &str) -> bool {
+    matches!(name, "llama-server.exe" | "llama-bench.exe" | "llama-cli.exe" | "llama-quantize.exe" | "llama-fit-params.exe")
+}
+
+/// 把用户/配置提供的可执行文件路径解析为实际可用的路径。
+///
+/// 解析结果一定会被交给 `Command::new` 执行，所以这里是安全边界：
+/// 绝对路径必须同时通过「允许目录」和「白名单文件名」两道检查，
+/// 无法通过则返回空串，由调用方按“未找到”处理。
+pub(crate) fn resolve_exe_path(path: &str) -> String {
     let requested = Path::new(path);
     if requested.is_absolute() && requested.exists() {
+        // 只允许 resources 目录或 exe 同目录下的可执行文件。
+        // 必须先 canonicalize：Path::starts_with 是按组件比较的，不会解析 `..`，
+        // 否则 `<exe_dir>\resources\..\..\evil\llama-server.exe` 能骗过目录检查。
+        let canonical_requested = match requested.canonicalize() {
+            Ok(p) => p,
+            Err(error) => {
+                eprintln!("[server] 无法规范化可执行文件路径 {}: {}", path, error);
+                return String::new();
+            }
+        };
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()));
+        let allowed_dirs: Vec<PathBuf> = [
+            exe_dir.as_ref().map(|d| d.join("resources")),
+            exe_dir.as_ref().and_then(|d| d.parent().map(|g| g.join("resources"))),
+            exe_dir.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.canonicalize().ok())
+        .collect();
+        let is_allowed = allowed_dirs
+            .iter()
+            .any(|d| canonical_requested.starts_with(d));
+        if !is_allowed {
+            eprintln!("[server] 拒绝非允许路径的可执行文件: {}", path);
+            return String::new();
+        }
+        if !is_allowed_exe_name(
+            canonical_requested
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(""),
+        ) {
+            eprintln!("[server] 拒绝非白名单的可执行文件名: {}", path);
+            return String::new();
+        }
         return path.to_string();
     }
 
@@ -102,12 +436,122 @@ fn resolve_exe_path(path: &str) -> String {
 
     for c in &candidates {
         if c.exists() {
-            eprintln!("[server] resolved exe: {}", c.display());
-            return c.to_string_lossy().to_string();
+            if let Some(name) = c.file_name().and_then(|n| n.to_str()) {
+                if is_allowed_exe_name(name) {
+                    eprintln!("[server] resolved exe: {}", c.display());
+                    return c.to_string_lossy().to_string();
+                }
+                eprintln!("[server] 跳过非白名单文件: {}", c.display());
+            }
         }
     }
     eprintln!("[server] exe not found, tried: {:?}", candidates);
-    path.to_string()
+    String::new()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoRuntimeInfo {
+    pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
+    pub native_video_ready: bool,
+    pub ffmpeg_path: Option<String>,
+    pub ffprobe_path: Option<String>,
+}
+
+fn media_binary_file_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    }
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.as_os_str().is_empty() || dirs.iter().any(|existing| existing == &path) {
+        return;
+    }
+    dirs.push(path);
+}
+
+fn media_search_dirs(server_exe: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(parent) = server_exe.parent() {
+        push_unique_dir(&mut dirs, parent.to_path_buf());
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(app_dir) = current_exe.parent() {
+            push_unique_dir(&mut dirs, app_dir.to_path_buf());
+            push_unique_dir(&mut dirs, app_dir.join("_up_").join("resources"));
+            push_unique_dir(&mut dirs, app_dir.join("resources"));
+            if let Some(parent) = app_dir.parent() {
+                push_unique_dir(&mut dirs, parent.join("_up_").join("resources"));
+                push_unique_dir(&mut dirs, parent.join("resources"));
+            }
+        }
+    }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            push_unique_dir(&mut dirs, dir);
+        }
+    }
+    dirs
+}
+
+fn find_media_binary(server_exe: &Path, stem: &str) -> Option<PathBuf> {
+    let file_name = media_binary_file_name(stem);
+    media_search_dirs(server_exe)
+        .into_iter()
+        .map(|dir| dir.join(&file_name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn video_runtime_info_for_exe(server_exe: &Path) -> VideoRuntimeInfo {
+    let ffmpeg = find_media_binary(server_exe, "ffmpeg");
+    let ffprobe = find_media_binary(server_exe, "ffprobe");
+    VideoRuntimeInfo {
+        ffmpeg_available: ffmpeg.is_some(),
+        ffprobe_available: ffprobe.is_some(),
+        native_video_ready: ffmpeg.is_some() && ffprobe.is_some(),
+        ffmpeg_path: ffmpeg.map(|path| path.to_string_lossy().to_string()),
+        ffprobe_path: ffprobe.map(|path| path.to_string_lossy().to_string()),
+    }
+}
+
+fn configure_media_runtime_path(command: &mut Command, server_exe: &Path) -> VideoRuntimeInfo {
+    let info = video_runtime_info_for_exe(server_exe);
+    let mut prepended = Vec::new();
+    for path in [&info.ffmpeg_path, &info.ffprobe_path]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parent) = Path::new(path).parent() {
+            push_unique_dir(&mut prepended, parent.to_path_buf());
+        }
+    }
+
+    if !prepended.is_empty() {
+        if let Some(existing) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&existing) {
+                push_unique_dir(&mut prepended, dir);
+            }
+        }
+        if let Ok(path) = std::env::join_paths(prepended) {
+            command.env("PATH", path);
+        }
+    }
+    info
+}
+
+pub fn get_video_runtime_info() -> VideoRuntimeInfo {
+    let configured_exe = LAST_SERVER_CONFIG
+        .lock()
+        .ok()
+        .and_then(|config| config.as_ref().map(|value| value.executable_path.clone()))
+        .unwrap_or_else(|| "resources/llama-server.exe".to_string());
+    let resolved = resolve_exe_path(&configured_exe);
+    video_runtime_info_for_exe(Path::new(&resolved))
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -122,8 +566,9 @@ fn stop_stale_servers_for_exe(exe: &str) {
     let mut system = System::new_all();
     system.refresh_processes();
 
+    let process_name = media_binary_file_name("llama-server");
     let mut stopped = 0usize;
-    for process in system.processes_by_exact_name("llama-server.exe") {
+    for process in system.processes_by_exact_name(&process_name) {
         if let Some(process_exe) = process.exe() {
             if same_path(process_exe, exe_path) {
                 eprintln!(
@@ -184,7 +629,7 @@ fn parse_progress(line: &str) -> u32 {
     if line.contains("fitting params") {
         return 30;
     }
-    if line.contains("creatingavid") {
+    if line.contains("KV cache") {
         return 75;
     }
     if line.contains("loading model") || line.contains("load_model") {
@@ -230,6 +675,50 @@ fn health_check_host(config: &ServerConfig) -> String {
         "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
         host => host.to_string(),
     }
+}
+
+fn is_external_bind_host(host: &str) -> bool {
+    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if matches!(normalized, "0.0.0.0" | "::") {
+        return true;
+    }
+    if normalized.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    normalized
+        .parse::<IpAddr>()
+        .map(|address| !address.is_loopback() && !address.is_unspecified())
+        .unwrap_or(false)
+}
+
+fn discover_lan_ip() -> Option<IpAddr> {
+    for probe in ["1.1.1.1:80", "8.8.8.8:80"] {
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+            continue;
+        };
+        if socket.connect(probe).is_err() {
+            continue;
+        }
+        let Ok(address) = socket.local_addr().map(|address| address.ip()) else {
+            continue;
+        };
+        if !address.is_loopback() && !address.is_unspecified() {
+            return Some(address);
+        }
+    }
+    None
+}
+
+fn external_host_for_bind(host: &str, detected_lan_ip: Option<IpAddr>) -> Option<String> {
+    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if matches!(normalized, "0.0.0.0" | "::") {
+        return detected_lan_ip.map(|address| address.to_string());
+    }
+    is_external_bind_host(normalized).then(|| normalized.to_string())
+}
+
+pub fn lan_ip_address() -> Option<String> {
+    discover_lan_ip().map(|address| address.to_string())
 }
 
 fn port_is_listening(config: &ServerConfig) -> bool {
@@ -368,18 +857,21 @@ fn detect_error(line: &str) -> Option<ServerError> {
             title: "端口被占用".into(),
             details: line.into(),
             suggestions: vec![
-                "关闭占用 8080 端口的程序".into(),
+                "关闭占用该端口的程序".into(),
                 "在设置中修改默认端口".into(),
             ],
         });
     }
 
-    // Llama load failure
+    // Llama load failure（排除可恢复的警告）
     if line_lower.contains("failed")
         && (line_lower.contains("llama") || line_lower.contains("model"))
+        && !line_lower.contains("memory slot")
+        && !line_lower.contains("mlock")
+        && !line_lower.contains("retrying")
     {
         return Some(ServerError {
-            error_type: "cuda".into(),
+            error_type: "load".into(),
             title: "加载失败".into(),
             details: line.into(),
             suggestions: vec![
@@ -408,7 +900,7 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     );
 
     {
-        let mut guard = CHILD_PROCESS.lock().unwrap();
+        let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
         if let Some(mut old_child) = guard.take() {
             eprintln!("[server] stopping existing server before restart...");
             let _ = old_child.kill();
@@ -437,6 +929,7 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     let host = bind_host(config);
 
     let mut cmd = Command::new(&exe);
+    configure_media_runtime_path(&mut cmd, Path::new(&exe));
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.arg("-m")
@@ -451,6 +944,10 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
         .arg(config.n_ctx.to_string())
         .arg("-b")
         .arg(config.batch_size.to_string());
+
+    if let Some(alias) = config.model_alias.as_deref().filter(|a| !a.is_empty()) {
+        cmd.arg("--alias").arg(alias);
+    }
 
     if config.ubatch_size > 0 {
         cmd.arg("-ub").arg(config.ubatch_size.to_string());
@@ -478,17 +975,22 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     if config.mlock {
         cmd.arg("--mlock");
     }
+    if config.no_warmup {
+        cmd.arg("--no-warmup");
+    }
     if config.no_cuda {
         cmd.arg("--device").arg("none");
     }
     if config.ncmoe > 0 {
         cmd.arg("-ncmoe").arg(config.ncmoe.to_string());
     }
-    if let Some(ref tools) = config.tools {
-        if !tools.is_empty() {
-            cmd.arg("--tools").arg(tools);
-        }
-    }
+    append_server_tools(
+        &mut cmd,
+        &exe,
+        config.tools.as_deref(),
+        &host,
+        config.api_key.as_deref(),
+    );
     if let Some(api_key) = config
         .api_key
         .as_ref()
@@ -526,7 +1028,10 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     }
 
     // Print the exact command line so the user can copy-paste and test manually.
-    eprintln!("[server] spawn: {}", build_redacted_command_line(&exe, &cmd));
+    eprintln!(
+        "[server] spawn: {}",
+        build_redacted_command_line(&exe, &cmd)
+    );
 
     let mut child = cmd.spawn()?;
     eprintln!("[server] child pid = {:?}", child.id());
@@ -535,8 +1040,16 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     let stderr = child.stderr.take();
 
     {
-        let mut guard = CHILD_PROCESS.lock().unwrap();
+        let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
         *guard = Some(child);
+    }
+
+    // 附加 Job Object：确保父进程崩溃时子进程被 OS 回收
+    #[cfg(windows)]
+    {
+        if let Some(guard) = CHILD_PROCESS.lock().ok().as_mut().and_then(|g| g.as_mut()) {
+            job_guard::attach(guard.as_raw_handle());
+        }
     }
 
     let (tx, rx) = mpsc::channel::<String>();
@@ -741,7 +1254,11 @@ fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
 }
 
 pub fn ping_server() -> PingResult {
-    let config = match LAST_SERVER_CONFIG.lock().ok().and_then(|guard| guard.clone()) {
+    let config = match LAST_SERVER_CONFIG
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
         Some(config) => config,
         None => return PingResult::unavailable("尚未启动过 llama-server。"),
     };
@@ -754,8 +1271,11 @@ pub fn ping_server() -> PingResult {
         return PingResult::unavailable(format!("端口 {} 未监听。", config.port));
     }
 
+    let bind_host = bind_host(&config);
     let host = health_check_host(&config);
     let base_url = format!("http://{}:{}", host, config.port);
+    let external_base_url = external_host_for_bind(&bind_host, discover_lan_ip())
+        .map(|host| format!("http://{}:{}", host, config.port));
     let health_url = format!("{}/health", base_url);
     let models_url = format!("{}/v1/models", base_url);
     let api_key = config.api_key.as_deref();
@@ -771,7 +1291,11 @@ pub fn ping_server() -> PingResult {
     let health_resp = server_request(&client, &health_url, api_key).send();
     let latency_ms = Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
     let (health_ok, status_code, health_error) = match health_resp {
-        Ok(resp) => (resp.status().is_success(), Some(resp.status().as_u16()), None),
+        Ok(resp) => (
+            resp.status().is_success(),
+            Some(resp.status().as_u16()),
+            None,
+        ),
         Err(error) => (false, None, Some(format!("/health 请求失败：{}", error))),
     };
 
@@ -809,8 +1333,44 @@ pub fn ping_server() -> PingResult {
         health_ok,
         models_ok,
         models,
+        base_url: Some(base_url.clone()),
+        external_base_url,
+        bind_host: Some(bind_host),
+        api_key_required: api_key.is_some_and(|key| !key.trim().is_empty()),
+        protocol_standards: detect_protocol_standards(&client, &base_url, api_key, models_ok),
         error: health_error.or(models_error),
     }
+}
+
+/// 探测 llama-server 实际提供哪些兼容协议，而不是硬编码。
+/// OpenAI 兼容以 /v1/models 可用为准；Anthropic 兼容以 /v1/messages 端点存在为准
+/// （404 说明内核没有这个端点，其余响应——包括 400/401——都说明端点存在）。
+fn detect_protocol_standards(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    openai_ok: bool,
+) -> Vec<String> {
+    let mut standards = Vec::new();
+    if openai_ok {
+        standards.push("OpenAI".to_string());
+    }
+    let messages_url = format!("{}/v1/messages", base_url);
+    let mut probe = client
+        .post(&messages_url)
+        .header("Content-Type", "application/json")
+        .body("{}");
+    if let Some(key) = api_key {
+        probe = probe.bearer_auth(key);
+    }
+    let anthropic_present = match probe.send() {
+        Ok(resp) => resp.status() != reqwest::StatusCode::NOT_FOUND,
+        Err(_) => false,
+    };
+    if anthropic_present {
+        standards.push("Anthropic".to_string());
+    }
+    standards
 }
 
 fn compatible_cpu_config(config: &ServerConfig) -> ServerConfig {
@@ -834,7 +1394,96 @@ fn should_retry_with_cpu(error: &ServerError, config: &ServerConfig) -> bool {
         && matches!(error.error_type.as_str(), "warmup" | "cuda" | "oom")
 }
 
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn any_file_contains(candidates: &[PathBuf], markers: &[&[u8]]) -> bool {
+    candidates.iter().any(|candidate| {
+        std::fs::read(candidate)
+            .ok()
+            .is_some_and(|bytes| markers.iter().any(|marker| bytes_contain(&bytes, marker)))
+    })
+}
+
+fn runtime_supports_mtp_architecture(exe: &str, architecture: &str) -> bool {
+    let markers: &[&[u8]] = match architecture {
+        "cohere2moe" => &[b"COHERE2MOE MTP", b"models\\cohere2moe.cpp"],
+        "gemma4-assistant" => &[
+            b"Gemma4Assistant requires",
+            b"Gemma 4 assistant requires",
+            b"gemma4-assistant",
+        ],
+        "qwen35" => &[b"QWEN35 MTP", b"models\\qwen35.cpp"],
+        "qwen35moe" => &[b"QWEN35MOE MTP", b"models\\qwen35moe.cpp"],
+        "step35" => &[b"STEP35 MTP", b"models\\step35.cpp"],
+        _ => return false,
+    };
+    let exe_path = Path::new(exe);
+    let architecture_candidates = [
+        exe_path.with_file_name("llama.dll"),
+        exe_path.with_file_name("libllama.so"),
+        exe_path.with_file_name("libllama.dylib"),
+        exe_path.to_path_buf(),
+    ];
+    let driver_candidates = [
+        exe_path.with_file_name("llama-common.dll"),
+        exe_path.with_file_name("libllama-common.so"),
+        exe_path.with_file_name("libllama-common.dylib"),
+        exe_path.to_path_buf(),
+    ];
+    any_file_contains(&architecture_candidates, markers)
+        && any_file_contains(&driver_candidates, &[b"draft-mtp"])
+}
+
+fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {
+    let draft_path = config
+        .mtp_draft_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let spec_mtp = config
+        .spec_type
+        .as_deref()
+        .map(|types| types.split(',').any(|value| value.trim() == "draft-mtp"))
+        .unwrap_or(false);
+    if draft_path.is_none() && !spec_mtp {
+        return Ok(());
+    }
+
+    let main = parse_gguf_header(Path::new(&config.model_path))
+        .map_err(|error| anyhow::anyhow!("无法读取主模型的 MTP 元数据: {}", error))?;
+    let draft = draft_path
+        .map(|draft_path| {
+            parse_gguf_header(Path::new(draft_path))
+                .map_err(|error| anyhow::anyhow!("无法读取独立 MTP head: {}", error))
+        })
+        .transpose()?;
+    if let Some(draft) = draft.as_ref() {
+        if !mtp_draft_is_compatible(&main, draft) {
+            bail!("独立 MTP head 与主模型不兼容，已阻止启动；请检查架构、层数、词表与 tokenizer。")
+        }
+    } else if !main.has_embedded_mtp {
+        bail!("已启用 MTP，但主 GGUF 没有当前 llama.cpp 可执行的内置 MTP tensor，也没有选择独立 head。")
+    }
+    let runtime_architecture = draft
+        .as_ref()
+        .map(|metadata| metadata.architecture.as_str())
+        .unwrap_or(main.architecture.as_str());
+    if !runtime_supports_mtp_architecture(exe, runtime_architecture) {
+        bail!(
+            "当前 llama.cpp 内核不支持 {} 架构的 MTP graph；请先更新内核，或关闭 MTP 后加载。",
+            runtime_architecture
+        )
+    }
+    Ok(())
+}
+
 fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
+    validate_mtp_config(exe, config)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
     let selected_device = if config.no_cuda {
@@ -866,6 +1515,10 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     );
 
     let mut cmd = Command::new(exe);
+    let video_runtime = configure_media_runtime_path(&mut cmd, Path::new(exe));
+    if config.mmproj_path.is_some() && !video_runtime.native_video_ready {
+        add_log("[multimodal] 未找到 ffmpeg/ffprobe；视频将使用图像帧兼容模式。");
+    }
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.arg("-m")
@@ -880,6 +1533,10 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         .arg(config.n_ctx.to_string())
         .arg("-b")
         .arg(config.batch_size.to_string());
+
+    if let Some(alias) = config.model_alias.as_deref().filter(|a| !a.is_empty()) {
+        cmd.arg("--alias").arg(alias);
+    }
 
     if config.ubatch_size > 0 {
         cmd.arg("-ub").arg(config.ubatch_size.to_string());
@@ -907,6 +1564,9 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     if config.mlock {
         cmd.arg("--mlock");
     }
+    if config.no_warmup {
+        cmd.arg("--no-warmup");
+    }
     if config.no_cuda {
         cmd.arg("--device").arg("none");
         cmd.arg("--no-op-offload");
@@ -919,11 +1579,13 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     if config.ncmoe > 0 {
         cmd.arg("-ncmoe").arg(config.ncmoe.to_string());
     }
-    if let Some(ref tools) = config.tools {
-        if !tools.is_empty() {
-            cmd.arg("--tools").arg(tools);
-        }
-    }
+    append_server_tools(
+        &mut cmd,
+        exe,
+        config.tools.as_deref(),
+        &host,
+        config.api_key.as_deref(),
+    );
     if let Some(api_key) = config
         .api_key
         .as_ref()
@@ -968,24 +1630,27 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         cmd.arg("--mmproj").arg(mmproj_path);
         cmd.arg("--mmproj-offload");
     }
-    if let Some(mtp_draft_path) = config
+    let mtp_draft_path = config
         .mtp_draft_path
         .as_ref()
         .map(|path| path.trim())
-        .filter(|path| !path.is_empty())
-    {
+        .filter(|path| !path.is_empty());
+    if let Some(mtp_draft_path) = mtp_draft_path {
         cmd.arg("-md").arg(mtp_draft_path);
-        let spec_type = config
-            .spec_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("draft-mtp");
-        cmd.arg("--spec-type").arg(spec_type);
         if !config.no_cuda {
             cmd.arg("--spec-draft-device").arg(&selected_device);
             cmd.arg("-ngld").arg(effective_ngl.to_string());
         }
+    }
+    let spec_type = config
+        .spec_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| mtp_draft_path.map(|_| "draft-mtp"));
+    if let Some(spec_type) = spec_type {
+        // Embedded MTP deliberately reaches this branch without `-md`.
+        cmd.arg("--spec-type").arg(spec_type);
     }
 
     let command_line = build_redacted_command_line(exe, &cmd);
@@ -999,8 +1664,16 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     let stderr = child.stderr.take();
 
     {
-        let mut guard = CHILD_PROCESS.lock().unwrap();
+        let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
         *guard = Some(child);
+    }
+
+    // 附加 Job Object：确保父进程崩溃时子进程被 OS 回收
+    #[cfg(windows)]
+    {
+        if let Some(guard) = CHILD_PROCESS.lock().ok().as_mut().and_then(|g| g.as_mut()) {
+            job_guard::attach(guard.as_raw_handle());
+        }
     }
 
     let (tx, rx) = mpsc::channel::<String>();
@@ -1029,9 +1702,15 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     Ok(rx)
 }
 
+/// 监视启动阶段的日志与健康检查。
+///
+/// `rx` 必须按引用传入：如果按值接收，本函数返回 Ready 时 `rx` 就被析构，
+/// 两个 reader 线程的 send 随即失败退出，子进程管道被关闭——
+/// 结果是模型就绪后日志停更、运行期错误检测失效，非 Windows 平台上
+/// 子进程还会因写入已关闭管道收到 SIGPIPE 而被杀死。
 fn monitor_server(
     config: &ServerConfig,
-    rx: Receiver<String>,
+    rx: &Receiver<String>,
     on_progress: &Arc<dyn Fn(ServerProgress) + Send + Sync>,
     on_ready: &Arc<dyn Fn() + Send + Sync>,
 ) -> MonitorResult {
@@ -1156,23 +1835,36 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
     let exe = resolve_exe_path(&config.executable_path);
     eprintln!("[server] resolved exe path: {}", exe);
     if !Path::new(&exe).exists() {
-        return Err(anyhow::anyhow!(
+        let message = format!(
             "找不到 llama-server.exe（搜索路径：{}）。请在设置中指定正确路径，或将它放入 resources 目录。",
             exe
-        ));
+        );
+        log_server_event("error", &message);
+        return Err(anyhow::anyhow!("{}", message));
     }
 
     stop_stale_servers_for_exe(&exe);
-    clear_logs();
+    log_session_separator(&format!(
+        "开始加载模型：{}（端口 {}，监听 {}）",
+        config
+            .model_alias
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| config.model_path.clone()),
+        config.port,
+        bind_host(config)
+    ));
     if let Ok(mut last_config) = LAST_SERVER_CONFIG.lock() {
         *last_config = Some(config.clone());
     }
 
     if !wait_for_port_release(config, Duration::from_secs(2)) {
-        return Err(anyhow::anyhow!(
+        let message = format!(
             "端口 {} 已被其它服务占用，请先关闭旧的 llama-server 或在设置中换一个端口。",
             config.port
-        ));
+        );
+        log_server_event("error", &message);
+        return Err(anyhow::anyhow!("{}", message));
     }
 
     let initial_config = config.clone();
@@ -1180,6 +1872,7 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
     let on_ready: Arc<dyn Fn() + Send + Sync> = Arc::new(on_ready);
     let on_error: Arc<dyn Fn(ServerError) + Send + Sync> = Arc::new(on_error);
     let fired = Arc::new(AtomicBool::new(false));
+    let generation = SERVER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     std::thread::spawn(move || {
         let mut current_config = initial_config;
@@ -1218,10 +1911,90 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
                 }
             };
 
-            match monitor_server(&current_config, rx, &on_progress, &on_ready) {
+            match monitor_server(&current_config, &rx, &on_progress, &on_ready) {
                 MonitorResult::Ready => {
                     fired.store(true, Ordering::SeqCst);
-                    return;
+                    eprintln!("[server] ready, entering post-ready watch loop (gen={})", generation);
+                    log_server_event(
+                        "info",
+                        &format!("服务就绪，监听端口 {}。", current_config.port),
+                    );
+                    // 就绪后必须继续抽干 stdout/stderr：
+                    // 1) 日志页需要持续更新；
+                    // 2) 推理期的 CUDA OOM 等错误只能从这里发现；
+                    // 3) 不读管道会让子进程写满缓冲后卡死（非 Windows 上则是 SIGPIPE 被杀）。
+                    let mut pipes_closed = false;
+                    let mut last_liveness_check = Instant::now();
+                    loop {
+                        if pipes_closed {
+                            std::thread::sleep(Duration::from_millis(200));
+                        } else {
+                            match rx.recv_timeout(Duration::from_millis(200)) {
+                                Ok(line) => {
+                                    add_log(&line);
+                                    if let Some(err) = detect_error(&line) {
+                                        eprintln!(
+                                            "[server] runtime error detected (gen={}): {}",
+                                            generation, err.error_type
+                                        );
+                                        log_server_event(
+                                            "error",
+                                            &format!("运行期错误（{}）：{}", err.error_type, err.details),
+                                        );
+                                        on_error(err);
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    // 管道已关闭，改为纯轮询存活状态，避免空转。
+                                    pipes_closed = true;
+                                }
+                            }
+                        }
+
+                        if last_liveness_check.elapsed() < Duration::from_secs(3) {
+                            continue;
+                        }
+                        last_liveness_check = Instant::now();
+
+                        if SERVER_GENERATION.load(Ordering::SeqCst) != generation {
+                            eprintln!("[server] watcher gen={} superseded, exiting", generation);
+                            return;
+                        }
+                        let crashed = {
+                            let mut guard = match CHILD_PROCESS.lock() {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                            match guard.as_mut() {
+                                None => false,
+                                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+                            }
+                        };
+                        if !crashed {
+                            let still_held = CHILD_PROCESS
+                                .lock()
+                                .map(|g| g.is_some())
+                                .unwrap_or(false);
+                            if !still_held {
+                                return;
+                            }
+                            continue;
+                        }
+                        eprintln!("[server] llama-server process exited unexpectedly (gen={})", generation);
+                        add_log("[server] llama-server 进程意外退出。");
+                        on_error(ServerError {
+                            error_type: "crashed".into(),
+                            title: "服务异常退出".into(),
+                            details: "llama-server 在运行过程中意外退出。".into(),
+                            suggestions: vec![
+                                "检查日志页面查看最后的错误信息".into(),
+                                "降低 GPU 卸载层数或上下文长度后重试".into(),
+                                "确认显存和内存是否充足".into(),
+                            ],
+                        });
+                        return;
+                    }
                 }
                 MonitorResult::Error(err)
                     if should_retry_with_cpu(&err, &current_config) && !did_cpu_retry =>
@@ -1240,18 +2013,39 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
                     continue;
                 }
                 MonitorResult::Error(err) => {
+                    log_server_event("error", &format!("启动失败（{}）：{}", err.error_type, err.details));
                     if !fired.swap(true, Ordering::SeqCst) {
                         on_error(err);
                     }
                     return;
                 }
                 MonitorResult::Exited => {
+                    // 静默退出也可能是 CUDA 问题，尝试 CPU 回退
+                    if current_config.retry_cpu_fallback && !current_config.no_cuda && !did_cpu_retry {
+                        eprintln!("[server] server exited silently, retrying in CPU compatibility mode");
+                        add_log("[server] 服务静默退出，自动切换到 CPU 兼容模式重试");
+                        stop_server().ok();
+                        current_config = compatible_cpu_config(&current_config);
+                        did_cpu_retry = true;
+                        continue;
+                    }
+                    log_server_event("error", "llama-server 在监听端口前异常退出。");
                     if !fired.swap(true, Ordering::SeqCst) {
                         on_error(exited_error());
                     }
                     return;
                 }
                 MonitorResult::TimedOut => {
+                    // 启动超时也可能是 CUDA 问题，尝试 CPU 回退
+                    if current_config.retry_cpu_fallback && !current_config.no_cuda && !did_cpu_retry {
+                        eprintln!("[server] server timed out, retrying in CPU compatibility mode");
+                        add_log("[server] 启动超时，自动切换到 CPU 兼容模式重试");
+                        stop_server().ok();
+                        current_config = compatible_cpu_config(&current_config);
+                        did_cpu_retry = true;
+                        continue;
+                    }
+                    log_server_event("error", "llama-server 启动超过 10 分钟仍未就绪。");
                     if !fired.swap(true, Ordering::SeqCst) {
                         on_error(ServerError {
                             error_type: "timeout".into(),
@@ -1273,19 +2067,38 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
 }
 
 pub fn stop_server() -> Result<()> {
-    let mut guard = CHILD_PROCESS.lock().unwrap();
+    #[cfg(windows)]
+    job_guard::terminate();
+
+    let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
+        log_server_event("info", "已停止 llama-server。");
     }
     Ok(())
 }
 
 pub fn is_server_running() -> bool {
-    let mut guard = CHILD_PROCESS.lock().unwrap();
-    guard
-        .as_mut()
-        .is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    // 不能用 expect：本函数被前端的状态轮询（get_server_status）反复调用，
+    // 一旦锁中毒就会变成每次轮询都 panic，把一次局部故障放大成整个应用不可用。
+    match CHILD_PROCESS.lock() {
+        Ok(mut guard) => guard
+            .as_mut()
+            .is_some_and(|c| matches!(c.try_wait(), Ok(None))),
+        Err(error) => {
+            eprintln!("[server] CHILD_PROCESS Mutex 已中毒，按未运行处理: {}", error);
+            false
+        }
+    }
+}
+
+pub fn active_server_api_key() -> Option<String> {
+    LAST_SERVER_CONFIG
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|c| c.api_key.clone()))
+        .filter(|key| !key.trim().is_empty())
 }
 
 pub fn add_log(line: &str) {
@@ -1295,6 +2108,56 @@ pub fn add_log(line: &str) {
             logs.drain(0..1000);
         }
     }
+    // llama-server 的原始输出同步进统一日志中枢，按内容分级。
+    push_system_log(classify_llama_level(line), "llama", line);
+}
+
+/// 按内容给 llama-server 输出行分级，纯启发式，只影响展示颜色与筛选。
+fn classify_llama_level(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("fatal")
+        || lower.contains("abort")
+        || lower.contains("exception")
+    {
+        "error"
+    } else if lower.contains("warn") {
+        "warn"
+    } else {
+        "info"
+    }
+}
+
+/// 写入统一日志中枢。level 取 debug|info|warn|error，category 取 llama|server|api|app。
+pub fn push_system_log(level: &str, category: &str, message: &str) {
+    let timestamp = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let seq = LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut logs) = SYSTEM_LOGS.lock() {
+        logs.push(SystemLogEntry {
+            timestamp,
+            seq,
+            level: level.to_string(),
+            category: category.to_string(),
+            message: message.to_string(),
+        });
+        // 逐条淘汰最旧记录，避免整段丢失历史。
+        if logs.len() > MAX_SYSTEM_LOGS {
+            let overflow = logs.len() - MAX_SYSTEM_LOGS;
+            logs.drain(0..overflow);
+        }
+    }
+}
+
+/// 记录一条服务生命周期 / 应用事件（server 分类）。
+pub fn log_server_event(level: &str, message: &str) {
+    push_system_log(level, "server", message);
+}
+
+/// 在日志中枢插入一条会话分隔标记，取代「加载即清空」的做法，
+/// 这样上一次加载/运行的日志仍然可以回溯。
+pub fn log_session_separator(label: &str) {
+    push_system_log("info", "server", &format!("────── {} ──────", label));
 }
 
 pub fn get_logs() -> Vec<String> {
@@ -1304,8 +2167,202 @@ pub fn get_logs() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 读取统一日志中枢。since_ms 大于 0 时只返回该时间戳及之后的增量，供前端轮询。
+/// 注意：使用 >= 而非 > 以避免同毫秒日志丢失，前端应根据 seq 字段去重。
+pub fn get_system_logs(since_ms: u64) -> Vec<SystemLogEntry> {
+    SYSTEM_LOGS
+        .lock()
+        .map(|logs| {
+            if since_ms == 0 {
+                logs.clone()
+            } else {
+                logs.iter()
+                    .filter(|entry| entry.timestamp >= since_ms)
+                    .cloned()
+                    .collect()
+            }
+        })
+        .unwrap_or_default()
+}
+
 pub fn clear_logs() {
     if let Ok(mut logs) = SERVER_LOGS.lock() {
         logs.clear();
+    }
+}
+
+/// 清空统一日志中枢（仅用户手动触发）。
+pub fn clear_system_logs() {
+    if let Ok(mut logs) = SYSTEM_LOGS.lock() {
+        logs.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn redacted_command_hides_api_key() {
+        let exe = "llama-server.exe";
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--api-key").arg("sk-my-secret-key-12345");
+        let redacted = super::build_redacted_command_line(exe, &cmd);
+        assert!(!redacted.contains("sk-my-secret-key-12345"), "API key 不应出现在脱敏命令中");
+        assert!(redacted.contains("***"), "脱敏命令应包含 ***");
+    }
+
+    #[test]
+    fn redacted_command_preserves_normal_args() {
+        let exe = "llama-server.exe";
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("-m").arg("/models/test.gguf").arg("-c").arg("4096");
+        let redacted = super::build_redacted_command_line(exe, &cmd);
+        assert!(redacted.contains("test.gguf"));
+        assert!(redacted.contains("4096"));
+    }
+
+    #[test]
+    fn allowed_exe_names_pass_validation() {
+        assert!(super::is_allowed_exe_name("llama-server.exe"));
+        assert!(super::is_allowed_exe_name("llama-bench.exe"));
+        assert!(!super::is_allowed_exe_name("cmd.exe"));
+        assert!(!super::is_allowed_exe_name(""));
+    }
+
+    #[test]
+    fn detect_error_identifies_cuda_failure() {
+        let log = "CUDA error: an illegal memory access was encountered";
+        let error = super::detect_error(log);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap().error_type, "cuda");
+    }
+
+    #[test]
+    fn detect_error_returns_none_for_success() {
+        let log = "llama_model_load: loaded model successfully";
+        assert!(super::detect_error(log).is_none());
+    }
+
+    #[test]
+    fn server_tools_exclude_agent_only_tools() {
+        let help = "available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, apply_diff, get_datetime";
+        let available = parse_available_server_tools(help).expect("parse tools");
+        let selection = select_server_tools(
+            Some("get_datetime,read_file,update_plan,read_skill"),
+            Some(&available),
+        );
+
+        assert_eq!(selection.enabled, vec!["get_datetime", "read_file"]);
+        assert_eq!(selection.ignored, vec!["update_plan", "read_skill"]);
+    }
+
+    #[test]
+    fn server_tools_follow_the_current_runtime_help() {
+        let help = "available tools: read_file, edit_file, get_datetime";
+        let available = parse_available_server_tools(help).expect("parse tools");
+        let selection =
+            select_server_tools(Some("read_file,apply_diff,get_datetime"), Some(&available));
+
+        assert_eq!(selection.enabled, vec!["read_file", "get_datetime"]);
+        assert_eq!(selection.ignored, vec!["apply_diff"]);
+    }
+
+    #[test]
+    fn server_tools_require_loopback_or_an_api_key() {
+        assert!(server_tools_are_protected("127.0.0.1", None));
+        assert!(server_tools_are_protected("::1", None));
+        assert!(server_tools_are_protected("0.0.0.0", Some("secret")));
+        assert!(!server_tools_are_protected("0.0.0.0", None));
+        assert!(!server_tools_are_protected("192.168.1.20", Some("  ")));
+    }
+
+    #[test]
+    fn external_bind_host_excludes_loopback_addresses() {
+        assert!(is_external_bind_host("0.0.0.0"));
+        assert!(is_external_bind_host("::"));
+        assert!(is_external_bind_host("192.168.1.20"));
+        assert!(!is_external_bind_host("127.0.0.1"));
+        assert!(!is_external_bind_host("::1"));
+        assert!(!is_external_bind_host("localhost"));
+    }
+
+    #[test]
+    fn wildcard_bind_uses_detected_lan_address() {
+        let lan_ip = "192.168.50.8".parse::<IpAddr>().expect("valid IP");
+        assert_eq!(
+            external_host_for_bind("0.0.0.0", Some(lan_ip)),
+            Some("192.168.50.8".to_string())
+        );
+        assert_eq!(external_host_for_bind("0.0.0.0", None), None);
+        assert_eq!(external_host_for_bind("127.0.0.1", Some(lan_ip)), None);
+    }
+
+    #[test]
+    fn mtp_runtime_requires_matching_graph_and_driver() {
+        let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-mtp-runtime-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).expect("create synthetic runtime");
+        let exe = dir.join("llama-server.exe");
+        std::fs::write(&exe, b"server").expect("write server");
+        std::fs::write(dir.join("llama.dll"), b"QWEN35 MTP requires")
+            .expect("write architecture library");
+
+        assert!(!runtime_supports_mtp_architecture(
+            exe.to_str().expect("runtime path"),
+            "qwen35"
+        ));
+
+        std::fs::write(dir.join("llama-common.dll"), b"draft-mtp")
+            .expect("write speculative driver");
+        assert!(runtime_supports_mtp_architecture(
+            exe.to_str().expect("runtime path"),
+            "qwen35"
+        ));
+        assert!(!runtime_supports_mtp_architecture(
+            exe.to_str().expect("runtime path"),
+            "step35"
+        ));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn native_video_runtime_requires_ffmpeg_and_ffprobe() {
+        let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-video-runtime-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).expect("create synthetic video runtime");
+        let exe = dir.join(media_binary_file_name("llama-server"));
+        std::fs::write(&exe, b"server").expect("write server");
+
+        let missing = video_runtime_info_for_exe(&exe);
+        assert!(!missing.native_video_ready);
+
+        std::fs::write(dir.join(media_binary_file_name("ffmpeg")), b"ffmpeg")
+            .expect("write ffmpeg");
+        let partial = video_runtime_info_for_exe(&exe);
+        assert!(partial.ffmpeg_available);
+        assert!(!partial.ffprobe_available);
+        assert!(!partial.native_video_ready);
+
+        std::fs::write(dir.join(media_binary_file_name("ffprobe")), b"ffprobe")
+            .expect("write ffprobe");
+        let ready = video_runtime_info_for_exe(&exe);
+        assert!(ready.ffmpeg_available);
+        assert!(ready.ffprobe_available);
+        assert!(ready.native_video_ready);
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }

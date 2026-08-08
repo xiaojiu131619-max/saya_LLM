@@ -18,6 +18,10 @@ pub async fn start_benchmark(app: AppHandle, config: BenchmarkConfig) -> Result<
     let max_tokens = config.max_tokens;
     let iterations = config.iterations;
 
+    if iterations == 0 {
+        return Err("迭代次数必须大于 0".to_string());
+    }
+
     tokio::spawn(async move {
         let mut results = Vec::new();
         let total_start = std::time::Instant::now();
@@ -579,11 +583,11 @@ fn emit_result(app: &AppHandle, records: &[TuneRecord], sort_mode: &SortMode, _i
     let best = match sort_mode {
         SortMode::TsPriority => candidates
             .iter()
-            .max_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap())
+            .max_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap(),
         SortMode::CtxPriority => candidates
             .iter()
-            .max_by(|a, b| a.ctx.cmp(&b.ctx).then(a.ts.partial_cmp(&b.ts).unwrap()))
+            .max_by(|a, b| a.ctx.cmp(&b.ctx).then(a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)))
             .unwrap(),
     };
 

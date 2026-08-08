@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { memo, useMemo, useState } from 'react';
 import { Brain, Check, ChevronDown, Copy } from 'lucide-react';
 import hljs from 'highlight.js/lib/core';
 import bash from 'highlight.js/lib/languages/bash';
@@ -40,8 +40,22 @@ interface MarkdownRendererProps {
   content: string;
 }
 
+function SegmentContentRenderer({ content }: { content: string }) {
+  const parsedSegments = useMemo(() => parseContent(content), [content]);
+  return (
+    <>
+      {parsedSegments.map((seg, i) => {
+        if (seg.type === 'code') {
+          return <MemoCodeBlock key={`code-${i}`} language={seg.lang} code={seg.content} />;
+        }
+        return <InlineMarkdown key={`text-${i}`} content={seg.content} />;
+      })}
+    </>
+  );
+}
+
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
-  const reasoningSegments = parseReasoningContent(content);
+  const reasoningSegments = useMemo(() => parseReasoningContent(content), [content]);
 
   return (
     <div className="markdown-body min-w-0 max-w-full text-[16px] leading-8 text-primary-custom">
@@ -49,13 +63,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
         if (segment.type === 'thought') {
           return <ThoughtBlock key={`thought-${segmentIndex}`} content={segment.content} />;
         }
-
-        return parseContent(segment.content).map((seg, i) => {
-          if (seg.type === 'code') {
-            return <CodeBlock key={`${segmentIndex}-code-${i}`} language={seg.lang} code={seg.content} />;
-          }
-          return <InlineMarkdown key={`${segmentIndex}-text-${i}`} content={seg.content} />;
-        });
+        return <SegmentContentRenderer key={`seg-${segmentIndex}`} content={segment.content} />;
       })}
     </div>
   );
@@ -144,15 +152,15 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
   };
 
   return (
-    <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[#E3DED2] bg-[#F3EFE7] dark:border-white/[0.08] dark:bg-[#312C25]">
-      <div className="flex items-center justify-between border-b border-[#E3DED2] bg-[#ECE6DB] px-4 py-2 dark:border-white/[0.08] dark:bg-[#383229]">
-        <span className="mono-font text-[12px] uppercase text-[#8C8576] dark:text-[#A9A095]">{lang}</span>
+    <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[#E3DED2] bg-[#F3EFE7] dark:border-white/[0.08] dark:bg-[#2A3040]">
+      <div className="flex items-center justify-between border-b border-[#E3DED2] bg-[#ECE6DB] px-4 py-2 dark:border-white/[0.08] dark:bg-[#303848]">
+        <span className="mono-font text-[12px] uppercase text-[#8C8576] dark:text-[#8E99AD]">{lang}</span>
         <button
           onClick={handleCopy}
           className={`flex items-center gap-1.5 text-[12px] transition-colors ${
             copied
-              ? 'text-[#2C8B58] dark:text-[#98D19C]'
-              : 'text-[#756E61] hover:text-[#403C32] dark:text-[#A9A095] dark:hover:text-[#F3EBDD]'
+              ? 'text-[#2C8B58] dark:text-[#7EC8A0]'
+              : 'text-[#756E61] hover:text-[#403C32] dark:text-[#8E99AD] dark:hover:text-[#E2E8F2]'
           }`}
         >
           {copied ? (
@@ -165,18 +173,20 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
       <pre className="grid max-w-full grid-cols-[auto_minmax(0,1fr)] gap-3 overflow-x-hidden p-4 text-[14px] leading-7">
         <span
           aria-hidden="true"
-          className="mono-font select-none whitespace-pre text-right text-[#A69E8D] dark:text-[#82786B]"
+          className="mono-font select-none whitespace-pre text-right text-[#A69E8D] dark:text-[#6B7688]"
         >
           {codeLines.map((_, index) => index + 1).join('\n')}
         </span>
         <code
-          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[#403C32] dark:text-[#EFE8DC]"
+          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[#403C32] dark:text-[#DDE4F0]"
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       </pre>
     </div>
   );
 }
+
+const MemoCodeBlock = memo(CodeBlock);
 
 export function ThoughtBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -195,12 +205,12 @@ export function ThoughtBlock({ content }: { content: string }) {
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-[#756E61] transition-colors hover:bg-[#EEE9DE] dark:text-[#D8D0C3] dark:hover:bg-white/[0.08]"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-[#756E61] transition-colors hover:bg-[#EEE9DE] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
       >
         <span className="flex min-w-0 items-center gap-2">
           <Brain className="h-3.5 w-3.5 flex-shrink-0 text-[#D7663E]" />
           <span className="truncate">思考内容</span>
-          <span className="flex-shrink-0 rounded-full border border-[#DED9CC] bg-[#FBFAF6] px-1.5 py-px text-[11px] text-[#8C8576] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#A9A095]">
+          <span className="flex-shrink-0 rounded-full border border-[#DED9CC] bg-[#FBFAF6] px-1.5 py-px text-[11px] text-[#8C8576] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]">
             {lineCount} 行
           </span>
         </span>
@@ -215,14 +225,14 @@ export function ThoughtBlock({ content }: { content: string }) {
           className="relative overflow-hidden"
           style={{ height: 'calc(1.75rem * 2 + 0.75rem)' }}
         >
-          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#BDB4A7]">
+          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#A8B2C4]">
             {trimmed}
           </div>
         </div>
       )}
 
       {expanded && (
-        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#BDB4A7]">
+        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#A8B2C4]">
           {trimmed}
         </div>
       )}
@@ -347,7 +357,7 @@ function renderInline(text: string): React.ReactNode {
       parts.push(<em key={match.index} className="italic">{match[4]}</em>);
     } else if (match[5]) {
       parts.push(
-        <code key={match.index} className="mono-font rounded-md bg-[#F8EDE7] px-1.5 py-0.5 text-[14px] text-[#D7663E] break-words [overflow-wrap:anywhere] dark:bg-[#3A241C] dark:text-[#F0B18D]">
+        <code key={match.index} className="mono-font rounded-md bg-[#F8EDE7] px-1.5 py-0.5 text-[14px] text-[#D7663E] break-words [overflow-wrap:anywhere] dark:bg-[#1C2836] dark:text-[#6EA8DC]">
           {match[5]}
         </code>
       );

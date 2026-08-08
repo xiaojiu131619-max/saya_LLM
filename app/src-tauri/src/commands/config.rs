@@ -12,13 +12,22 @@ fn external_api_secret_entry() -> Result<keyring::Entry, String> {
         .map_err(|e| e.to_string())
 }
 
+fn api_key_fallback_path() -> PathBuf {
+    get_app_data_root().join("api_key")
+}
+
 fn save_external_api_secret(api_key: &str) -> Result<(), String> {
+    let trimmed = api_key.trim();
     external_api_secret_entry()?
-        .set_password(api_key.trim())
-        .map_err(|e| e.to_string())
+        .set_password(trimmed)
+        .map_err(|e| e.to_string())?;
+    // 新凭据只保存在系统凭据管理器中；旧版明文回退文件在写入成功后清理。
+    std::fs::remove_file(api_key_fallback_path()).ok();
+    Ok(())
 }
 
 fn delete_external_api_secret() -> Result<(), String> {
+    std::fs::remove_file(api_key_fallback_path()).ok();
     let entry = external_api_secret_entry()?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
@@ -26,12 +35,37 @@ fn delete_external_api_secret() -> Result<(), String> {
     }
 }
 
-fn load_external_api_secret() -> Option<String> {
-    external_api_secret_entry()
-        .and_then(|entry| entry.get_password().map_err(|e| e.to_string()))
+fn load_external_api_secret() -> Result<Option<String>, String> {
+    let entry = external_api_secret_entry()?;
+    match entry.get_password() {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if !trimmed.is_empty() {
+                std::fs::remove_file(api_key_fallback_path()).ok();
+                return Ok(Some(trimmed));
+            }
+        }
+        Err(keyring::Error::NoEntry) => {}
+        Err(error) => {
+            return Err(format!(
+                "无法读取 Windows 凭据管理器中的 API Key：{}",
+                error
+            ));
+        }
+    }
+    let fallback = std::fs::read_to_string(api_key_fallback_path())
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = fallback.as_deref() {
+        if external_api_secret_entry()
+            .and_then(|entry| entry.set_password(value).map_err(|e| e.to_string()))
+            .is_ok()
+        {
+            std::fs::remove_file(api_key_fallback_path()).ok();
+        }
+    }
+    Ok(fallback)
 }
 
 fn get_app_data_root() -> PathBuf {
@@ -68,6 +102,10 @@ fn load_config_from_disk() -> (AppConfig, Option<String>) {
                 });
                 return (config, pending_key);
             }
+            // 配置文件存在但解析失败，备份损坏文件并记录警告
+            eprintln!("[config] 配置文件解析失败，已使用默认配置。原文件已备份。");
+            let backup_path = path.with_extension("json.corrupted");
+            let _ = std::fs::rename(&path, &backup_path);
         }
     }
     (AppConfig::default(), None)
@@ -109,12 +147,12 @@ pub fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), 
 
 #[tauri::command]
 pub fn get_external_api_key_for_session() -> Result<Option<String>, String> {
-    Ok(load_external_api_secret())
+    load_external_api_secret()
 }
 
 #[tauri::command]
 pub fn get_external_api_key_status() -> Result<bool, String> {
-    Ok(load_external_api_secret().is_some())
+    load_external_api_secret().map(|value| value.is_some())
 }
 
 #[tauri::command]
@@ -129,10 +167,6 @@ pub fn create_external_api_key(api_key: String) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_external_api_key() -> Result<(), String> {
     delete_external_api_secret()
-}
-
-pub fn external_api_key_for_runtime() -> Option<String> {
-    load_external_api_secret()
 }
 
 #[tauri::command]

@@ -50,9 +50,15 @@ pub fn run() {
             commands::server::start_server,
             commands::server::stop_server,
             commands::server::get_server_status,
+            commands::server::get_server_api_key,
+            commands::server::get_lan_ip_address,
+            commands::server::get_video_runtime_info,
             commands::server::ping_local_api,
             commands::server::get_server_logs,
             commands::server::clear_server_logs,
+            commands::server::get_system_logs,
+            commands::server::clear_system_logs,
+            commands::server::log_app_event,
             commands::system::get_system_status,
             commands::system::check_engine_info,
             commands::system::read_file_content,
@@ -75,9 +81,6 @@ pub fn run() {
             commands::config::set_close_to_tray,
             commands::benchmark::start_benchmark,
             commands::benchmark::start_auto_tune,
-            commands::comfy::comfy_get_json,
-            commands::comfy::comfy_post_json,
-            commands::comfy::comfy_upload_image,
             commands::updater::check_for_update,
             commands::updater::list_recent_releases,
             commands::updater::download_and_update,
@@ -156,11 +159,8 @@ pub fn run() {
                     if window.label() == "main" {
                         let app = window.app_handle();
                         let state = app.state::<models::app_state::AppState>();
-                        let close_to_tray = state
-                            .config
-                            .lock()
-                            .map(|c| c.close_to_tray)
-                            .unwrap_or(true);
+                        let close_to_tray =
+                            state.config.lock().map(|c| c.close_to_tray).unwrap_or(true);
                         if close_to_tray {
                             api.prevent_close();
                             let _ = window.hide();

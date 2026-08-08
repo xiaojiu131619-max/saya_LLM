@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Download, ExternalLink, FolderOpen, Link2, Loader2, Search, X } from 'lucide-react';
+﻿import { useEffect, useMemo, useState } from 'react';
+import { Download, ExternalLink, FolderOpen, Link2, Loader2, X } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import {
   addDesktopModelDir,
@@ -181,19 +181,20 @@ export default function ModelDownloadPanel() {
   };
 
   return (
-    <div className="pointer-events-none fixed bottom-5 right-5 z-40 flex max-w-[calc(100vw-40px)] justify-end">
+    <>
       {expanded ? (
-        <div
-          key="download-panel"
-          className="anim-panel-in pointer-events-auto w-[min(420px,calc(100vw-40px))] rounded-md border border-[#DCD8CF] bg-[#FBFAF6]/95 p-3 shadow-[0_18px_48px_rgba(61,53,42,0.18)] backdrop-blur-md dark:border-white/[0.1] dark:bg-[#1E1B17]/95"
-        >
+        <div className="pointer-events-none fixed bottom-5 right-5 z-40 flex max-w-[calc(100vw-40px)] justify-end">
+          <div
+            key="download-panel"
+            className="anim-panel-in pointer-events-auto w-[min(420px,calc(100vw-40px))] rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] p-3 shadow-[0_12px_32px_rgba(61,53,42,0.16)] dark:border-white/[0.1] dark:bg-[#1C2130]"
+          >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-base font-semibold text-[#2F2C26] dark:text-[#F3EBDD]">
+                <div className="flex items-center gap-2 text-base font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">
                   <Download className="h-4 w-4 text-[#D06646]" />
                   下载模型
                 </div>
-                <div className="mt-1 truncate text-xs text-[#7D766B] dark:text-[#A9A095]">
+                <div className="mt-1 truncate text-xs text-[#7D766B] dark:text-[#8E99AD]">
                   HF 镜像站 · GGUF
                 </div>
               </div>
@@ -211,7 +212,7 @@ export default function ModelDownloadPanel() {
               <button
                 type="button"
                 onClick={handleOpenMirror}
-                className="flex h-9 items-center justify-center gap-2 rounded-md border border-[#DCD8CF] bg-[#F8F6F1] px-3 text-sm font-medium text-[#2F2C26] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#F3EBDD]"
+                className="flex h-9 items-center justify-center gap-2 rounded-md border border-[#DCD8CF] bg-[#F8F6F1] px-3 text-sm font-medium text-[#2F2C26] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#E2E8F2]"
               >
                 <ExternalLink className="h-4 w-4 text-[#D06646]" />
                 打开 HF 镜像站
@@ -219,43 +220,43 @@ export default function ModelDownloadPanel() {
 
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(120px,0.65fr)]">
                 <label className="min-w-0">
-                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#A9A095]">仓库</span>
+                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">仓库</span>
                   <input
                     value={repoId}
                     onChange={(event) => setRepoId(event.target.value)}
                     disabled={Boolean(directUrl.trim()) || isDownloading}
-                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#F3EBDD]"
+                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#E2E8F2]"
                     placeholder="组织/模型仓库"
                   />
                 </label>
                 <label className="min-w-0">
-                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#A9A095]">文件</span>
+                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">文件</span>
                   <input
                     value={fileName}
                     onChange={(event) => setFileName(event.target.value)}
                     disabled={isDownloading}
-                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#F3EBDD]"
+                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#E2E8F2]"
                     placeholder="*.gguf"
                   />
                 </label>
               </div>
 
               <label className="min-w-0">
-                <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#A9A095]">直链</span>
+                <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">直链</span>
                 <div className="flex min-w-0 items-center gap-2 rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 dark:border-white/[0.08] dark:bg-black/20">
                   <Link2 className="h-4 w-4 flex-shrink-0 text-[#8B8275]" />
                   <input
                     value={directUrl}
                     onChange={(event) => setDirectUrl(event.target.value)}
                     disabled={isDownloading}
-                    className="h-9 min-w-0 flex-1 bg-transparent text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] disabled:opacity-55 dark:text-[#F3EBDD]"
+                    className="h-9 min-w-0 flex-1 bg-transparent text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] disabled:opacity-55 dark:text-[#E2E8F2]"
                     placeholder="https://hf-mirror.com/.../resolve/main/model.gguf"
                   />
                 </div>
               </label>
 
               <div className="flex min-w-0 items-center gap-2">
-                <div className="min-w-0 flex-1 rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#A9A095]">
+                <div className="min-w-0 flex-1 rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
                   <div className="truncate">{effectiveTargetDir || '未选择模型目录'}</div>
                 </div>
                 <button
@@ -270,7 +271,7 @@ export default function ModelDownloadPanel() {
               </div>
 
               {(progress || message) && (
-                <div className="rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#A9A095]">
+                <div className="rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate">{message ?? progress?.message}</span>
                     <span className="mono-font flex-shrink-0">
@@ -298,18 +299,20 @@ export default function ModelDownloadPanel() {
                 {isDownloading ? '下载中' : '开始下载'}
               </button>
             </div>
+          </div>
         </div>
       ) : (
         <button
           key="download-button"
           type="button"
           onClick={() => setExpanded(true)}
-          className="anim-fade-rise hover-rise pointer-events-auto flex h-12 items-center gap-2 rounded-md border border-[#DCD8CF] bg-[#FBFAF6]/95 px-4 text-sm font-semibold text-[#2F2C26] shadow-[0_12px_32px_rgba(61,53,42,0.18)] backdrop-blur-md hover:border-[#D06646]/40 dark:border-white/[0.1] dark:bg-[#1E1B17]/95 dark:text-[#F3EBDD]"
+          className="flex h-9 w-9 flex-shrink-0 items-center justify-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] text-sm font-semibold text-[#2F2C26] transition-colors hover:border-[#D06646]/40 hover:bg-[#F1EEE7] dark:border-white/[0.1] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.09] xl:w-auto xl:px-3"
+          title="下载模型"
         >
-          <Search className="h-4 w-4 text-[#D06646]" />
-          下载模型
+          <Download className="h-4 w-4 text-[#D06646]" />
+          <span className="hidden xl:inline">下载模型</span>
         </button>
       )}
-    </div>
+    </>
   );
 }

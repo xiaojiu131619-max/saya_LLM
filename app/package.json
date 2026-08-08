@@ -11,9 +11,11 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
-    "portable:zip": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/package-portable.ps1"
+    "portable:zip": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/package-portable.ps1",
+    "eval:v4.2": "node ./scripts/eval-v4.2.mjs"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.5",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@types/highlight.js": "^9.12.4",

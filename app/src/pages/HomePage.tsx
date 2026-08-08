@@ -104,7 +104,7 @@ export default function HomePage() {
   };
 
   const gridClass = state.gridColumns === 2
-    ? 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 justify-items-center gap-4'
+    ? 'model-grid--multi justify-items-stretch'
     : 'grid-cols-1 w-full justify-items-stretch gap-2';
 
   return (
@@ -127,8 +127,8 @@ export default function HomePage() {
         </div>
       </header>
 
-      <div className="flex-shrink-0 border-b border-[#E7E2D8] bg-[#F6F3ED] px-4 py-3 sm:px-6">
-        <div className="mx-auto grid max-w-[1180px] grid-cols-1 gap-2 min-[560px]:grid-cols-[minmax(220px,1fr)_auto_auto] min-[560px]:items-center">
+      <div className="model-toolbar flex-shrink-0 border-b border-[#E7E2D8] bg-[#F6F3ED] px-4 py-3 sm:px-6">
+        <div className="model-toolbar-grid mx-auto max-w-[1180px]">
           <div className="flex h-9 min-w-0 items-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] px-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
             <Search className="h-4 w-4 flex-shrink-0 text-[#8B8275]" />
             <input
@@ -139,7 +139,7 @@ export default function HomePage() {
               className="min-w-0 flex-1 bg-transparent text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90]"
             />
           </div>
-          <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-2 min-[560px]:contents">
+          <div className="model-toolbar-controls">
             <button
               onClick={() => void handleRefreshModels()}
               disabled={isScanning}
@@ -149,16 +149,17 @@ export default function HomePage() {
               <span className="hidden min-[390px]:inline">刷新列表</span>
               <span className="min-[390px]:hidden">刷新</span>
             </button>
-            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
+            <div className="model-toolbar-view-controls">
               <SortDropdown />
               <ColumnToggle />
+              <ModelDownloadPanel />
             </div>
           </div>
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
-        <div className="mx-auto max-w-[1180px]">
+        <div className="model-list-container mx-auto max-w-[1180px]">
           <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[#7D766B]">
             <span className="rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-1">
               {state.models.length} 个模型
@@ -271,7 +272,6 @@ export default function HomePage() {
           </div>
         </div>
       </div>
-      <ModelDownloadPanel />
     </div>
   );
 }
