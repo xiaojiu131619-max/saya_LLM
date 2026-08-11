@@ -312,14 +312,14 @@ function throwIfAborted(signal: AbortSignal) {
 }
 
 const colorByFamily: Record<string, { soft: string; solid: string }> = {
-  Qwen: { soft: 'rgba(103, 61, 184, 0.35)', solid: '#673DB8' },
-  Llama: { soft: 'rgba(42, 128, 97, 0.35)', solid: '#2A8061' },
-  Mistral: { soft: 'rgba(255, 154, 0, 0.35)', solid: '#FF9A00' },
-  Yi: { soft: 'rgba(0, 150, 255, 0.35)', solid: '#0096FF' },
-  Gemma: { soft: 'rgba(255, 99, 71, 0.35)', solid: '#FF6347' },
-  DeepSeek: { soft: 'rgba(55, 60, 70, 0.35)', solid: '#373C46' },
-  Phi: { soft: 'rgba(100, 120, 160, 0.35)', solid: '#6478A0' },
-  Local: { soft: 'rgba(90, 108, 255, 0.28)', solid: '#5A6CFF' },
+  Qwen: { soft: 'rgba(103, 61, 184, 0.35)', solid: 'var(--accent)' },
+  Llama: { soft: 'rgba(42, 128, 97, 0.35)', solid: 'var(--state-success)' },
+  Mistral: { soft: 'rgba(255, 154, 0, 0.35)', solid: 'var(--state-warning)' },
+  Yi: { soft: 'rgba(0, 150, 255, 0.35)', solid: 'var(--accent)' },
+  Gemma: { soft: 'rgba(255, 99, 71, 0.35)', solid: 'var(--state-danger)' },
+  DeepSeek: { soft: 'rgba(55, 60, 70, 0.35)', solid: 'var(--accent)' },
+  Phi: { soft: 'rgba(100, 120, 160, 0.35)', solid: 'var(--accent)' },
+  Local: { soft: 'rgba(90, 108, 255, 0.28)', solid: 'var(--accent)' },
 };
 
 export function isDesktopRuntime() {
@@ -795,6 +795,25 @@ export async function readDesktopMedia(path: string) {
 export async function getDesktopVideoRuntimeInfo() {
   if (!isDesktopRuntime()) return null;
   return invoke<DesktopVideoRuntimeInfo>('get_video_runtime_info');
+}
+
+/**
+ * 读取 Windows 系统的 accent color 与亮/暗主题偏好。
+ * 非 Tauri 运行时返回 null，前端可走 matchMedia fallback。
+ */
+export interface DesktopSystemAppearance {
+  accent_color: string;
+  apps_use_light_theme: boolean;
+  supports_mica: boolean;
+}
+
+export async function getDesktopSystemAppearance(): Promise<DesktopSystemAppearance | null> {
+  if (!isDesktopRuntime()) return null;
+  try {
+    return await invoke<DesktopSystemAppearance>('get_system_appearance');
+  } catch {
+    return null;
+  }
 }
 
 export function listenDesktopEvent<T>(event: string, callback: (payload: T) => void) {

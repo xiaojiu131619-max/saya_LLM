@@ -108,11 +108,11 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
   };
 
   const statusClass = {
-    loaded: 'bg-[#34D399]',
-    loading: 'bg-[#FBBF24]',
-    error: 'bg-[#F87171]',
-    standby: 'bg-[#BDB8AD]',
-    downloading: 'bg-[#D06646]',
+    loaded: 'bg-[var(--status-loaded)]',
+    loading: 'bg-[var(--status-loading)]',
+    error: 'bg-[var(--state-danger)]',
+    standby: 'bg-[var(--status-standby)]',
+    downloading: 'bg-[var(--accent)]',
   }[model.status];
   const statusLabel = {
     loaded: '已加载',
@@ -138,7 +138,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
           className="flex min-w-0 flex-1 items-center gap-3 text-left"
           aria-label={`打开 ${model.name} 的加载参数`}
         >
-          <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#EEEAE2]">
+          <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)]">
             <span
               className="absolute inset-0 rounded-full opacity-20"
               style={{ background: model.themeColorSolid }}
@@ -147,13 +147,13 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               {themeGroup.icon}
             </span>
             <span
-              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#FAF9F5] ${statusClass}`}
+              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] ${statusClass}`}
               title={statusLabel}
             />
           </span>
 
           <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.name}</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</span>
             <CompactPill>{model.params}</CompactPill>
             <CompactPill className="hidden sm:inline-flex">{model.quant}</CompactPill>
             <CompactPill className="hidden md:inline-flex">
@@ -164,7 +164,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             </span>
             {recentUsedAt && (
               <span
-                className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 text-[11px] leading-6 text-[#B76540] sm:inline-flex dark:border-[#E8C9BD]/30 dark:bg-[#1C2836]/80 dark:text-[#6EA8DC]"
+                className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] sm:inline-flex dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
                 title={recentTitle}
               >
                 <History className="h-3 w-3" />
@@ -182,7 +182,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             <button
               onClick={(event) => void handleQuickLaunch(event)}
               disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
               title={formatLaunchMemoryTitle(launchMemory.config)}
             >
               {quickStarting ? (
@@ -195,20 +195,20 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
           {model.status === 'loaded' && (
             <button
               onClick={handleQuickChat}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
               title="开始对话"
             >
-              <Play className="ml-0.5 h-3.5 w-3.5 text-[#D06646]" />
+              <Play className="ml-0.5 h-3.5 w-3.5 text-[var(--accent)]" />
             </button>
           )}
           {model.filePath && (
             <button
               onClick={handleReveal}
               disabled={!isDesktopRuntime()}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
               title="在资源管理器中显示"
             >
-              <FolderSearch className="h-3.5 w-3.5 text-[#7D766B]" />
+              <FolderSearch className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
             </button>
           )}
         </div>
@@ -242,10 +242,10 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         className="block w-full text-left"
         aria-label={`打开 ${model.name} 的加载参数`}
       >
-      <div className={`border-b border-[#E5E1D8] ${isSingleColumn ? 'px-3 py-3' : 'p-4'}`}>
+      <div className={`border-b border-[var(--border)] ${isSingleColumn ? 'px-3 py-3' : 'p-4'}`}>
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
-            <div className={`relative flex flex-shrink-0 items-center justify-center rounded-full bg-[#EEEAE2] ${
+            <div className={`relative flex flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] ${
               isSingleColumn ? 'h-10 w-10' : 'h-11 w-11'
             }`}>
               <div
@@ -257,23 +257,23 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               </span>
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-[15px] font-semibold leading-snug text-[#2F2C26] [overflow-wrap:anywhere] dark:text-[#E2E8F2]">{model.name}</h3>
-              <p className={`mt-1 text-xs leading-relaxed text-[#7D766B] ${isSingleColumn ? 'line-clamp-1' : 'line-clamp-2'}`}>
+              <h3 className="text-[15px] font-semibold leading-snug text-[var(--text-primary)] [overflow-wrap:anywhere] dark:text-[var(--text-primary)]">{model.name}</h3>
+              <p className={`mt-1 text-xs leading-relaxed text-[var(--text-secondary)] ${isSingleColumn ? 'line-clamp-1' : 'line-clamp-2'}`}>
                 {model.description}
               </p>
             </div>
           </div>
           <div className="flex flex-shrink-0 flex-col items-end gap-1">
             <div
-              className="flex items-center gap-1.5 rounded-full border border-[#E2DED5] bg-[#F8F6F1]/80 px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.06]"
+              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)]/80 px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.06]"
               title={statusLabel}
             >
               <span className={`h-1.5 w-1.5 rounded-full ${statusClass}`} />
-              <span className="text-[10px] font-medium text-[#7D766B]">{statusLabel}</span>
+              <span className="text-[10px] font-medium text-[var(--text-secondary)]">{statusLabel}</span>
             </div>
             {recentUsedAt && (
               <div
-                className="flex items-center gap-1 rounded-full border border-[#E8C9BD] bg-[#FFF2EA]/80 px-2 py-1 text-[10px] font-medium text-[#B76540] dark:border-[#E8C9BD]/30 dark:bg-[#1C2836]/80 dark:text-[#6EA8DC]"
+                className="flex items-center gap-1 rounded-full border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 py-1 text-[10px] font-medium text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
                 title={recentTitle}
               >
                 <History className="h-3 w-3" />
@@ -295,27 +295,27 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         <div className={`flex flex-wrap items-center gap-2 ${isSingleColumn ? 'mb-3' : 'mb-3'}`}>
           <span className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium ${
             model.modelType === 'moe'
-              ? 'border-[#D9D3FF] bg-[#F2F0FF] text-[#6C5DD3]'
-              : 'border-[#CFEADA] bg-[#EEF8F2] text-[#2C8B58]'
+              ? 'border-[var(--accent-subtle)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+              : 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)]'
           }`}>
             {model.modelType === 'moe' ? <><Layers className="h-3 w-3" />MoE</> : <><Box className="h-3 w-3" />稠密</>}
           </span>
           {isSingleColumn && (
-            <span className="rounded-md border border-[#E2DED5] bg-[#F8F6F1] px-2 py-1 text-[11px] text-[#7D766B]">
+            <span className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
               {model.params}
             </span>
           )}
           {isSingleColumn && (
-            <span className="rounded-md border border-[#E2DED5] bg-[#F8F6F1] px-2 py-1 text-[11px] text-[#7D766B]">
+            <span className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
               {model.fileSize}
             </span>
           )}
           {!isSingleColumn && (
-            <span className="rounded-md border border-[#E2DED5] bg-[#F8F6F1] px-2 py-1 text-[11px] text-[#7D766B]">
+            <span className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
               {model.releaseDate}
             </span>
           )}
-          <span className="rounded-md border border-[#E2DED5] bg-[#F8F6F1] px-2 py-1 text-[11px] text-[#7D766B]">
+          <span className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
             {model.avgTokensPerSec ? `${model.avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'}
           </span>
         </div>
@@ -327,8 +327,8 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
       </div>
       </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-[#E5E1D8] px-4 py-3">
-          <button type="button" onClick={handleClick} className="flex h-9 items-center rounded-md px-2 text-xs font-semibold text-[#D06646] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]">
+        <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3">
+          <button type="button" onClick={handleClick} className="flex h-9 items-center rounded-md px-2 text-xs font-semibold text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]">
             查看参数
           </button>
           <div className="flex flex-shrink-0 items-center gap-1">
@@ -336,7 +336,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               <button
                 onClick={(event) => void handleQuickLaunch(event)}
                 disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#EACB71] bg-[#FFF7D7] text-[#B77800] transition-colors hover:bg-[#FFECA8] disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
                 title={formatLaunchMemoryTitle(launchMemory.config)}
               >
                 {quickStarting ? (
@@ -349,20 +349,20 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             {model.status === 'loaded' && (
               <button
                 onClick={handleQuickChat}
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#DCC6B9] bg-[#F8EDE7] transition-colors hover:bg-[#F2DED4]"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
                 title="开始对话"
               >
-                <Play className="ml-0.5 h-3.5 w-3.5 text-[#D06646]" />
+                <Play className="ml-0.5 h-3.5 w-3.5 text-[var(--accent)]" />
               </button>
             )}
             {model.filePath && (
               <button
                 onClick={handleReveal}
                 disabled={!isDesktopRuntime()}
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-[#E2DED5] bg-[#F8F6F1] transition-colors hover:bg-[#EEEAE2] disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
                 title="在资源管理器中显示"
               >
-                <FolderSearch className="h-3.5 w-3.5 text-[#7D766B]" />
+                <FolderSearch className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
               </button>
             )}
           </div>
@@ -373,16 +373,16 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
 
 function ModelMeta({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-[#E5E1D8] bg-[#F8F6F1] px-2.5 py-2">
-      <div className="text-[10px] text-[#8D867A]">{label}</div>
-      <div className="mono-font mt-0.5 truncate text-xs font-medium text-[#2F2C26]">{value}</div>
+    <div className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2">
+      <div className="text-[10px] text-[var(--text-tertiary)]">{label}</div>
+      <div className="mono-font mt-0.5 truncate text-xs font-medium text-[var(--text-primary)]">{value}</div>
     </div>
   );
 }
 
 function CompactPill({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <span className={`h-6 flex-shrink-0 items-center rounded-md border border-[#E2DED5] bg-[#F8F6F1] px-2 text-[11px] leading-6 text-[#7D766B] ${className}`}>
+    <span className={`h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
       {children}
     </span>
   );
@@ -401,12 +401,12 @@ interface CapabilityDef {
 }
 
 const CAPABILITY_DEFS: CapabilityDef[] = [
-  { key: 'vision',    label: '视觉', icon: Eye,      active: 'bg-[#E7F1F8]', activeText: 'text-[#2E6E9E]', activeBorder: 'border-[#BFD7E8]' },
-  { key: 'audio',     label: '音频', icon: Mic,      active: 'bg-[#F4ECFA]', activeText: 'text-[#7A48B5]', activeBorder: 'border-[#DCC9F0]' },
-  { key: 'video',     label: '视频', icon: Film,     active: 'bg-[#FCEFE6]', activeText: 'text-[#B76540]', activeBorder: 'border-[#E8C9BD]' },
-  { key: 'thinking',  label: '思考', icon: Brain,    active: 'bg-[#F2EEFB]', activeText: 'text-[#6C5DD3]', activeBorder: 'border-[#D9D3FF]' },
-  { key: 'tools',     label: '工具', icon: Wrench,   active: 'bg-[#EEF8F2]', activeText: 'text-[#2C8B58]', activeBorder: 'border-[#CFEADA]' },
-  { key: 'mtp',       label: 'MTP',  icon: Sparkles, active: 'bg-[#EEF6FF]', activeText: 'text-[#2F6FB0]', activeBorder: 'border-[#C7DDF4]' },
+  { key: 'vision',    label: '视觉', icon: Eye,      active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },
+  { key: 'audio',     label: '音频', icon: Mic,      active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },
+  { key: 'video',     label: '视频', icon: Film,     active: 'bg-[var(--state-warning-bg)]', activeText: 'text-[var(--state-warning)]', activeBorder: 'border-[var(--state-danger-border)]' },
+  { key: 'thinking',  label: '思考', icon: Brain,    active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--accent-subtle)]' },
+  { key: 'tools',     label: '工具', icon: Wrench,   active: 'bg-[var(--state-success-bg)]', activeText: 'text-[var(--state-success)]', activeBorder: 'border-[var(--state-success-border)]' },
+  { key: 'mtp',       label: 'MTP',  icon: Sparkles, active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },
 ];
 
 function modelCapabilityStates(model: ModelInfo): Record<CapabilityKey, CapabilityState> {
@@ -437,7 +437,7 @@ function CapabilityBadges({ model, dense = false, onlyActive = false }: { model:
   // 单列/onlyActive 模式下没有命中的能力时，直接不渲染（避免空占位文字挤压排版）。
   if (onlyActive && visibleDefs.length === 0) {
     return dense ? null : (
-      <span className="text-[11px] text-[#8D867A] dark:text-[#6B7688]">无能力徽章</span>
+      <span className="text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">无能力徽章</span>
     );
   }
 
@@ -458,8 +458,8 @@ function CapabilityBadges({ model, dense = false, onlyActive = false }: { model:
               state === 'on'
                 ? `${def.activeBorder} ${def.active} ${def.activeText} font-semibold dark:bg-white/[0.06]`
                 : state === 'partial'
-                  ? 'border-dashed border-[#DDBFAE] bg-[#FAF3EC] text-[#9B664C] dark:border-[#3A5570] dark:bg-[#1E2A3A] dark:text-[#6EA8DC]'
-                : 'border-[#E5E1D8] bg-[#F4F1EA] text-[#B8B0A0] opacity-55 dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#5C6474] dark:opacity-50'
+                  ? 'border-dashed border-[var(--state-danger-border)] bg-[var(--surface)] text-[var(--state-danger)] dark:border-[var(--state-danger-border)] dark:bg-[var(--state-danger-bg)] dark:text-[var(--accent)]'
+                : 'border-[var(--border)] bg-[var(--surface-muted)] text-[var(--text-tertiary)] opacity-55 dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[var(--text-secondary)] dark:opacity-50'
             }`}
           >
             <Icon className={iconSize} />

@@ -152,15 +152,15 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
   };
 
   return (
-    <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[#E3DED2] bg-[#F3EFE7] dark:border-white/[0.08] dark:bg-[#2A3040]">
-      <div className="flex items-center justify-between border-b border-[#E3DED2] bg-[#ECE6DB] px-4 py-2 dark:border-white/[0.08] dark:bg-[#303848]">
-        <span className="mono-font text-[12px] uppercase text-[#8C8576] dark:text-[#8E99AD]">{lang}</span>
+    <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-[var(--surface)]">
+      <div className="flex items-center justify-between border-b border-[var(--border)] bg-[#ECE6DB] px-4 py-2 dark:border-white/[0.08] dark:bg-[var(--surface-hover)]">
+        <span className="mono-font text-[12px] uppercase text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{lang}</span>
         <button
           onClick={handleCopy}
           className={`flex items-center gap-1.5 text-[12px] transition-colors ${
             copied
-              ? 'text-[#2C8B58] dark:text-[#7EC8A0]'
-              : 'text-[#756E61] hover:text-[#403C32] dark:text-[#8E99AD] dark:hover:text-[#E2E8F2]'
+              ? 'text-[var(--state-success)] dark:text-[var(--state-success)]'
+              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] dark:text-[var(--text-secondary)] dark:hover:text-[var(--text-primary)]'
           }`}
         >
           {copied ? (
@@ -173,12 +173,12 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
       <pre className="grid max-w-full grid-cols-[auto_minmax(0,1fr)] gap-3 overflow-x-hidden p-4 text-[14px] leading-7">
         <span
           aria-hidden="true"
-          className="mono-font select-none whitespace-pre text-right text-[#A69E8D] dark:text-[#6B7688]"
+          className="mono-font select-none whitespace-pre text-right text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]"
         >
           {codeLines.map((_, index) => index + 1).join('\n')}
         </span>
         <code
-          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[#403C32] dark:text-[#DDE4F0]"
+          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[var(--text-primary)] dark:text-[var(--border)]"
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       </pre>
@@ -198,19 +198,19 @@ export function ThoughtBlock({ content }: { content: string }) {
 
   return (
     <div
-      className="my-3 max-w-full overflow-hidden rounded-md border border-[#DED9CC] bg-[#F7F4EC] dark:border-white/[0.08] dark:bg-white/[0.05]"
+      className="my-3 max-w-full overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05]"
       style={{ overflowAnchor: 'none' }}
     >
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-[#756E61] transition-colors hover:bg-[#EEE9DE] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
       >
         <span className="flex min-w-0 items-center gap-2">
-          <Brain className="h-3.5 w-3.5 flex-shrink-0 text-[#D7663E]" />
+          <Brain className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
           <span className="truncate">思考内容</span>
-          <span className="flex-shrink-0 rounded-full border border-[#DED9CC] bg-[#FBFAF6] px-1.5 py-px text-[11px] text-[#8C8576] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]">
+          <span className="flex-shrink-0 rounded-full border border-[var(--border)] bg-[var(--app-bg)] px-1.5 py-px text-[11px] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]">
             {lineCount} 行
           </span>
         </span>
@@ -225,14 +225,14 @@ export function ThoughtBlock({ content }: { content: string }) {
           className="relative overflow-hidden"
           style={{ height: 'calc(1.75rem * 2 + 0.75rem)' }}
         >
-          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#A8B2C4]">
+          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
             {trimmed}
           </div>
         </div>
       )}
 
       {expanded && (
-        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[#756E61] [overflow-wrap:anywhere] dark:text-[#A8B2C4]">
+        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
           {trimmed}
         </div>
       )}
@@ -316,7 +316,7 @@ function InlineMarkdown({ content }: { content: string }) {
     if (trimmed.startsWith('>')) {
       flushList();
       elements.push(
-        <blockquote key={idx} className="my-2 break-words border-l-2 border-[#D7663E] pl-3 text-[16px] leading-8 text-secondary-custom italic [overflow-wrap:anywhere]">
+        <blockquote key={idx} className="my-2 break-words border-l-2 border-[var(--accent)] pl-3 text-[16px] leading-8 text-secondary-custom italic [overflow-wrap:anywhere]">
           {renderInline(trimmed.slice(1).trim())}
         </blockquote>
       );
@@ -357,7 +357,7 @@ function renderInline(text: string): React.ReactNode {
       parts.push(<em key={match.index} className="italic">{match[4]}</em>);
     } else if (match[5]) {
       parts.push(
-        <code key={match.index} className="mono-font rounded-md bg-[#F8EDE7] px-1.5 py-0.5 text-[14px] text-[#D7663E] break-words [overflow-wrap:anywhere] dark:bg-[#1C2836] dark:text-[#6EA8DC]">
+        <code key={match.index} className="mono-font rounded-md bg-[var(--state-danger-bg)] px-1.5 py-0.5 text-[14px] text-[var(--accent)] break-words [overflow-wrap:anywhere] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">
           {match[5]}
         </code>
       );
@@ -371,7 +371,7 @@ function renderInline(text: string): React.ReactNode {
         continue;
       }
       parts.push(
-        <a key={match.index} href={safeHref} target="_blank" rel="noopener noreferrer" className="text-[#D7663E] hover:underline">
+        <a key={match.index} href={safeHref} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline">
           {match[7]}
         </a>
       );

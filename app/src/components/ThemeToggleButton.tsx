@@ -19,7 +19,7 @@ function playThemeRipple(button: HTMLButtonElement, theme: ThemeType) {
     Math.max(x, window.innerWidth - x),
     Math.max(y, window.innerHeight - y)
   );
-  const nextColor = theme === 'dark' ? '#FBFAF6' : '#11100E';
+  const nextColor = theme === 'dark' ? 'var(--app-bg)' : '#11100E';
   const ripple = document.createElement('div');
 
   Object.assign(ripple.style, {
@@ -64,8 +64,8 @@ export default function ThemeToggleButton({ theme, onClick, className = '' }: Th
       onClick={handleClick}
       className={`group relative flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-md border transition-[transform,colors] duration-200 hover:-translate-y-px active:scale-95 ${
         dark
-          ? 'border-[#4D463D] bg-[#2E2A24] text-[#F3EBDD]'
-          : 'border-[#DCD7CC] bg-[#FAF8F2] text-[#625B50]'
+          ? 'border-[var(--text-primary)] bg-[var(--app-bg)] text-[var(--surface-muted)]'
+          : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)]'
       } ${className}`}
       title={label}
       aria-label={label}
@@ -79,12 +79,12 @@ export default function ThemeToggleButton({ theme, onClick, className = '' }: Th
       />
       <span className="absolute inset-0 m-auto flex h-4 w-4 items-center justify-center">
         <Moon
-          className={`absolute h-4 w-4 text-[#F3EBDD] transition-all duration-200 ${
+          className={`absolute h-4 w-4 text-[var(--surface-muted)] transition-all duration-200 ${
             dark ? 'rotate-0 scale-100 opacity-100' : 'rotate-45 scale-50 opacity-0'
           }`}
         />
         <SunMedium
-          className={`absolute h-4 w-4 text-[#8A8174] transition-all duration-200 ${
+          className={`absolute h-4 w-4 text-[var(--text-tertiary)] transition-all duration-200 ${
             dark ? '-rotate-45 scale-50 opacity-0' : 'rotate-0 scale-100 opacity-100'
           }`}
         />

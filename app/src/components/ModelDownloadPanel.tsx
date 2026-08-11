@@ -186,22 +186,22 @@ export default function ModelDownloadPanel() {
         <div className="pointer-events-none fixed bottom-5 right-5 z-40 flex max-w-[calc(100vw-40px)] justify-end">
           <div
             key="download-panel"
-            className="anim-panel-in pointer-events-auto w-[min(420px,calc(100vw-40px))] rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] p-3 shadow-[0_12px_32px_rgba(61,53,42,0.16)] dark:border-white/[0.1] dark:bg-[#1C2130]"
+            className="anim-panel-in pointer-events-auto w-[min(420px,calc(100vw-40px))] rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 shadow-[0_12px_32px_rgba(61,53,42,0.16)] dark:border-white/[0.1] dark:bg-[var(--surface-raised)]"
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-base font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">
-                  <Download className="h-4 w-4 text-[#D06646]" />
+                <div className="flex items-center gap-2 text-base font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                  <Download className="h-4 w-4 text-[var(--accent)]" />
                   下载模型
                 </div>
-                <div className="mt-1 truncate text-xs text-[#7D766B] dark:text-[#8E99AD]">
+                <div className="mt-1 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                   HF 镜像站 · GGUF
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setExpanded(false)}
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border border-[#DCD8CF] bg-[#FAF9F5] text-[#7D766B] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.06]"
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.06]"
                 title="收起"
               >
                 <X className="h-4 w-4" />
@@ -212,58 +212,58 @@ export default function ModelDownloadPanel() {
               <button
                 type="button"
                 onClick={handleOpenMirror}
-                className="flex h-9 items-center justify-center gap-2 rounded-md border border-[#DCD8CF] bg-[#F8F6F1] px-3 text-sm font-medium text-[#2F2C26] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#E2E8F2]"
+                className="flex h-9 items-center justify-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 text-sm font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--text-primary)]"
               >
-                <ExternalLink className="h-4 w-4 text-[#D06646]" />
+                <ExternalLink className="h-4 w-4 text-[var(--accent)]" />
                 打开 HF 镜像站
               </button>
 
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(120px,0.65fr)]">
                 <label className="min-w-0">
-                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">仓库</span>
+                  <span className="mb-1 block text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">仓库</span>
                   <input
                     value={repoId}
                     onChange={(event) => setRepoId(event.target.value)}
                     disabled={Boolean(directUrl.trim()) || isDownloading}
-                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#E2E8F2]"
+                    className="h-9 w-full rounded-md border border-[var(--border)] bg-white/80 px-2.5 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-primary)]"
                     placeholder="组织/模型仓库"
                   />
                 </label>
                 <label className="min-w-0">
-                  <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">文件</span>
+                  <span className="mb-1 block text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">文件</span>
                   <input
                     value={fileName}
                     onChange={(event) => setFileName(event.target.value)}
                     disabled={isDownloading}
-                    className="h-9 w-full rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[#E2E8F2]"
+                    className="h-9 w-full rounded-md border border-[var(--border)] bg-white/80 px-2.5 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] disabled:opacity-55 dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-primary)]"
                     placeholder="*.gguf"
                   />
                 </label>
               </div>
 
               <label className="min-w-0">
-                <span className="mb-1 block text-xs text-[#7D766B] dark:text-[#8E99AD]">直链</span>
-                <div className="flex min-w-0 items-center gap-2 rounded-md border border-[#DCD8CF] bg-white/80 px-2.5 dark:border-white/[0.08] dark:bg-black/20">
-                  <Link2 className="h-4 w-4 flex-shrink-0 text-[#8B8275]" />
+                <span className="mb-1 block text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">直链</span>
+                <div className="flex min-w-0 items-center gap-2 rounded-md border border-[var(--border)] bg-white/80 px-2.5 dark:border-white/[0.08] dark:bg-black/20">
+                  <Link2 className="h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)]" />
                   <input
                     value={directUrl}
                     onChange={(event) => setDirectUrl(event.target.value)}
                     disabled={isDownloading}
-                    className="h-9 min-w-0 flex-1 bg-transparent text-sm text-[#2F2C26] outline-none placeholder:text-[#A09A90] disabled:opacity-55 dark:text-[#E2E8F2]"
+                    className="h-9 min-w-0 flex-1 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] disabled:opacity-55 dark:text-[var(--text-primary)]"
                     placeholder="https://hf-mirror.com/.../resolve/main/model.gguf"
                   />
                 </div>
               </label>
 
               <div className="flex min-w-0 items-center gap-2">
-                <div className="min-w-0 flex-1 rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
+                <div className="min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
                   <div className="truncate">{effectiveTargetDir || '未选择模型目录'}</div>
                 </div>
                 <button
                   type="button"
                   onClick={() => void chooseTargetDir()}
                   disabled={isDownloading}
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-[#DCD8CF] bg-[#FAF9F5] text-[#7D766B] hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06]"
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06]"
                   title="选择目录"
                 >
                   <FolderOpen className="h-4 w-4" />
@@ -271,7 +271,7 @@ export default function ModelDownloadPanel() {
               </div>
 
               {(progress || message) && (
-                <div className="rounded-md border border-[#E4E0D8] bg-[#FAF9F5] px-2.5 py-2 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
+                <div className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate">{message ?? progress?.message}</span>
                     <span className="mono-font flex-shrink-0">
@@ -279,9 +279,9 @@ export default function ModelDownloadPanel() {
                     </span>
                   </div>
                   {progress?.totalBytes && (
-                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.08]">
+                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.08]">
                       <div
-                        className="h-full rounded-full bg-[#D06646]"
+                        className="h-full rounded-full bg-[var(--accent)]"
                         style={{ width: `${percent}%` }}
                       />
                     </div>
@@ -293,7 +293,7 @@ export default function ModelDownloadPanel() {
                 type="button"
                 onClick={() => void handleDownload()}
                 disabled={!canDownload}
-                className="flex h-10 items-center justify-center gap-2 rounded-md bg-[#D06646] px-3 text-sm font-semibold text-white hover:bg-[#BE593A] disabled:cursor-not-allowed disabled:opacity-55"
+                className="flex h-10 items-center justify-center gap-2 rounded-md bg-[var(--accent)] px-3 text-sm font-semibold text-white hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 {isDownloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                 {isDownloading ? '下载中' : '开始下载'}
@@ -306,10 +306,10 @@ export default function ModelDownloadPanel() {
           key="download-button"
           type="button"
           onClick={() => setExpanded(true)}
-          className="flex h-9 w-9 flex-shrink-0 items-center justify-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] text-sm font-semibold text-[#2F2C26] transition-colors hover:border-[#D06646]/40 hover:bg-[#F1EEE7] dark:border-white/[0.1] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.09] xl:w-auto xl:px-3"
+          className="flex h-9 w-9 flex-shrink-0 items-center justify-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)]/40 hover:bg-[var(--surface-muted)] dark:border-white/[0.1] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09] xl:w-auto xl:px-3"
           title="下载模型"
         >
-          <Download className="h-4 w-4 text-[#D06646]" />
+          <Download className="h-4 w-4 text-[var(--accent)]" />
           <span className="hidden xl:inline">下载模型</span>
         </button>
       )}

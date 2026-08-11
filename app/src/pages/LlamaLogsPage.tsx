@@ -44,11 +44,11 @@ function classifyLine(line: string): LineTone {
 }
 
 const TONE_CLASS: Record<LineTone, string> = {
-  error: 'text-[#FF8A70]',
-  warn: 'text-[#F5C56B]',
-  accent: 'text-[#7EE0A3]',
-  muted: 'text-[#5E6B7E]',
-  default: 'text-[#AEBBD0]',
+  error: 'text-[var(--state-danger)]',
+  warn: 'text-[var(--state-warning)]',
+  accent: 'text-[var(--state-success)]',
+  muted: 'text-[var(--text-secondary)]',
+  default: 'text-[var(--text-secondary)]',
 };
 
 export default function LlamaLogsPage() {
@@ -127,7 +127,7 @@ export default function LlamaLogsPage() {
   const rendered = useMemo(() => lines.slice(-600), [lines]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-6">
         <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
           <PageHeader
@@ -141,22 +141,22 @@ export default function LlamaLogsPage() {
             <span
               className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${
                 running
-                  ? 'border-[#CFE1C8] bg-[#F2F8EF] text-[#4E7751] dark:border-[#2D5632] dark:bg-[#1A2E28] dark:text-[#7EC8A0]'
-                  : 'border-[#E1DCD0] bg-[#FAF9F5] text-[#8C8576] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]'
+                  ? 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)] dark:border-[var(--state-success-border)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]'
+                  : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]'
               }`}
             >
               <span className="relative flex h-2 w-2">
                 {running && (
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#2C8B58] opacity-60" />
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--state-success)] opacity-60" />
                 )}
-                <span className={`relative inline-flex h-2 w-2 rounded-full ${running ? 'bg-[#2C8B58]' : 'bg-[#A49B8C]'}`} />
+                <span className={`relative inline-flex h-2 w-2 rounded-full ${running ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`} />
               </span>
               {running ? `运行中 · 端口 ${state.serverPort}` : '未运行'}
             </span>
-            <span className="mono-font rounded-full border border-[#E1DCD0] bg-[#FAF9F5] px-3 py-1.5 text-xs text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]">
+            <span className="mono-font rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]">
               {lines.length} 行
             </span>
-            <span className="rounded-full border border-[#E1DCD0] bg-[#FAF9F5] px-3 py-1.5 text-xs text-[#8C8576] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]">
+            <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]">
               每秒刷新
             </span>
 
@@ -166,8 +166,8 @@ export default function LlamaLogsPage() {
                 onClick={() => setLive((v) => !v)}
                 className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors ${
                   live
-                    ? 'border-[#CFE1C8] bg-[#F2F8EF] text-[#4E7751] hover:bg-[#E9F3E4] dark:border-[#2D5632] dark:bg-[#1A2E28] dark:text-[#7EC8A0]'
-                    : 'border-[#E1DCD0] bg-[#FAF9F5] text-[#7D766B] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#8E99AD]'
+                    ? 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)] hover:bg-[var(--state-success-bg)] dark:border-[var(--state-success-border)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]'
+                    : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]'
                 }`}
                 title={live ? '暂停自动刷新' : '恢复自动刷新'}
               >
@@ -178,16 +178,16 @@ export default function LlamaLogsPage() {
                 type="button"
                 onClick={() => void handleCopy()}
                 disabled={lines.length === 0}
-                className="flex items-center gap-1.5 rounded-md border border-[#E1DCD0] bg-[#FAF9F5] px-2.5 py-1.5 text-xs text-[#6F685A] transition-colors hover:bg-[#F1EEE7] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
+                className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
               >
-                {copied ? <Check className="h-3.5 w-3.5 text-[#2C8B58]" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied ? <Check className="h-3.5 w-3.5 text-[var(--state-success)]" /> : <Copy className="h-3.5 w-3.5" />}
                 {copied ? '已复制' : '复制'}
               </button>
               <button
                 type="button"
                 onClick={handleExport}
                 disabled={lines.length === 0}
-                className="flex items-center gap-1.5 rounded-md border border-[#E1DCD0] bg-[#FAF9F5] px-2.5 py-1.5 text-xs text-[#6F685A] transition-colors hover:bg-[#F1EEE7] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
+                className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
               >
                 <Download className="h-3.5 w-3.5" />
                 导出
@@ -196,7 +196,7 @@ export default function LlamaLogsPage() {
                 type="button"
                 onClick={handleClear}
                 disabled={lines.length === 0}
-                className="flex items-center gap-1.5 rounded-md border border-[#E9C7BC] bg-[#FFF1EC] px-2.5 py-1.5 text-xs font-medium text-[#C44E36] transition-colors hover:bg-[#F6E4DE] disabled:cursor-not-allowed disabled:opacity-40 dark:border-[#3A5570] dark:bg-[#1E2A3A] dark:text-[#6EA8DC]"
+                className="flex items-center gap-1.5 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-2.5 py-1.5 text-xs font-medium text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-bg)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-[var(--state-danger-border)] dark:bg-[var(--state-danger-bg)] dark:text-[var(--accent)]"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 清空
@@ -204,12 +204,12 @@ export default function LlamaLogsPage() {
             </div>
           </div>
 
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-[#1E2430] bg-[#0B0E14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            <div className="flex items-center gap-1.5 border-b border-white/[0.06] bg-[#0E1219] px-3 py-2">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#FF5F57]" />
-              <span className="h-2.5 w-2.5 rounded-full bg-[#FEBC2E]" />
-              <span className="h-2.5 w-2.5 rounded-full bg-[#28C840]" />
-              <span className="mono-font ml-2 text-[11px] text-[#5E6B7E]">llama-server · stdout / stderr</span>
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-[#1E2430] bg-[var(--app-bg)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div className="flex items-center gap-1.5 border-b border-white/[0.06] bg-[var(--app-bg)] px-3 py-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-danger)]" />
+              <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-warning)]" />
+              <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-success)]" />
+              <span className="mono-font ml-2 text-[11px] text-[var(--text-secondary)]">llama-server · stdout / stderr</span>
             </div>
 
             <div
@@ -218,7 +218,7 @@ export default function LlamaLogsPage() {
               className="mono-font h-[calc(100%-36px)] overflow-y-auto overflow-x-hidden px-4 py-3 text-[12px] leading-[1.7]"
             >
               {rendered.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center text-[#4A5568]">
+                <div className="flex h-full flex-col items-center justify-center text-[var(--text-secondary)]">
                   <Terminal className="mb-3 h-10 w-10 opacity-40" />
                   <p className="text-sm">暂无 llama-server 输出</p>
                   <p className="mt-1 text-xs">加载模型后，推理内核的日志会实时显示在这里</p>
@@ -228,7 +228,7 @@ export default function LlamaLogsPage() {
                   const tone = classifyLine(line);
                   return (
                     <div key={`${lines.length - rendered.length + index}`} className="flex gap-3 whitespace-pre-wrap break-all hover:bg-white/[0.03]">
-                      <span className="w-10 flex-shrink-0 select-none text-right text-[#3A4557]">
+                      <span className="w-10 flex-shrink-0 select-none text-right text-[var(--text-tertiary)]">
                         {lines.length - rendered.length + index + 1}
                       </span>
                       <span className={`min-w-0 flex-1 ${TONE_CLASS[tone]}`}>{line || ' '}</span>
@@ -246,7 +246,7 @@ export default function LlamaLogsPage() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 8 }}
                   onClick={jumpToBottom}
-                  className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-[#1A2130]/95 px-3 py-1.5 text-xs font-medium text-[#AEBBD0] shadow-lg backdrop-blur transition-colors hover:bg-[#232C3E]"
+                  className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-[var(--surface-raised)]/95 px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] shadow-lg backdrop-blur transition-colors hover:bg-[var(--surface-hover)]"
                 >
                   <ArrowDown className="h-3.5 w-3.5" />
                   回到最新

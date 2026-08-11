@@ -33,7 +33,7 @@ function displayModelName(raw: string) {
 
 function StatusPill({ ok, text }: { ok: boolean; text: string }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${ok ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1A2E28] dark:text-[#7EC8A0]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#1C2836] dark:text-[#5A96D0]'}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${ok ? 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]' : 'bg-[var(--state-danger-bg)] text-[var(--state-danger)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)]'}`}>
       {ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
       {text}
     </span>
@@ -47,13 +47,13 @@ function InfoCard({ icon: Icon, label, value, note }: {
   note?: string;
 }) {
   return (
-    <div className="rounded-xl border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-      <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-[#7D766B] dark:text-[#A8B2C4]">
-        <Icon className="h-4 w-4 text-[#D7663E]" />
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+      <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+        <Icon className="h-4 w-4 text-[var(--accent)]" />
         {label}
       </div>
-      <div className="mono-font break-all text-lg font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
-      {note && <div className="mt-1 text-xs text-[#8D867A] dark:text-[#8E99AD]">{note}</div>}
+      <div className="mono-font break-all text-lg font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
+      {note && <div className="mt-1 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">{note}</div>}
     </div>
   );
 }
@@ -65,13 +65,13 @@ function LiveMetric({ icon: Icon, label, value, note }: {
   note?: string;
 }) {
   return (
-    <div className="rounded-lg border border-[#E5DFD3] bg-[#FBFAF6] px-3 py-2.5 dark:border-white/[0.08] dark:bg-black/20">
-      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold text-[#7D766B] dark:text-[#A8B2C4]">
-        <Icon className="h-3.5 w-3.5 text-[#D7663E]" />
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2.5 dark:border-white/[0.08] dark:bg-black/20">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+        <Icon className="h-3.5 w-3.5 text-[var(--accent)]" />
         {label}
       </div>
-      <div className="mono-font truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
-      {note && <div className="mt-0.5 truncate text-[11px] text-[#8D867A] dark:text-[#8E99AD]">{note}</div>}
+      <div className="mono-font truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
+      {note && <div className="mt-0.5 truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">{note}</div>}
     </div>
   );
 }
@@ -153,7 +153,7 @@ export default function ApiStatusPage() {
   const ctxPercent = ctxUsagePercent(latestStats);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-5xl">
           <PageHeader
@@ -166,7 +166,7 @@ export default function ApiStatusPage() {
                 type="button"
                 onClick={() => void runCheck()}
                 disabled={checking}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[#DED8CC] bg-[#FAF9F5] px-4 text-sm font-semibold text-[#403C32] transition-colors hover:bg-[#F1EEE7] disabled:opacity-60 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.08]"
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-60 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.08]"
               >
                 {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 立即检测
@@ -174,16 +174,16 @@ export default function ApiStatusPage() {
             )}
           />
 
-          <section className="mb-4 rounded-lg border border-[#E1DCD0] bg-[#F8F6F1] p-5 shadow-sm dark:border-white/[0.08] dark:bg-[#1A1E28]">
+          <section className="mb-4 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-5 shadow-sm dark:border-white/[0.08] dark:bg-[var(--surface-raised)]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex items-start gap-3">
-                <div className={`grid h-11 w-11 flex-shrink-0 place-items-center rounded-xl ${healthy ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1A2E28] dark:text-[#7EC8A0]' : 'bg-[#F6E4DE] text-[#B4563B] dark:bg-[#1C2836] dark:text-[#5A96D0]'}`}>
+                <div className={`grid h-11 w-11 flex-shrink-0 place-items-center rounded-xl ${healthy ? 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]' : 'bg-[var(--state-danger-bg)] text-[var(--state-danger)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)]'}`}>
                   {healthy ? <Activity className="h-5 w-5" /> : <WifiOff className="h-5 w-5" />}
                 </div>
                 <div>
-                  <div className="text-lg font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{statusText(result, state.serverRunning)}</div>
-                  <div className="mt-1 text-sm text-[#8D867A] dark:text-[#8E99AD]">上次检测：{formatTime(lastCheckedAt)} · 兼容标准：{standards}</div>
-                  {result?.error && <div className="mt-2 text-sm text-[#B4563B] dark:text-[#5A96D0]">{result.error}</div>}
+                  <div className="text-lg font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{statusText(result, state.serverRunning)}</div>
+                  <div className="mt-1 text-sm text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">上次检测：{formatTime(lastCheckedAt)} · 兼容标准：{standards}</div>
+                  {result?.error && <div className="mt-2 text-sm text-[var(--state-danger)] dark:text-[var(--state-danger)]">{result.error}</div>}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -201,13 +201,13 @@ export default function ApiStatusPage() {
             <InfoCard icon={KeyRound} label="当前鉴权" value={result?.apiKeyRequired ? '需要 API Key' : '无需 API Key'} note={result?.apiKeyRequired ? '软件内自动携带，外部请求使用 Bearer Token' : '当前运行实例未启用鉴权'} />
           </div>
 
-          <section className="mt-4 rounded-xl border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <section className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h2 className="flex items-center gap-2 text-sm font-semibold text-[#403C32] dark:text-[#E2E8F2]">
-                <Gauge className="h-4 w-4 text-[#D7663E]" />
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                <Gauge className="h-4 w-4 text-[var(--accent)]" />
                 实时运行
               </h2>
-              <span className="text-[11px] text-[#8C8576] dark:text-[#8E99AD]">自动刷新：状态 2 秒，日志 1 秒</span>
+              <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">自动刷新：状态 2 秒，日志 1 秒</span>
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <LiveMetric icon={Gauge} label="ctx 使用" value={formatCtxUsage(latestStats)} note={ctxPercent !== undefined ? `${Math.round(ctxPercent)}%` : '等待生成统计'} />
@@ -215,28 +215,28 @@ export default function ApiStatusPage() {
               <LiveMetric icon={Clock3} label="首字延迟" value={formatLiveMetric(latestStats?.firstTokenDelay, 's', 2)} note="TTFT" />
               <LiveMetric icon={Activity} label="接口延迟" value={result?.latencyMs != null ? `${result.latencyMs} ms` : '暂无'} note={formatTime(lastCheckedAt)} />
             </div>
-            <div className="mt-3 rounded-lg border border-[#E5DFD3] bg-[#FBFAF6] p-3 dark:border-white/[0.08] dark:bg-black/20">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#6F675C] dark:text-[#B8C2D4]">
-                <Terminal className="h-4 w-4 text-[#D7663E]" />
+            <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 dark:border-white/[0.08] dark:bg-black/20">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                <Terminal className="h-4 w-4 text-[var(--accent)]" />
                 最新运行日志
               </div>
               {serverLogs.length > 0 ? (
-                <div className="mono-font max-h-28 space-y-1 overflow-y-auto text-[11px] leading-5 text-[#5C554B] dark:text-[#B8C2D4]">
+                <div className="mono-font max-h-28 space-y-1 overflow-y-auto text-[11px] leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                   {serverLogs.map((line, index) => (
                     <div key={`${index}-${line}`} className="truncate">{line}</div>
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-[#8C8576] dark:text-[#8E99AD]">暂无运行日志。</div>
+                <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">暂无运行日志。</div>
               )}
             </div>
           </section>
 
           <div className="mt-4">
-            <section className="rounded-2xl border border-[#E1DCD0] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="flex items-center gap-2 text-[15px] font-semibold text-primary-custom">
-                  <Globe2 className="h-4 w-4 text-[#D7663E]" />
+                  <Globe2 className="h-4 w-4 text-[var(--accent)]" />
                   接口可用模型
                 </h2>
                 <span className="text-xs text-secondary-custom">{result?.models.length ?? 0} 个模型</span>
@@ -244,20 +244,20 @@ export default function ApiStatusPage() {
               {result?.models.length ? (
                 <div className="space-y-2">
                   {result.models.map((model) => (
-                    <div key={model} title={model} className="mono-font rounded-lg bg-black/[0.04] px-3 py-2 text-xs text-[#403C32] dark:bg-white/[0.05] dark:text-[#E2E8F2]">
+                    <div key={model} title={model} className="mono-font rounded-lg bg-black/[0.04] px-3 py-2 text-xs text-[var(--text-primary)] dark:bg-white/[0.05] dark:text-[var(--text-primary)]">
                       {displayModelName(model)}
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="rounded-xl border border-dashed border-[#DCD8CF] px-4 py-8 text-center text-sm text-secondary-custom dark:border-white/[0.10]">
+                <div className="rounded-xl border border-dashed border-[var(--border)] px-4 py-8 text-center text-sm text-secondary-custom dark:border-white/[0.10]">
                   {state.serverRunning ? '接口可用后会显示 /v1/models 返回的模型。' : '服务未运行，暂无法读取模型列表。'}
                 </div>
               )}
             </section>
           </div>
 
-          <section className="mt-4 rounded-2xl border border-[#E1DCD0] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <section className="mt-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.04]">
             <ExternalApiSection embedded />
           </section>
         </div>

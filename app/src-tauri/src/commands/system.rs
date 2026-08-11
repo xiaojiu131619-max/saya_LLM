@@ -455,3 +455,95 @@ pub fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, Str
         memory_total: Some(mem.get_total_memory()),
     })
 }
+
+#[derive(serde::Serialize, Default)]
+pub struct SystemAppearance {
+    /// 跟随系统 accent color 失败时的兜底色（Win11 默认蓝）。
+    pub accent_color: String,
+    /// 跟随系统暗色/亮色失败时的兜底值。
+    pub apps_use_light_theme: bool,
+    /// 是否在 Win11 22H2+（mica 可用）。
+    pub supports_mica: bool,
+}
+
+/// 读取 Windows 系统的 accent color 与亮/暗主题。
+///
+/// 实现要点：
+/// - accent color 从 `HKCU\SOFTWARE\Microsoft\Windows\DWM\ColorizationColor` 读出，
+///   格式是 0xAARRGGBB，需要去掉 alpha 再转成 #RRGGBB。
+/// - apps_use_light_theme 从 `HKCU\...\Personalize\AppsUseLightTheme` 读出。
+/// - 注册表读取仅在 Windows 平台有效，其他平台走兜底值。
+/// - 不监听系统变化事件：Windows 改 accent/theme 时让用户重启 App 即可，事件钩子太重。
+#[tauri::command]
+pub fn get_system_appearance() -> SystemAppearance {
+    #[cfg(windows)]
+    {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+
+        let accent_color = hkcu
+            .open_subkey("SOFTWARE\\Microsoft\\Windows\\DWM")
+            .ok()
+            .and_then(|key| key.get_value::<u32, _>("ColorizationColor").ok())
+            .map(|raw| {
+                // 0xAARRGGBB -> #RRGGBB (drop alpha)
+                let r = (raw >> 16) & 0xFF;
+                let g = (raw >> 8) & 0xFF;
+                let b = raw & 0xFF;
+                format!("#{:02X}{:02X}{:02X}", r, g, b)
+            })
+            .unwrap_or_else(|| "#0078D4".to_string());
+
+        let apps_use_light_theme = hkcu
+            .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+            .ok()
+            .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme").ok())
+            .map(|v| v != 0)
+            .unwrap_or(true);
+
+        let supports_mica = detect_supports_mica();
+
+        SystemAppearance {
+            accent_color,
+            apps_use_light_theme,
+            supports_mica,
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        SystemAppearance {
+            accent_color: "#0078D4".to_string(),
+            apps_use_light_theme: true,
+            supports_mica: false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detect_supports_mica() -> bool {
+    // Use RtlGetVersion (ntdll) instead of GetVersionEx (which is subject to manifest shims).
+    // Build >= 22621 means Win11 22H2+, mica is actually supported there.
+    #[repr(C)]
+    struct OsVersionInfo {
+        os_version_info_size: u32,
+        major_version: u32,
+        minor_version: u32,
+        build_number: u32,
+        platform_id: u32,
+        csd_version: [u16; 128],
+    }
+
+    extern "system" {
+        fn RtlGetVersion(lp_version_information: *mut OsVersionInfo) -> i32;
+    }
+
+    unsafe {
+        let mut info: OsVersionInfo = std::mem::zeroed();
+        info.os_version_info_size = std::mem::size_of::<OsVersionInfo>() as u32;
+        let status = RtlGetVersion(&mut info);
+        if status < 0 {
+            return false;
+        }
+        info.major_version == 10 && info.build_number >= 22621
+    }
+}

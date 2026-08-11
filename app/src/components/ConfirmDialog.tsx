@@ -38,11 +38,11 @@ const TONE_STYLES: Record<ConfirmDialogTone, {
     border: 'border-[#F59E0B]/30',
   },
   danger: {
-    iconBg: 'bg-[#F87171]/15',
-    iconColor: 'text-[#F87171]',
-    confirmBg: 'bg-[#F87171] hover:bg-[#DC2626]',
+    iconBg: 'bg-[var(--state-danger)]/15',
+    iconColor: 'text-[var(--state-danger)]',
+    confirmBg: 'bg-[var(--state-danger)] hover:bg-[#DC2626]',
     confirmText: 'text-white',
-    border: 'border-[#F87171]/40',
+    border: 'border-[var(--state-danger)]/40',
   },
 };
 
@@ -165,7 +165,7 @@ function ConfirmDialogContent({
           )}
 
           {errorMessage && (
-            <div className="text-xs text-[#F87171] bg-[#F87171]/10 rounded-lg px-3 py-2">
+            <div className="text-xs text-[var(--state-danger)] bg-[var(--state-danger)]/10 rounded-lg px-3 py-2">
               操作失败：{errorMessage}
             </div>
           )}

@@ -44,10 +44,10 @@ function formatLogTime(timestamp: number): string {
 }
 
 const LEVEL_COLORS: Record<SystemLogEntry['level'], string> = {
-  debug: 'border-[#DCD8CF] bg-[#FBFAF6] text-[#6F675C] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#A8B2C4]',
-  info: 'border-[#CFE1C8] bg-[#F2F8EF] text-[#4E7751] dark:border-[#2D5632] dark:bg-[#1A2E28] dark:text-[#7EC8A0]',
-  warn: 'border-[#E8CFA6] bg-[#FFF6E6] text-[#A86A1B] dark:border-[#6D4E1D] dark:bg-[#1E2A3A] dark:text-[#7AB8E8]',
-  error: 'border-[#E9C7BC] bg-[#FFF1EC] text-[#C65135] dark:border-[#3A5570] dark:bg-[#1E2A3A] dark:text-[#6EA8DC]',
+  debug: 'border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]',
+  info: 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)] dark:border-[var(--state-success-border)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]',
+  warn: 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] dark:border-[var(--state-warning)] dark:bg-[var(--state-danger-bg)] dark:text-[var(--state-warning)]',
+  error: 'border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--accent-hover)] dark:border-[var(--state-danger-border)] dark:bg-[var(--state-danger-bg)] dark:text-[var(--accent)]',
 };
 
 function LogEntryRow({ entry }: { entry: SystemLogEntry }) {
@@ -133,15 +133,15 @@ export default function LogPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col text-[#403C32] dark:text-[#E2E8F2]">
-      <div className="flex items-center justify-between gap-3 border-b border-[#E2DFD6] pb-3 dark:border-white/[0.08]">
+    <div className="flex h-full flex-col text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] pb-3 dark:border-white/[0.08]">
         <div className="flex items-center gap-2">
-          <Filter className="h-4 w-4 text-[#D7663E]" />
+          <Filter className="h-4 w-4 text-[var(--accent)]" />
           <select
             aria-label="日志级别"
             value={levelFilter}
             onChange={(e) => setLevelFilter(e.target.value as SystemLogEntry['level'] | 'all')}
-            className="rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 py-1 text-xs outline-none focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720]"
+            className="rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 text-xs outline-none focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
           >
             {LOG_LEVEL_OPTIONS.map((level) => (
               <option key={level} value={level}>
@@ -153,7 +153,7 @@ export default function LogPanel() {
             aria-label="日志来源"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value as SystemLogEntry['category'] | 'all')}
-            className="rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 py-1 text-xs outline-none focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720]"
+            className="rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 text-xs outline-none focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
           >
             {LOG_CATEGORY_OPTIONS.map((category) => (
               <option key={category} value={category}>
@@ -161,14 +161,14 @@ export default function LogPanel() {
               </option>
             ))}
           </select>
-          <span className="text-xs text-[#8C8576] dark:text-[#8E99AD]">{filteredLogs.length} 条</span>
+          <span className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{filteredLogs.length} 条</span>
         </div>
 
         <div className="flex items-center gap-2">
           <div className="relative">
             <button
               onClick={() => setShowExportMenu((v) => !v)}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[#6F685A] transition-colors hover:bg-[#F1EEE7] hover:text-[#403C32] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
             >
               <Download className="h-3.5 w-3.5" />
               导出
@@ -180,18 +180,18 @@ export default function LogPanel() {
                   initial={{ opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  className="absolute right-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] shadow-lg dark:border-white/[0.08] dark:bg-[#211E19]"
+                  className="absolute right-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] shadow-lg dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
                 >
                   <button
                     onClick={() => handleExport('text')}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[#F1EEE7] dark:hover:bg-white/[0.07]"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]"
                   >
                     <FileText className="h-3.5 w-3.5" />
                     导出为 TXT
                   </button>
                   <button
                     onClick={() => handleExport('json')}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[#F1EEE7] dark:hover:bg-white/[0.07]"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]"
                   >
                     <FileJson className="h-3.5 w-3.5" />
                     导出为 JSON
@@ -204,7 +204,7 @@ export default function LogPanel() {
           <button
             onClick={handleClear}
             disabled={logs.length === 0}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[#C44E36] transition-colors hover:bg-[#F6E4DE] hover:text-[#B4563B] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#5A96D0] dark:hover:bg-[#1C2836]"
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-bg)] hover:text-[var(--state-danger)] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[var(--state-danger)] dark:hover:bg-[var(--surface-raised)]"
           >
             <Trash2 className="h-3.5 w-3.5" />
             清空
@@ -221,7 +221,7 @@ export default function LogPanel() {
         className="flex-1 space-y-1.5 overflow-y-auto py-3"
       >
         {filteredLogs.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center rounded-xl border border-dashed border-[#DCD8CF] text-[#8C8576] dark:border-white/[0.08] dark:text-[#8E99AD]">
+          <div className="flex h-full flex-col items-center justify-center rounded-xl border border-dashed border-[var(--border)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:text-[var(--text-secondary)]">
             <Terminal className="mb-3 h-12 w-12 opacity-30" />
             <p className="text-sm">暂无系统日志</p>
             <p className="mt-1 text-xs">服务生命周期、llama-server 输出与 API 请求会按时间顺序显示在这里</p>

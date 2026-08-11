@@ -12,7 +12,7 @@ interface PageHeaderProps {
 export default function PageHeader({ icon: Icon, title, description, actions, className = '' }: PageHeaderProps) {
   return (
     <div className={`flex min-w-0 items-center gap-3 ${className}`}>
-      <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] text-[#D7663E] shadow-[0_1px_0_rgba(255,255,255,0.65)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:shadow-none">
+      <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--accent)] shadow-[0_1px_0_rgba(255,255,255,0.65)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:shadow-none">
         <Icon className="h-5 w-5" />
       </div>
       <div className="min-w-0 flex-1">

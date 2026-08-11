@@ -86,7 +86,7 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-black/5 dark:border-white/5">
           <div className="flex items-center gap-3">
-            <Monitor className="w-5 h-5 text-[#5A6CFF]" />
+            <Monitor className="w-5 h-5 text-[var(--accent)]" />
             <h2 className="text-lg font-semibold text-primary-custom">系统监控</h2>
           </div>
           <button
@@ -100,14 +100,14 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
         <div className="p-6 space-y-6">
           {/* Gauges */}
           <div className="flex items-center justify-center gap-12">
-            <RadialGauge value={stats.gpuUsage} label="GPU 占用" color="#34D399" />
-            <RadialGauge value={stats.ramUsage} label="RAM 占用" color="#5A6CFF" />
+            <RadialGauge value={stats.gpuUsage} label="GPU 占用" color="var(--status-loaded)" />
+            <RadialGauge value={stats.ramUsage} label="RAM 占用" color="var(--accent)" />
           </div>
 
           {/* VRAM Detail */}
           <div className="glass-panel p-4">
             <div className="flex items-center gap-2 mb-3">
-              <HardDrive className="w-4 h-4 text-[#5A6CFF]" />
+              <HardDrive className="w-4 h-4 text-[var(--accent)]" />
               <span className="text-sm font-medium text-primary-custom">显存详情</span>
             </div>
             <div className="grid grid-cols-3 gap-4 mb-3">
@@ -117,16 +117,16 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
               </div>
               <div className="text-center">
                 <div className="text-xs text-secondary-custom mb-1">已分配</div>
-                <div className="text-sm mono-font text-[#FBBF24]">{stats.vramUsed.toFixed(2)} GB</div>
+                <div className="text-sm mono-font text-[var(--status-loading)]">{stats.vramUsed.toFixed(2)} GB</div>
               </div>
               <div className="text-center">
                 <div className="text-xs text-secondary-custom mb-1">可用</div>
-                <div className="text-sm mono-font text-[#34D399]">{(stats.vramTotal - stats.vramUsed).toFixed(2)} GB</div>
+                <div className="text-sm mono-font text-[var(--status-loaded)]">{(stats.vramTotal - stats.vramUsed).toFixed(2)} GB</div>
               </div>
             </div>
             <div className="h-2 rounded-full bg-black/5 overflow-hidden dark:bg-white/5">
               <motion.div
-                className="h-full rounded-full bg-gradient-to-r from-[#34D399] via-[#5A6CFF] to-[#FBBF24]"
+                className="h-full rounded-full bg-gradient-to-r from-[var(--status-loaded)] via-[var(--accent)] to-[var(--status-loading)]"
                 animate={{ width: `${vramUsagePercent}%` }}
                 transition={{ duration: 0.3 }}
               />
@@ -136,7 +136,7 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
           {/* Real-time Chart */}
           <div className="glass-panel p-4">
             <div className="flex items-center gap-2 mb-3">
-              <Activity className="w-4 h-4 text-[#34D399]" />
+              <Activity className="w-4 h-4 text-[var(--status-loaded)]" />
               <span className="text-sm font-medium text-primary-custom">算力趋势 (60秒)</span>
             </div>
             <div className="h-40">
@@ -144,14 +144,14 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
                 <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="gpuGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#34D399" stopOpacity={0.3} />
-                      <stop offset="100%" stopColor="#34D399" stopOpacity={0} />
+                      <stop offset="0%" stopColor="var(--status-loaded)" stopOpacity={0.3} />
+                      <stop offset="100%" stopColor="var(--status-loaded)" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <Area
                     type="monotone"
                     dataKey="gpu"
-                    stroke="#34D399"
+                    stroke="var(--status-loaded)"
                     strokeWidth={2}
                     fill="url(#gpuGrad)"
                     isAnimationActive={false}
@@ -165,14 +165,14 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
           <div className="grid grid-cols-2 gap-4">
             <div className="glass-panel p-4">
               <div className="flex items-center gap-2 mb-2">
-                <Cpu className="w-4 h-4 text-[#5A6CFF]" />
+                <Cpu className="w-4 h-4 text-[var(--accent)]" />
                 <span className="text-xs text-secondary-custom">GPU</span>
               </div>
               <div className="text-sm text-primary-custom font-medium">{stats.gpuName}</div>
             </div>
             <div className="glass-panel p-4">
               <div className="flex items-center gap-2 mb-2">
-                <MemoryStick className="w-4 h-4 text-[#5A6CFF]" />
+                <MemoryStick className="w-4 h-4 text-[var(--accent)]" />
                 <span className="text-xs text-secondary-custom">内存</span>
               </div>
               <div className="text-sm text-primary-custom font-medium">{stats.ramTotal} GB</div>

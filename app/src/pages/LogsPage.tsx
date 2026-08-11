@@ -4,7 +4,7 @@ import PageHeader from '@/components/PageHeader';
 
 export default function LogsPage() {
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-4xl">
           <PageHeader
@@ -14,9 +14,9 @@ export default function LogsPage() {
             className="mb-6"
           />
 
-          <section className="rounded-lg border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <section className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
             <div className="mb-4 flex items-center gap-2.5">
-              <Terminal className="h-4.5 w-4.5 text-[#D7663E]" />
+              <Terminal className="h-4.5 w-4.5 text-[var(--accent)]" />
               <h2 className="text-[15px] font-semibold text-primary-custom">日志列表</h2>
             </div>
             <div className="h-[min(640px,calc(100vh-240px))] min-h-[360px] overflow-hidden">

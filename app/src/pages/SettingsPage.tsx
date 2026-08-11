@@ -543,7 +543,7 @@ export default function SettingsPage() {
             >
               <button
                 onClick={handleAddModelDir}
-                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
               >
                 选择目录 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -557,7 +557,7 @@ export default function SettingsPage() {
                       <span className="truncate">{dir}</span>
                       <button
                         onClick={() => void handleRemoveModelDir(dir)}
-                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md px-2 text-[#C44E36] hover:bg-[#F0DDD6] dark:hover:bg-[#1C2836]"
+                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md px-2 text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:hover:bg-[var(--surface-raised)]"
                       >
                         <FolderX className="w-3.5 h-3.5" />
                         移除
@@ -583,7 +583,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => void handleRefreshServerStatus()}
-                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   刷新
@@ -591,7 +591,7 @@ export default function SettingsPage() {
                 <button
                   onClick={() => void handleStopServer()}
                   disabled={!state.serverRunning}
-                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#C44E36] hover:bg-[#F0DDD6] disabled:opacity-40 dark:hover:bg-[#1C2836]"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
                 >
                   停止
                 </button>
@@ -620,7 +620,7 @@ export default function SettingsPage() {
             >
               <button
                 onClick={() => void handleCheckEngine()}
-                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
               >
                 检查
               </button>
@@ -633,14 +633,14 @@ export default function SettingsPage() {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => void handleCheckLatest()}
-                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
                 >
                   检查更新
                 </button>
                 <button
                   onClick={() => void handleUpdateKernel()}
                   disabled={state.serverRunning || !releaseInfo?.assets.length || !selectedAssetUrl}
-                  className="flex items-center gap-1 text-sm text-[#34D399] hover:underline disabled:opacity-40"
+                  className="flex items-center gap-1 text-sm text-[var(--status-loaded)] hover:underline disabled:opacity-40"
                 >
                   更新
                 </button>
@@ -755,14 +755,14 @@ export default function SettingsPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
-            className="glass-panel p-5 border border-[#F87171]/25"
+            className="glass-panel p-5 border border-[var(--state-danger)]/25"
           >
             <div className="flex items-center gap-2.5 mb-2">
-              <Database className="w-4.5 h-4.5 text-[#F87171]" />
+              <Database className="w-4.5 h-4.5 text-[var(--state-danger)]" />
               <h2 className="text-[15px] font-semibold text-primary-custom">数据管理</h2>
             </div>
-            <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded-lg bg-[#F87171]/10 border border-[#F87171]/20">
-              <AlertTriangle className="w-4 h-4 text-[#F87171] mt-0.5 flex-shrink-0" />
+            <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded-lg bg-[var(--state-danger)]/10 border border-[var(--state-danger)]/20">
+              <AlertTriangle className="w-4 h-4 text-[var(--state-danger)] mt-0.5 flex-shrink-0" />
               <p className="text-xs text-secondary-custom leading-relaxed">
                 以下操作会删除本地数据，且 <span className="text-primary-custom font-medium">无法恢复</span>。
                 操作前请确认无需保留聊天记录、API Key 与配置。模型文件、llama.cpp 内核与 WebView2 缓存不会被删除。
@@ -776,7 +776,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => void handleOpenAppDataDir()}
-                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[#D7663E] hover:bg-[#F1E7DE] dark:hover:bg-[#1C2836]"
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
                 >
                   <FolderOpen className="w-3.5 h-3.5" />
                   打开
@@ -790,7 +790,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => setPendingDataAction('clear-frontend-state')}
-                  className="flex items-center gap-1 text-sm text-[#F87171] hover:underline"
+                  className="flex items-center gap-1 text-sm text-[var(--state-danger)] hover:underline"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   清除
@@ -804,7 +804,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => setPendingDataAction('clear-model-cache')}
-                  className="flex items-center gap-1 text-sm text-[#F87171] hover:underline"
+                  className="flex items-center gap-1 text-sm text-[var(--state-danger)] hover:underline"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   清除
@@ -818,7 +818,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => setPendingDataAction('reset-app-config')}
-                  className="flex items-center gap-1 text-sm text-[#F87171] hover:underline"
+                  className="flex items-center gap-1 text-sm text-[var(--state-danger)] hover:underline"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   重置
@@ -832,7 +832,7 @@ export default function SettingsPage() {
               >
                 <button
                   onClick={() => setPendingDataAction('factory-reset')}
-                  className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg bg-[#F87171]/10 text-[#F87171] hover:bg-[#F87171]/15 transition-colors"
+                  className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg bg-[var(--state-danger)]/10 text-[var(--state-danger)] hover:bg-[var(--state-danger)]/15 transition-colors"
                 >
                   <AlertTriangle className="w-3.5 h-3.5" />
                   出厂重置
@@ -853,7 +853,7 @@ export default function SettingsPage() {
             className="glass-panel p-5"
           >
             <div className="text-center">
-              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-[#D7663E]">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-[var(--accent)]">
                 <span className="text-xl font-bold text-white">L</span>
               </div>
               <h3 className="text-base font-semibold text-primary-custom mb-1">Agent LLM</h3>

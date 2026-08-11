@@ -290,31 +290,31 @@ export default function ModelWorkspace() {
 
   return (
     <div
-      className="paper-surface relative flex h-full min-h-0 overflow-hidden rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] text-[#2F2C26] shadow-sm dark:border-white/[0.08] dark:bg-[#10131A] dark:text-[#E2E8F2]"
+      className="paper-surface relative flex h-full min-h-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-primary)] shadow-sm dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDomDrop}
     >
       {(dropActive || dropBusy) && (
         <div
-          className="anim-fade-in pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-xl border border-dashed border-[#D06646] bg-[#FBFAF6]/95 dark:bg-[#12151C]/95"
+          className="anim-fade-in pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--app-bg)]/95 dark:bg-[var(--app-bg)]/95"
         >
-          <div className="rounded-xl border border-[#E2DFD6] bg-[#FBFAF6] px-5 py-4 text-center shadow-lg dark:border-white/[0.08] dark:bg-[#1A1E28]">
-            <FilePlus2 className="mx-auto mb-2 h-6 w-6 text-[#D06646]" />
-            <div className="text-sm font-semibold text-[#403C32]">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--app-bg)] px-5 py-4 text-center shadow-lg dark:border-white/[0.08] dark:bg-[var(--surface-raised)]">
+            <FilePlus2 className="mx-auto mb-2 h-6 w-6 text-[var(--accent)]" />
+            <div className="text-sm font-semibold text-[var(--text-primary)]">
               {dropBusy ? '正在添加模型' : '松开即可添加 GGUF 模型'}
             </div>
-            <div className="mt-1 text-xs text-[#8C8576]">会自动记住模型所在目录并读取模型表头</div>
+            <div className="mt-1 text-xs text-[var(--text-secondary)]">会自动记住模型所在目录并读取模型表头</div>
           </div>
         </div>
       )}
-      <aside className="hidden min-h-0 w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-[#E3DFD6] bg-[#F2F0EA] p-2 dark:border-white/[0.08] dark:bg-[#12151C] md:flex">
+      <aside className="hidden min-h-0 w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-[var(--border)] bg-[#F2F0EA] p-2 dark:border-white/[0.08] dark:bg-[var(--app-bg)] md:flex">
         <div className="px-4 pb-4 pt-3">
           <div className="mb-4 flex items-center gap-3">
             <button
               type="button"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[#E9E5DA] text-sm font-semibold text-[#847D6B] transition-colors hover:bg-[#DDD7CB] hover:text-[#D06646]"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[#DDD7CB] hover:text-[var(--accent)]"
               title="切换到对话"
               aria-label="切换到对话"
             >
@@ -322,7 +322,7 @@ export default function ModelWorkspace() {
             </button>
             <div className="min-w-0">
               <div className="truncate text-base font-semibold">Agent LLM PC</div>
-              <div className="truncate text-xs text-[#8D867A]">本地模型加载中心</div>
+              <div className="truncate text-xs text-[var(--text-tertiary)]">本地模型加载中心</div>
             </div>
           </div>
         </div>
@@ -331,7 +331,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen ? 'bg-[#E6E2D8] text-[#2F2C26]' : 'text-[#4E4941] hover:bg-[#EAE6DD]'
+              !detailOpen && !llamaLogsOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -340,7 +340,7 @@ export default function ModelWorkspace() {
           {detailOpen && (
             <button
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
-              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#4E4941] transition-colors hover:bg-[#EAE6DD]"
+              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--border)]"
             >
               <ArrowLeft className="h-4 w-4 flex-shrink-0" />
               <span className="truncate">退出参数界面</span>
@@ -371,17 +371,17 @@ export default function ModelWorkspace() {
         <div className="mx-2 mb-3 mt-auto space-y-2">
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-            className="w-full rounded-md border border-[#DCD8CF] bg-[#FAF9F5] p-3 text-left transition-colors hover:bg-[#F1EEE7]"
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-colors hover:bg-[var(--surface-muted)]"
             title="打开对话界面"
           >
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#2F2C26]">
-              <MessageSquare className="h-3.5 w-3.5 text-[#D06646]" />
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
+              <MessageSquare className="h-3.5 w-3.5 text-[var(--accent)]" />
               当前目标
             </div>
-            <div className="truncate text-sm font-medium text-[#2F2C26]">
+            <div className="truncate text-sm font-medium text-[var(--text-primary)]">
               {selectedModel?.name ?? '尚未选择模型'}
             </div>
-            <div className="mt-1 truncate text-xs text-[#8D867A]">
+            <div className="mt-1 truncate text-xs text-[var(--text-tertiary)]">
               {selectedModel ? `${selectedModel.params} · ${selectedModel.quant}` : '从模型列表进入参数界面'}
             </div>
           </button>
@@ -389,7 +389,7 @@ export default function ModelWorkspace() {
             <ThemeToggleButton theme={state.theme} onClick={() => dispatch({ type: 'TOGGLE_THEME' })} />
             <button
               onClick={openSettings}
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2 text-sm text-[#4E4941] transition-colors hover:bg-[#EAE6DD] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--border)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
               title="打开设置"
             >
               <Settings className="h-4 w-4 flex-shrink-0" />
@@ -399,19 +399,19 @@ export default function ModelWorkspace() {
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col bg-[#FBFAF6] dark:bg-[#141720]">
+      <section className="flex min-w-0 flex-1 flex-col bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
         {detailOpen && (
-          <div className="flex flex-shrink-0 items-center gap-2 border-b border-[#E3DFD6] bg-[#FBFAF6] px-4 py-3 dark:border-white/[0.08] dark:bg-[#141720] md:hidden">
+          <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--app-bg)] px-4 py-3 dark:border-white/[0.08] dark:bg-[var(--app-bg)] md:hidden">
             <button
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-[#DCD8CF] bg-[#FAF9F5] text-[#4E4941]"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text-primary)]"
               title="退出参数界面"
             >
               <ArrowLeft className="h-4 w-4" />
             </button>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">加载模型</div>
-            <div className="truncate text-xs text-[#8D867A]">
+            <div className="truncate text-xs text-[var(--text-tertiary)]">
               {selectedModel?.name ?? '参数界面'}
             </div>
           </div>
@@ -435,22 +435,22 @@ export default function ModelWorkspace() {
 function LoadedModelPanel({ model, running, onStop }: { model?: ModelInfo; running: boolean; onStop: () => void }) {
   const Icon = running && model ? CircleCheck : CircleAlert;
   return (
-    <div className="rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
-      <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-[#7D766B] dark:text-[#A8B2C4]">
+    <div className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
+      <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
         <span>已加载模型</span>
-        <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${running && model ? 'text-[#2C8B58]' : 'text-[#A49B8C]'}`} />
+        <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${running && model ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
       </div>
-      <div className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">
+      <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
         {model?.name ?? '暂无运行模型'}
       </div>
-      <div className="mt-1 truncate text-[11px] text-[#8D867A] dark:text-[#8E99AD]">
+      <div className="mt-1 truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
         {model ? `${model.params} · ${model.quant}` : '加载后会显示名称与状态'}
       </div>
       <button
         type="button"
         onClick={onStop}
         disabled={!running}
-        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[#E0D8CA] bg-[#F6E4DE] px-2 py-1.5 text-xs font-semibold text-[#B4563B] transition-colors hover:bg-[#F1D4CA] disabled:cursor-not-allowed disabled:bg-black/[0.03] disabled:text-[#A49B8C] dark:border-white/[0.08] dark:bg-[#1C2836] dark:text-[#5A96D0] dark:hover:bg-[#1E2A3A] dark:disabled:bg-white/[0.04] dark:disabled:text-[#7A7264]"
+        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--state-danger-bg)] px-2 py-1.5 text-xs font-semibold text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] disabled:cursor-not-allowed disabled:bg-black/[0.03] disabled:text-[var(--text-tertiary)] dark:border-white/[0.08] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)] dark:disabled:bg-white/[0.04] dark:disabled:text-[var(--text-tertiary)]"
         title="停止当前 llama-server 服务"
       >
         <Power className="h-3.5 w-3.5" />
@@ -465,24 +465,24 @@ function LlamaLogsCard({ running, active, onOpen }: { running: boolean; active: 
     <button
       type="button"
       onClick={onOpen}
-      className={`w-full rounded-md border px-3 py-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[#D7663E]/35 ${
+      className={`w-full rounded-md border px-3 py-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/35 ${
         active
-          ? 'border-[#D7663E]/40 bg-[#F6E4DE] hover:bg-[#F1D4CA] dark:border-[#6EA8DC]/40 dark:bg-[#1C2836] dark:hover:bg-[#1E2A3A]'
-          : 'border-[#DCD8CF] bg-[#FAF9F5] hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]'
+          ? 'border-[var(--accent)]/40 bg-[var(--state-danger-bg)] hover:bg-[var(--state-danger-border)] dark:border-[var(--accent)]/40 dark:bg-[var(--surface-raised)] dark:hover:bg-[var(--state-danger-bg)]'
+          : 'border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]'
       }`}
       title="查看 llama-server 日志"
     >
       <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">
-          <Terminal className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[#D7663E] dark:text-[#6EA8DC]' : 'text-[#7D766B] dark:text-[#A8B2C4]'}`} />
+        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+          <Terminal className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)] dark:text-[var(--accent)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`} />
           <span className="truncate">llama 日志</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className={`h-1.5 w-1.5 rounded-full ${running ? 'bg-[#2C8B58]' : 'bg-[#A49B8C]'}`} />
-          <ChevronRight className="h-3.5 w-3.5 text-[#A49B8C]" />
+          <span className={`h-1.5 w-1.5 rounded-full ${running ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`} />
+          <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
         </div>
       </div>
-      <div className="mt-1 truncate text-[11px] text-[#8D867A] dark:text-[#8E99AD]">
+      <div className="mt-1 truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
         {running ? '推理内核输出 · 实时刷新' : '服务未运行 · 可查看历史输出'}
       </div>
     </button>
@@ -506,19 +506,19 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
     <button
       type="button"
       onClick={onOpenDetails}
-      className="w-full rounded-md border border-[#DCD8CF] bg-[#FAF9F5] px-3 py-2 text-left transition-colors hover:bg-[#F1EEE7] focus:outline-none focus:ring-2 focus:ring-[#D7663E]/35 dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
+      className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left transition-colors hover:bg-[var(--surface-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/35 dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
       title="查看 API 状态详情"
     >
       <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">
-          <Server className="h-3.5 w-3.5 flex-shrink-0 text-[#7D766B] dark:text-[#A8B2C4]" />
+        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+          <Server className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
           <span className="truncate">服务状态</span>
         </div>
         <div className="flex items-center gap-1">
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${running ? 'bg-[#E7F1E4] text-[#4E7751] dark:bg-[#1A2E28] dark:text-[#7EC8A0]' : 'bg-[#ECE7DC] text-[#817A6D] dark:bg-white/[0.06] dark:text-[#8E99AD]'}`}>
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${running ? 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]' : 'bg-[#ECE7DC] text-[var(--text-tertiary)] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]'}`}>
             {running ? `:${port}` : '未运行'}
           </span>
-          <ChevronRight className="h-3.5 w-3.5 text-[#A49B8C]" />
+          <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
         </div>
       </div>
       <div className="grid grid-cols-2 gap-1.5">
@@ -526,21 +526,21 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
         <ServiceMetric icon={Gauge} label="上下文" value={ctxUsage} extra={
           ctxHas ? (
             <div className="mt-1 flex items-center gap-1">
-              <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.10]">
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.10]">
                 <div
-                  className="h-full rounded-full bg-[#D7663E] transition-[width] duration-300"
+                  className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
                   style={{ width: `${Math.min(100, ctxPercent!)}%` }}
                 />
               </div>
-              <span className="mono-font flex-shrink-0 text-[10px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">{Math.round(ctxPercent!)}%</span>
+              <span className="mono-font flex-shrink-0 text-[10px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{Math.round(ctxPercent!)}%</span>
             </div>
           ) : undefined
         } />
         <ServiceMetric icon={HardDrive} label="显存" value={vramUsage} />
         <ServiceMetric icon={MemoryStick} label="内存" value={ramUsage} />
       </div>
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[#8D867A] dark:text-[#8E99AD]">
-        <LinkIcon className={`h-3.5 w-3.5 flex-shrink-0 ${running ? 'text-[#2C8B58]' : 'text-[#A49B8C]'}`} />
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+        <LinkIcon className={`h-3.5 w-3.5 flex-shrink-0 ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
         <span className="truncate">{linkState}</span>
       </div>
     </button>
@@ -554,12 +554,12 @@ function ServiceMetric({ icon: Icon, label, value, extra }: {
   extra?: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0 rounded-md border border-[#E4DFD5] bg-[#FBFAF6] px-2 py-1.5 dark:border-white/[0.08] dark:bg-[#12151C]">
-      <div className="flex items-center gap-1 text-[10px] text-[#8D867A] dark:text-[#8E99AD]">
+    <div className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1.5 dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
+      <div className="flex items-center gap-1 text-[10px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
         <Icon className="h-3 w-3 flex-shrink-0" />
         <span>{label}</span>
       </div>
-      <div className="mono-font mt-0.5 truncate text-[11px] font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
+      <div className="mono-font mt-0.5 truncate text-[11px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
       {extra}
     </div>
   );

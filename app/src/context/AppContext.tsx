@@ -1,9 +1,10 @@
-import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
 import type { AppState, ViewType, ThemeType, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset } from '@/types';
 import {
   checkDesktopEngine,
   getDesktopConfig,
   getDesktopServerStatus,
+  getDesktopSystemAppearance,
   getExternalApiKeyForSession,
   getExternalApiKeyStatus,
   getServerApiKey,
@@ -16,6 +17,22 @@ import {
 } from '@/lib/desktop';
 import { DEFAULT_MAX_COMPLETION_TOKENS, RECOMMENDED_CTX_LENGTH } from '@/lib/modelDefaults';
 import { getModelThemeGroup } from '@/lib/modelTheme';
+
+/**
+ * 把 hex 颜色朝白（amount > 0）或黑（amount < 0）线性混合。
+ * 用于根据系统 accent 实时推算 hover/pressed/subtle 派生色。
+ */
+function mixAccent(hex: string, amount: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const target = amount > 0 ? 255 : 0;
+  const t = Math.min(1, Math.abs(amount));
+  const mix = (c: number) => Math.round(c + (target - c) * t);
+  return `#${[mix(r), mix(g), mix(b)].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
+const THEME_MANUAL_FLAG = 'agent-llm-theme-manual';
 
 type Action =
   | { type: 'SET_VIEW'; payload: ViewType }
@@ -631,7 +648,72 @@ interface AppContextType { state: AppState; dispatch: React.Dispatch<Action>; }
 const AppContext = createContext<AppContextType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(appReducer, initialState);
+  const [state, baseDispatch] = useReducer(appReducer, initialState);
+
+  /**
+   * 包装 dispatch：用户手动改主题时打 localStorage 标记，
+   * 之后 matchMedia 跟随系统的 effect 看到这个标记就不再覆盖用户选择。
+   */
+  const dispatch = useCallback((action: Action) => {
+    if (action.type === 'SET_THEME' || action.type === 'TOGGLE_THEME') {
+      try { window.localStorage.setItem(THEME_MANUAL_FLAG, '1'); } catch { /* best-effort */ }
+    }
+    baseDispatch(action);
+  }, []);
+
+  /**
+   * 把 Rust 端读到的 Windows accent color 注入到 CSS 变量。
+   *
+   * 直接写 <html style="--accent: #xxx"> 比放在 React state 更稳——避免
+   * "主题切换 → 整树 re-render"。同时按当前亮/暗算出 hover/pressed/subtle 派生色。
+   */
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let cancelled = false;
+    void (async () => {
+      const appearance = await getDesktopSystemAppearance();
+      if (cancelled || !appearance) return;
+      const accent = appearance.accent_color;
+      if (!accent || !/^#[0-9A-Fa-f]{6}$/.test(accent)) return;
+      const dark = document.documentElement.classList.contains('dark');
+      const hover = dark ? mixAccent(accent, 0.18) : mixAccent(accent, -0.12);
+      const pressed = dark ? mixAccent(accent, 0.08) : mixAccent(accent, -0.22);
+      const subtle = `${accent}26`; // ~15% alpha
+      const root = document.documentElement.style;
+      root.setProperty('--accent', accent);
+      root.setProperty('--accent-hover', hover);
+      root.setProperty('--accent-pressed', pressed);
+      root.setProperty('--accent-subtle', subtle);
+    })();
+    return () => { cancelled = true; };
+  }, [state.theme]);
+
+  /**
+   * 跟随系统亮/暗：用户没显式改过 theme 时跟 matchMedia 自动切。
+   * - Tauri 桌面端 + 浏览器都启用，prefers-color-scheme 在 WebView2 上自动可用。
+   * - 改主题用 dispatch 包装，包装会写 manual flag，effect 看到 flag 就不再覆盖。
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const manual = window.localStorage.getItem(THEME_MANUAL_FLAG) === '1';
+    if (manual) return;
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = (e: MediaQueryListEvent | MediaQueryList) => {
+      const dark = e.matches;
+      const next: ThemeType = dark ? 'dark' : 'light';
+      if (state.theme !== next) {
+        // 直接调 baseDispatch，跳过 manual flag（这是系统不是用户）
+        baseDispatch({ type: 'SET_THEME', payload: next });
+      }
+    };
+    apply(mql);
+    if (mql.addEventListener) {
+      mql.addEventListener('change', apply);
+      return () => mql.removeEventListener('change', apply);
+    }
+    mql.addListener(apply);
+    return () => mql.removeListener(apply);
+  }, [state.theme]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;

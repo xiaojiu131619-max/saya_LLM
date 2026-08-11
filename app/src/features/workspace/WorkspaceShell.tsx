@@ -39,8 +39,8 @@ export default function WorkspaceShell() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#0D0F14] dark:text-[#E2E8F2]">
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#0D0F14]">
+    <div className="flex h-screen w-screen overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
         <WindowTitleBar />
         <div className="min-h-0 flex-1 overflow-hidden p-2 pt-0">
           <Suspense fallback={<WorkspaceFallback />}>
@@ -54,7 +54,7 @@ export default function WorkspaceShell() {
 
 function WorkspaceFallback() {
   return (
-    <div className="flex h-full w-full items-center justify-center text-sm text-[#9A9082] dark:text-[#6B7688]">
+    <div className="flex h-full w-full items-center justify-center text-sm text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
       加载中…
     </div>
   );
@@ -76,10 +76,10 @@ function WindowTitleBar() {
     <header
       data-tauri-drag-region
       onDoubleClick={appWindow ? handleToggleMaximize : undefined}
-      className="flex h-10 flex-shrink-0 items-center border-b border-[#D8D2C5] bg-[#F8F6F1]/95 pl-4 text-[#2F2C26] dark:border-white/[0.08] dark:bg-[#12151C]/95 dark:text-[#E2E8F2]"
+      className="flex h-10 flex-shrink-0 items-center border-b border-[var(--border)] bg-[var(--surface-muted)]/95 pl-4 text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]/95 dark:text-[var(--text-primary)]"
     >
       <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2">
-        <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[#E8E3D8] text-[10px] font-semibold text-[#D7663E] dark:bg-white/[0.07] dark:text-[#6EA8DC]">
+        <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[var(--border)] text-[10px] font-semibold text-[var(--accent)] dark:bg-white/[0.07] dark:text-[var(--accent)]">
           晓
         </div>
         <div className="min-w-0 truncate text-xs font-semibold">Agent LLM</div>
@@ -113,8 +113,8 @@ function WindowControlButton({ label, tone = 'neutral', onClick, children }: {
       onClick={onClick}
       className={`grid w-11 place-items-center transition-colors ${
         tone === 'danger'
-          ? 'text-[#625B50] hover:bg-[#C44E36] hover:text-white dark:text-[#B8C2D4] dark:hover:bg-[#C44E36]'
-          : 'text-[#625B50] hover:bg-[#E8E3D8] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]'
+          ? 'text-[var(--text-secondary)] hover:bg-[var(--state-danger)] hover:text-white dark:text-[var(--text-secondary)] dark:hover:bg-[var(--state-danger)]'
+          : 'text-[var(--text-secondary)] hover:bg-[var(--border)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
       }`}
     >
       {children}

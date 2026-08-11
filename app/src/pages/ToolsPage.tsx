@@ -4,9 +4,9 @@ import PageHeader from '@/components/PageHeader';
 import { LLAMA_CPP_TOOLS, toolLabel, toolScopeLabel } from '@/lib/llamaTools';
 
 function riskClass(risk: string) {
-  if (risk === '高') return 'border-[#F2B8A4] bg-[#FDF0EB] text-[#C44E36] dark:border-[#3A5570] dark:bg-[#1C2836] dark:text-[#5A96D0]';
-  if (risk === '中') return 'border-[#E8D7A2] bg-[#FFF8DF] text-[#9A6A00] dark:border-[#3A5570] dark:bg-[#1C2836] dark:text-[#7AB8E8]';
-  return 'border-[#BFE0C8] bg-[#EEF8F2] text-[#2C8B58] dark:border-[#2D5638] dark:bg-[#1A2E28] dark:text-[#7EC8A0]';
+  if (risk === '高') return 'border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)]';
+  if (risk === '中') return 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[#9A6A00] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-warning)]';
+  return 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)] dark:border-[var(--state-success-border)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]';
 }
 
 export default function ToolsPage() {
@@ -49,20 +49,20 @@ export default function ToolsPage() {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div className="min-w-0">
                 <div className="mb-2 flex items-center gap-2">
-                  <Wrench className="h-4.5 w-4.5 text-[#D7663E]" />
+                  <Wrench className="h-4.5 w-4.5 text-[var(--accent)]" />
                   <h2 className="text-[15px] font-semibold text-primary-custom">模型工具调用</h2>
                 </div>
                 <p className="text-sm leading-6 text-secondary-custom">
                   当前启用：{enabledLabels}
                 </p>
                 {state.serverRunning && (
-                  <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-[#B76540] dark:text-[#6EA8DC]">
+                  <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-[var(--state-warning)] dark:text-[var(--accent)]">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
                     工具开关需要重新加载模型后才会同步到服务器。
                   </p>
                 )}
                 {serverToolsNeedApiKey && (
-                  <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-[#B42318] dark:text-[#F0A0A0]">
+                  <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-[var(--state-danger)] dark:text-[var(--state-danger)]">
                     <ShieldAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
                     远程 API 未设置 API key。为避免局域网暴露文件或命令接口，llama.cpp 原生工具不会公开。
                   </p>
@@ -72,7 +72,7 @@ export default function ToolsPage() {
                 <button
                   type="button"
                   onClick={() => updateTools(LLAMA_CPP_TOOLS.map((tool) => tool.id))}
-                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
                 >
                   <Check className="h-4 w-4" />
                   全部开启
@@ -80,7 +80,7 @@ export default function ToolsPage() {
                 <button
                   type="button"
                   onClick={() => updateTools([])}
-                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
                 >
                   <RotateCcw className="h-4 w-4" />
                   全部关闭
@@ -90,9 +90,9 @@ export default function ToolsPage() {
           </section>
 
           <section className="glass-panel overflow-hidden">
-            <div className="border-b border-[#E2DFD6] px-5 py-4 dark:border-white/[0.08]">
+            <div className="border-b border-[var(--border)] px-5 py-4 dark:border-white/[0.08]">
               <div className="flex items-center gap-2">
-                <ShieldAlert className="h-4.5 w-4.5 text-[#D7663E]" />
+                <ShieldAlert className="h-4.5 w-4.5 text-[var(--accent)]" />
                 <h2 className="text-[15px] font-semibold text-primary-custom">可用工具</h2>
               </div>
               <p className="mt-1 text-xs leading-5 text-secondary-custom">
@@ -100,7 +100,7 @@ export default function ToolsPage() {
               </p>
             </div>
 
-            <div className="divide-y divide-[#E2DFD6] dark:divide-white/[0.08]">
+            <div className="divide-y divide-[var(--border)] dark:divide-white/[0.08]">
               {LLAMA_CPP_TOOLS.map((tool) => {
                 const selected = enabledToolSet.has(tool.id);
                 return (
@@ -110,7 +110,7 @@ export default function ToolsPage() {
                     role="switch"
                     aria-checked={selected}
                     onClick={() => toggleTool(tool.id)}
-                    className="grid w-full gap-3 px-5 py-4 text-left transition-colors hover:bg-[#F4F0E8] dark:hover:bg-white/[0.04] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                    className="grid w-full gap-3 px-5 py-4 text-left transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.04] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                   >
                     <span className="min-w-0">
                       <span className="flex min-w-0 flex-wrap items-center gap-2">
@@ -129,8 +129,8 @@ export default function ToolsPage() {
                       aria-hidden="true"
                       className={`flex h-6 w-11 flex-shrink-0 items-center rounded-full border p-0.5 transition-colors sm:justify-self-end ${
                         selected
-                          ? 'justify-end border-[#2C8B58] bg-[#2C8B58]'
-                          : 'justify-start border-[#C8C1B4] bg-[#D8D2C5] dark:border-white/[0.18] dark:bg-white/[0.10]'
+                          ? 'justify-end border-[var(--state-success)] bg-[var(--state-success)]'
+                          : 'justify-start border-[var(--border)] bg-[var(--border)] dark:border-white/[0.18] dark:bg-white/[0.10]'
                       }`}
                     >
                       <span className="h-4.5 w-4.5 rounded-full bg-white shadow-sm" />

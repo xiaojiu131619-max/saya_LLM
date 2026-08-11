@@ -23,7 +23,12 @@
         "decorations": false,
         "shadow": true,
         "dragDropEnabled": true,
-        "backgroundColor": "#0f0f13"
+        "backgroundColor": "#00000000",
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["mica"],
+          "state": "active"
+        }
       }
     ],
     "security": {

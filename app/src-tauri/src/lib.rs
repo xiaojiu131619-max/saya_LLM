@@ -65,6 +65,7 @@ pub fn run() {
             commands::system::read_media_file,
             commands::system::reveal_path,
             commands::system::open_external_url,
+            commands::system::get_system_appearance,
             commands::config::get_config,
             commands::config::save_config,
             commands::config::get_external_api_key_for_session,

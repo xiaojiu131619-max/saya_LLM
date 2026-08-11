@@ -170,7 +170,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
   };
 
   return (
-    <div className={embedded ? '' : 'flex h-full min-h-0 flex-col overflow-hidden bg-[#FBFAF6] text-[#2F2C26] dark:bg-[#141720] dark:text-[#E2E8F2]'}>
+    <div className={embedded ? '' : 'flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]'}>
       <div className={embedded ? '' : 'flex-1 overflow-y-auto px-6 py-6'}>
         <div className={embedded ? '' : 'mx-auto max-w-3xl'}>
           {!embedded && (
@@ -183,10 +183,10 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
           )}
 
           <div className={embedded ? 'space-y-4' : 'space-y-4 pb-12'}>
-            <section className="rounded-xl border border-[#E1DCD0] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
               <div className="mb-3 flex items-center gap-2">
-                <Globe2 className="h-4 w-4 text-[#D7663E]" />
-                <h2 className="text-sm font-semibold text-[#403C32] dark:text-[#E2E8F2]">对外 API</h2>
+                <Globe2 className="h-4 w-4 text-[var(--accent)]" />
+                <h2 className="text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">对外 API</h2>
               </div>
               <div className="divide-y divide-[#E6E0D5] dark:divide-white/[0.06]">
               <ApiSettingRow
@@ -210,7 +210,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                   value={state.serverPort}
                   onChange={(event) => handlePortChange(event.target.value)}
                   onBlur={() => void persistRuntimeSettings()}
-                  className="mono-font h-9 w-28 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] px-3 text-right text-sm text-[#403C32] outline-none transition-colors focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+                  className="mono-font h-9 w-28 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
                 />
               </ApiSettingRow>
               <ApiSettingRow
@@ -220,7 +220,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                 <select
                   value={state.apiConfig.host}
                   onChange={(event) => updateApiConfig({ host: event.target.value }, true)}
-                  className="h-9 w-36 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] px-3 text-sm text-[#403C32] outline-none transition-colors focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+                  className="h-9 w-36 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
                 >
                   <option value="0.0.0.0">0.0.0.0</option>
                   <option value="127.0.0.1">127.0.0.1</option>
@@ -234,7 +234,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                   {configuredApiKey && (
                     <button
                       onClick={() => void handleCopyConfiguredApiKey()}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] text-[#6F685A] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4]"
+                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]"
                       title="复制 API Key"
                     >
                       <Copy className="h-4 w-4" />
@@ -242,14 +242,14 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                   )}
                   <button
                     onClick={handleGenerateApiKey}
-                    className="h-9 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] px-3 text-sm font-semibold text-[#403C32] transition-colors hover:bg-[#F1EEE7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.09]"
+                    className="h-9 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09]"
                   >
                     {state.apiConfig.hasApiKey ? '重新申请' : '生成'}
                   </button>
                   {state.apiConfig.hasApiKey && (
                     <button
                       onClick={handleDeleteApiKey}
-                      className="h-9 rounded-lg border border-[#E7C9BE] bg-[#F6E4DE] px-3 text-sm font-semibold text-[#B4563B] transition-colors hover:bg-[#F1D4CA] dark:border-[#3A5570] dark:bg-[#1C2836] dark:text-[#5A96D0] dark:hover:bg-[#1E2A3A]"
+                      className="h-9 rounded-lg border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 text-sm font-semibold text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)]"
                     >
                       撤销
                     </button>
@@ -258,18 +258,18 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
               </ApiSettingRow>
               </div>
               {newApiKey && (
-                <div className="mt-3 rounded-xl border border-[#D7C7F5] bg-[#F4ECFF] p-3 dark:border-[#6A4CA3] dark:bg-[#25183D]">
-                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#403C32] dark:text-[#E2E8F2]">
+                <div className="mt-3 rounded-xl border border-[var(--accent-subtle)] bg-[var(--accent-subtle)] p-3 dark:border-[var(--accent)] dark:bg-[#25183D]">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
                     <KeyRound className="h-3.5 w-3.5 text-[#8B5CF6]" />
                     新 API Key
                   </div>
                   <div className="flex min-w-0 items-center gap-2">
-                    <code className="mono-font min-w-0 flex-1 truncate rounded-lg border border-[#D7C7F5] bg-[#FBFAF6] px-3 py-2 text-xs text-[#403C32] dark:border-white/[0.08] dark:bg-black/20 dark:text-[#E2E8F2]">
+                    <code className="mono-font min-w-0 flex-1 truncate rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] px-3 py-2 text-xs text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-primary)]">
                       {newApiKey}
                     </code>
                     <button
                       onClick={() => void handleCopyNewApiKey()}
-                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[#D7C7F5] bg-[#FBFAF6] text-[#6E3BD1] hover:bg-[#EEE2FF] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#A8B8F0]"
+                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] text-[#6E3BD1] hover:bg-[var(--accent-subtle)] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--accent)]"
                       title="复制 API Key"
                     >
                       <Copy className="h-4 w-4" />
@@ -283,21 +283,21 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                   </div>
                 </div>
               )}
-              <div className="mt-3 rounded-xl border border-[#E5DFD3] bg-[#FBFAF6] p-3 dark:border-white/[0.08] dark:bg-black/20">
+              <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-3 dark:border-white/[0.08] dark:bg-black/20">
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-xs text-[#8C8576] dark:text-[#8E99AD]">OpenAI 接口根地址（Base URL）</div>
-                    <div className="mono-font truncate text-xs text-[#403C32] dark:text-[#E2E8F2]">{externalApiBaseUrl}</div>
+                    <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">OpenAI 接口根地址（Base URL）</div>
+                    <div className="mono-font truncate text-xs text-[var(--text-primary)] dark:text-[var(--text-primary)]">{externalApiBaseUrl}</div>
                   </div>
                   <button
                     onClick={() => void handleCopyApiExample()}
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] text-[#6F685A] transition-colors hover:bg-[#F1EEE7] hover:text-[#403C32] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
+                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
                     title="复制 PowerShell curl 示例"
                   >
                     <Copy className="h-4 w-4" />
                   </button>
                 </div>
-                <p className="text-[11px] leading-relaxed text-[#8C8576] dark:text-[#8E99AD]">
+                <p className="text-[11px] leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                   软件内本机模式不启用鉴权。开启对外访问后，外部客户端使用上方局域网地址；如已设置 API Key，需携带 Bearer Token。防火墙需要放行端口，修改设置后请重新加载模型。
                 </p>
               </div>
@@ -315,8 +315,8 @@ function ApiSettingRow({ label, description, children }: { label: string; descri
   return (
     <div className="grid gap-3 py-3 md:grid-cols-[minmax(220px,1fr)_auto] md:items-center">
       <div className="min-w-0">
-        <div className="text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">{label}</div>
-        {description && <div className="mt-0.5 text-xs leading-5 text-[#8C8576] dark:text-[#8E99AD]">{description}</div>}
+        <div className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</div>
+        {description && <div className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{description}</div>}
       </div>
       <div className="flex min-w-0 justify-start md:justify-end">{children}</div>
     </div>

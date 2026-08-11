@@ -196,8 +196,8 @@ export default function ModelLoadPage() {
 
   if (!model) {
     return (
-      <div className="flex h-full flex-1 items-center justify-center bg-[#FBFAF6] dark:bg-[#141720]">
-        <p className="text-sm text-[#7D766B] dark:text-[#8E99AD]">未选择模型</p>
+      <div className="flex h-full flex-1 items-center justify-center bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
+        <p className="text-sm text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">未选择模型</p>
       </div>
     );
   }
@@ -325,7 +325,7 @@ export default function ModelLoadPage() {
   ];
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[#FBFAF6] dark:bg-[#141720]">
+    <div className="flex h-full flex-1 flex-col overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1180px]">
           <ModelLoadTopBar
@@ -340,32 +340,32 @@ export default function ModelLoadPage() {
             onStop={() => void handleStopLoading()}
           />
 
-          <div className="mb-4 rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+          <div className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex min-w-0 items-center gap-3">
                 <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[#EEEAE2] text-sm font-semibold dark:bg-white/[0.06]"
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold dark:bg-white/[0.06]"
                   style={{ color: model.themeColorSolid }}
                 >
                   {model.family[0]}
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.family}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#7D766B] dark:text-[#8E99AD]">
+                  <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.family}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                     <span className="mono-font">{model.params}</span>
                     <span>·</span>
                     <span>{model.quant}</span>
                     <span>·</span>
                     <span>{model.fileSize}</span>
                     <span className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
-                      model.modelType === 'moe' ? 'bg-[#F2F0FF] text-[#6C5DD3] dark:bg-[#262044] dark:text-[#A8B8F0]' : 'bg-[#EEF8F2] text-[#2C8B58] dark:bg-[#173024] dark:text-[#7EC8A0]'
+                      model.modelType === 'moe' ? 'bg-[var(--accent-subtle)] text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]' : 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]'
                     }`}>
                       {formatModelType(model.modelType)}
                     </span>
                   </div>
                 </div>
               </div>
-              <div className="flex w-fit items-center gap-1 rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] p-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
+              <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
                 {tabs.map((tab) => {
                   const Icon = tab.icon;
                   return (
@@ -373,12 +373,12 @@ export default function ModelLoadPage() {
                       key={tab.id}
                       onClick={() => setActiveTab(tab.id)}
                       className={`relative flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
-                        activeTab === tab.id ? 'text-[#D06646] dark:text-[#6EA8DC]' : 'text-[#4E4941] hover:bg-[#F1EEE7] dark:text-[#B8C2D4] dark:hover:bg-white/[0.07]'
+                        activeTab === tab.id ? 'text-[var(--accent)] dark:text-[var(--accent)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.07]'
                       }`}
                     >
                       {activeTab === tab.id && (
                         <span
-                          className="absolute inset-0 rounded-md bg-[#EDE8DE] transition-colors dark:bg-white/[0.08]"
+                          className="absolute inset-0 rounded-md bg-[var(--surface-muted)] transition-colors dark:bg-white/[0.08]"
                         />
                       )}
                       <Icon className="relative z-10 h-4 w-4" />
@@ -483,22 +483,22 @@ export default function ModelLoadPage() {
                 </ParamSection>
               </div>
 
-              <div className="min-w-0 overflow-hidden rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]">
                 <button
                   type="button"
                   onClick={() => updateConfig('showAdvancedSettings', !config.showAdvancedSettings)}
-                  className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[#F8F6F1] dark:hover:bg-white/[0.04]"
+                  className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.04]"
                 >
                   <span className="flex min-w-0 items-center gap-2">
-                    <Settings2 className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
-                    <span className="text-[13px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">高级参数</span>
-                    <span className="hidden truncate text-[11px] text-[#8C8576] dark:text-[#8E99AD] sm:inline">线程、批处理、RoPE、聊天模板等</span>
+                    <Settings2 className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+                    <span className="text-[13px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">高级参数</span>
+                    <span className="hidden truncate text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)] sm:inline">线程、批处理、RoPE、聊天模板等</span>
                   </span>
-                  <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[#8C8576] transition-transform duration-200 dark:text-[#8E99AD] ${config.showAdvancedSettings ? 'rotate-90' : ''}`} />
+                  <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] transition-transform duration-200 dark:text-[var(--text-secondary)] ${config.showAdvancedSettings ? 'rotate-90' : ''}`} />
                 </button>
                 {config.showAdvancedSettings && (
-                  <div className="grid border-t border-[#E3DFD6] dark:border-white/[0.08] lg:grid-cols-2">
-                    <div className="min-w-0 lg:border-r lg:border-[#E3DFD6] dark:lg:border-white/[0.08]">
+                  <div className="grid border-t border-[var(--border)] dark:border-white/[0.08] lg:grid-cols-2">
+                    <div className="min-w-0 lg:border-r lg:border-[var(--border)] dark:lg:border-white/[0.08]">
                       <NumberParamRow
                         label="CPU 线程池大小"
                         description="--threads；自动时不传该参数"
@@ -626,9 +626,9 @@ export default function ModelLoadPage() {
             </div>
           ) : (
             <div className="max-w-5xl space-y-4">
-              <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">模型介绍</h3>
-                <p className="text-sm leading-relaxed text-[#7D766B] dark:text-[#8E99AD]">{model.longDescription}</p>
+              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">模型介绍</h3>
+                <p className="text-sm leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.longDescription}</p>
               </div>
 
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -640,8 +640,8 @@ export default function ModelLoadPage() {
 
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">GGUF 表头摘要</h3>
-                  <span className="text-xs text-[#7D766B] dark:text-[#8E99AD]">{model.ggufMetadata?.length ?? 0} 个字段</span>
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">GGUF 表头摘要</h3>
+                  <span className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.ggufMetadata?.length ?? 0} 个字段</span>
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   {headerCards.map((item) => (
@@ -651,32 +651,32 @@ export default function ModelLoadPage() {
               </div>
 
               {model.benchmarks && (
-                <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                  <h3 className="mb-3 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">基准测试</h3>
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                  <h3 className="mb-3 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">基准测试</h3>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                     {Object.entries(model.benchmarks).map(([key, value]) => (
-                      <div key={key} className="rounded-lg border border-[#E3DFD6] bg-[#FBFAF6] p-3 text-center dark:border-white/[0.08] dark:bg-white/[0.04]">
-                        <div className="mb-1 text-xs text-[#7D766B] dark:text-[#8E99AD]">{key}</div>
-                        <div className="mono-font text-lg font-semibold text-[#D06646]">{value}</div>
+                      <div key={key} className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 text-center dark:border-white/[0.08] dark:bg-white/[0.04]">
+                        <div className="mb-1 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{key}</div>
+                        <div className="mono-font text-lg font-semibold text-[var(--accent)]">{value}</div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
-                <h3 className="mb-2 text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">标签</h3>
+              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">标签</h3>
                 <div className="flex flex-wrap items-center gap-2">
                   {model.tags.map((tag) => (
-                    <span key={tag} className="rounded-md bg-[#F1E8E1] px-2.5 py-1 text-xs font-medium text-[#D06646] dark:bg-[#1C2836] dark:text-[#6EA8DC]">{formatTag(tag)}</span>
+                    <span key={tag} className="rounded-md bg-[var(--surface-muted)] px-2.5 py-1 text-xs font-medium text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">{formatTag(tag)}</span>
                   ))}
                 </div>
               </div>
 
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">GGUF 表头字段</h3>
-                  <span className="text-xs text-[#7D766B] dark:text-[#8E99AD]">仅展示真实读取到的元数据（metadata）</span>
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">GGUF 表头字段</h3>
+                  <span className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">仅展示真实读取到的元数据（metadata）</span>
                 </div>
                 {model.ggufMetadata && model.ggufMetadata.length > 0 ? (
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -685,7 +685,7 @@ export default function ModelLoadPage() {
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-5 text-sm text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[#8E99AD]">
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 text-sm text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[var(--text-secondary)]">
                     未从该 GGUF 文件读取到可展示的表头元数据。
                   </div>
                 )}
@@ -724,7 +724,7 @@ function cacheBytesPerValue(cacheType: string) {
 const CACHE_TYPES = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1'];
 
 function rowBorderClass() {
-  return 'border-b border-[#E3DFD6] last:border-b-0 dark:border-white/[0.08]';
+  return 'border-b border-[var(--border)] last:border-b-0 dark:border-white/[0.08]';
 }
 
 /**
@@ -751,8 +751,8 @@ function ToggleSwitch({ checked, onChange, disabled, size = 'md', ariaLabel }: {
       onClick={() => !disabled && onChange(!checked)}
       className={`relative inline-flex ${dims.track} flex-shrink-0 items-center rounded-full border transition-colors duration-200 disabled:opacity-50 ${
         checked
-          ? 'border-[#3B82F6] bg-[#3B82F6]'
-          : 'border-[#C8C1B4] bg-[#D8D2C5] dark:border-white/[0.18] dark:bg-white/[0.10]'
+          ? 'border-[var(--accent)] bg-[var(--accent)]'
+          : 'border-[var(--border)] bg-[var(--border)] dark:border-white/[0.18] dark:bg-white/[0.10]'
       }`}
     >
       <span
@@ -767,15 +767,15 @@ function ParamLabel({ label, description, badge }: { label: string; description?
   return (
     <div className="min-w-0">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2]">{label}</span>
-        <Info className="h-3.5 w-3.5 flex-shrink-0 text-[#8C8576] dark:text-[#8E99AD]" />
+        <span className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</span>
+        <Info className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
         {badge && (
-          <span className="flex-shrink-0 rounded-md border border-[#D8D2C5] bg-[#F1EEE7] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[#7D766B] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#8E99AD]">
+          <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
             {badge}
           </span>
         )}
       </div>
-      {description && <div className="mt-0.5 text-xs text-[#7D766B] dark:text-[#8E99AD]">{description}</div>}
+      {description && <div className="mt-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{description}</div>}
     </div>
   );
 }
@@ -879,27 +879,27 @@ function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPre
   return (
     <div className={`rounded-xl border p-4 ${
       warning
-        ? 'border-[#E8CFA6] bg-[#FFF7E8] dark:border-[#6D4E1D] dark:bg-[#2A2113]'
-        : 'border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]'
+        ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] dark:border-[var(--state-warning)] dark:bg-[var(--state-warning-bg)]'
+        : 'border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]'
     }`}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className={`flex items-center gap-2 text-sm font-semibold ${
-            warning ? 'text-[#7A4D16] dark:text-[#7AB8E8]' : 'text-[#403C32] dark:text-[#E2E8F2]'
+            warning ? 'text-[var(--state-warning)] dark:text-[var(--state-warning)]' : 'text-[var(--text-primary)] dark:text-[var(--text-primary)]'
           }`}>
             <Info className="h-4 w-4 flex-shrink-0" />
             {preset.title}
           </div>
           <div className={`mt-2 text-sm leading-relaxed ${
-            warning ? 'text-[#6F5A35] dark:text-[#E8D3A6]' : 'text-[#7D766B] dark:text-[#8E99AD]'
+            warning ? 'text-[var(--state-warning)] dark:text-[var(--state-warning-border)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'
           }`}>
             {preset.description}
           </div>
           <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
             {preset.items.map((item) => (
               <div key={item.label} className="rounded-lg border border-black/[0.06] bg-white/55 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
-                <div className="text-[11px] text-[#8C8576] dark:text-[#8E99AD]">{item.label}</div>
-                <div className="mt-1 truncate text-xs font-semibold text-[#403C32] dark:text-[#E2E8F2]">{item.value}</div>
+                <div className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.label}</div>
+                <div className="mt-1 truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{item.value}</div>
               </div>
             ))}
           </div>
@@ -907,7 +907,7 @@ function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPre
         <button
           type="button"
           onClick={onApply}
-          className="flex-shrink-0 rounded-lg bg-[#D06646] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#BE5C3E]"
+          className="flex-shrink-0 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
         >
           应用推荐参数
         </button>
@@ -922,10 +922,10 @@ function ParamSection({ title, icon: Icon, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] dark:border-white/[0.08] dark:bg-white/[0.03]">
-      <div className="flex items-center gap-2 border-b border-[#E3DFD6] bg-[#F8F6F1] px-3 py-2.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
-        <Icon className="h-4 w-4 text-[#D06646]" />
-        <h3 className="text-[13px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">{title}</h3>
+    <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+        <Icon className="h-4 w-4 text-[var(--accent)]" />
+        <h3 className="text-[13px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{title}</h3>
       </div>
       <div>{children}</div>
     </div>
@@ -949,18 +949,18 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
   const progressText = loadMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
 
   return (
-    <div className="model-load-summary sticky top-0 z-40 mb-3 overflow-hidden rounded-lg border border-[#D8D2C5] bg-[#FBFAF6] px-3 py-2 shadow-[0_8px_22px_rgba(64,60,50,0.08)] dark:border-white/[0.08] dark:bg-[#1A1E28] dark:shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
+    <div className="model-load-summary sticky top-0 z-40 mb-3 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 shadow-[0_8px_22px_rgba(64,60,50,0.08)] dark:border-white/[0.08] dark:bg-[var(--surface-raised)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
       <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div
-            className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-md border border-[#DCD8CF] bg-[#FAF9F5] text-sm font-semibold dark:border-white/[0.08] dark:bg-white/[0.05]"
+            className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-sm font-semibold dark:border-white/[0.08] dark:bg-white/[0.05]"
             style={{ color: model.themeColorSolid }}
           >
             {model.family[0]}
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{model.name}</h1>
-            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#7D766B] dark:text-[#8E99AD]">
+            <h1 className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</h1>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
               <span className="mono-font">{model.params}</span>
               <span>·</span>
               <span>{model.quant}</span>
@@ -971,11 +971,11 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
         </div>
 
         <div className="model-load-summary-metrics xl:w-[560px] xl:flex-shrink-0">
-          <div className="flex items-center gap-2 rounded-md border border-[#E2DCD1] bg-[#F4F0E8] px-2.5 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
-            <HardDrive className="h-4 w-4 flex-shrink-0 text-[#D06646]" />
+          <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
             <div className="min-w-0">
-              <div className="text-[10px] text-[#7D766B] dark:text-[#8E99AD]">预计 GPU 显存</div>
-              <div className="mono-font text-base font-semibold leading-tight text-[#D06646]">{formatGb(prediction.totalGb)}</div>
+              <div className="text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">预计 GPU 显存</div>
+              <div className="mono-font text-base font-semibold leading-tight text-[var(--accent)]">{formatGb(prediction.totalGb)}</div>
             </div>
           </div>
 
@@ -993,15 +993,15 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           <button
             onClick={onReset}
             disabled={isLoading}
-            className="flex h-9 items-center gap-2 rounded-lg border border-[#DCD8CF] bg-[#FAF9F5] px-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F1EEE7] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#E2E8F2] dark:hover:bg-white/[0.09]"
+            className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09]"
           >
-            <RotateCcw className="h-4 w-4 text-[#7D766B] dark:text-[#8E99AD]" />
+            <RotateCcw className="h-4 w-4 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
             重置
           </button>
           <button
             onClick={onLoad}
             disabled={isLoading}
-            className="flex h-9 items-center gap-2 rounded-lg bg-[#D06646] px-4 text-sm font-medium text-white transition-colors hover:bg-[#BE593A] disabled:opacity-60 dark:bg-[#D7663E] dark:hover:bg-[#E27750]"
+            className="flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-60 dark:bg-[var(--accent)] dark:hover:bg-[var(--accent-hover)]"
           >
             <Play className="h-4 w-4" />
             {model.status === 'loaded' ? '重新加载' : '加载模型'}
@@ -1009,7 +1009,7 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           {isLoading && (
             <button
               onClick={onStop}
-              className="flex h-9 items-center gap-2 rounded-lg border border-[#E8C9BD] bg-[#F8EDE7] px-3 text-sm text-[#C44E36] transition-colors hover:bg-[#F2DED4] dark:border-[#E8C9BD]/30 dark:bg-[#1C2836] dark:text-[#5A96D0] dark:hover:bg-[#4A2D22]"
+              className="flex h-9 items-center gap-2 rounded-lg border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 text-sm text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[#4A2D22]"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
               停止
@@ -1020,18 +1020,18 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
 
       <div className="mt-2 grid gap-1.5">
         <div className="flex min-w-0 items-center gap-2 text-xs">
-          <Info className={`h-3.5 w-3.5 flex-shrink-0 ${isError ? 'text-[#C44E36] dark:text-[#5A96D0]' : 'text-[#8C8576] dark:text-[#8E99AD]'}`} />
-          <span className={`min-w-0 truncate ${isError ? 'text-[#C44E36] dark:text-[#5A96D0]' : 'text-[#7D766B] dark:text-[#8E99AD]'}`}>{progressText}</span>
-          <span className="mono-font ml-auto flex-shrink-0 text-[#7D766B] dark:text-[#8E99AD]">{safePercent.toFixed(0)}%</span>
+          <Info className={`h-3.5 w-3.5 flex-shrink-0 ${isError ? 'text-[var(--state-danger)] dark:text-[var(--state-danger)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`} />
+          <span className={`min-w-0 truncate ${isError ? 'text-[var(--state-danger)] dark:text-[var(--state-danger)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>{progressText}</span>
+          <span className="mono-font ml-auto flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safePercent.toFixed(0)}%</span>
         </div>
-        <div className="h-1 overflow-hidden rounded-full bg-[#E6E1D8] dark:bg-white/[0.08]">
+        <div className="h-1 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.08]">
           <div
-            className={`h-full rounded-full transition-[width] duration-300 ease-out ${isError ? 'bg-[#C44E36]' : 'bg-[#D06646]'}`}
+            className={`h-full rounded-full transition-[width] duration-300 ease-out ${isError ? 'bg-[var(--state-danger)]' : 'bg-[var(--accent)]'}`}
             style={{ width: `${safePercent}%` }}
           />
         </div>
         {prediction.missing.length > 0 && (
-          <div className="truncate text-[11px] text-[#9A6700] dark:text-[#7AB8E8]">
+          <div className="truncate text-[11px] text-[var(--state-warning)] dark:text-[var(--state-warning)]">
             预测缺少表头: {Array.from(new Set(prediction.missing)).join(', ')}
           </div>
         )}
@@ -1042,9 +1042,9 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
 
 function PredictionPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-[#E3DFD6] bg-[#FBFAF6] px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
-      <div className="truncate text-[10px] text-[#8C8576] dark:text-[#8E99AD]">{label}</div>
-      <div className="mono-font truncate text-[11px] font-semibold text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
+    <div className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
+      <div className="truncate text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{label}</div>
+      <div className="mono-font truncate text-[11px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
     </div>
   );
 }
@@ -1075,25 +1075,25 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
             value={sliderValue}
             disabled={safeMax === min && min === 0}
             onChange={(e) => onChange(clamp(Number(e.target.value), min, safeMax))}
-            className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full accent-[#D06646] transition-[background] duration-200"
+            className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full accent-[var(--accent)] transition-[background] duration-200"
             style={{
-              background: `linear-gradient(to right, #D06646 ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
+              background: `linear-gradient(to right, var(--accent) ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
             }}
           />
-          <div className="flex w-28 flex-shrink-0 items-center gap-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 transition-colors focus-within:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720]">
+          <div className="flex w-28 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 transition-colors focus-within:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
             <input
               type="number"
               value={value}
               onChange={handleInputChange}
               step={step}
-              className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[#2F2C26] outline-none dark:text-[#E2E8F2]"
+              className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[var(--text-primary)] outline-none dark:text-[var(--text-primary)]"
             />
-            {suffix && <span className="text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{suffix}</span>}
+            {suffix && <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{suffix}</span>}
           </div>
         </div>
         <div className="flex justify-between">
-          <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{min.toLocaleString()}</span>
-          <span className="mono-font text-[11px] text-[#7D766B] dark:text-[#8E99AD]">{safeMax.toLocaleString()}</span>
+          <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{min.toLocaleString()}</span>
+          <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safeMax.toLocaleString()}</span>
         </div>
       </div>
     </div>
@@ -1117,7 +1117,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
       />
       <div className="flex flex-wrap items-center gap-2 lg:justify-end">
         <ToggleSwitch checked={checked} onChange={onToggle} ariaLabel="空闲时自动卸载" />
-        <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[#2F2C26] dark:text-[#E2E8F2]' : 'text-[#8C8576] dark:text-[#8E99AD]'}`}>
+        <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[var(--text-primary)] dark:text-[var(--text-primary)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>
           <span className="whitespace-nowrap">没有消息输入和输出的</span>
           <input
             type="number"
@@ -1127,7 +1127,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
             step={1}
             disabled={!checked}
             onChange={(event) => handleMinuteChange(event.target.value)}
-            className="mono-font h-8 w-16 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] disabled:opacity-55 dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+            className="mono-font h-8 w-16 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] disabled:opacity-55 dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
           />
           <span className="whitespace-nowrap">分钟后自动卸载</span>
         </div>
@@ -1164,7 +1164,7 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
           <button
             type="button"
             onClick={() => onChange(-1)}
-            className="rounded-md border border-[#DCD8CF] bg-[#F1EEE7] px-2.5 py-1.5 text-xs text-[#4E4941] transition-colors hover:bg-[#E8E2D7] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[#B8C2D4] dark:hover:bg-white/[0.09]"
+            className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--border)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
           >
             {autoLabel}
           </button>
@@ -1177,7 +1177,7 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
           max={max}
           step={step}
           onChange={(event) => handleChange(event.target.value)}
-          className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+          className="mono-font h-9 w-28 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
         />
       </div>
     </div>
@@ -1201,10 +1201,10 @@ function OptionalNumberParamRow({ label, description, enabled, value, onToggle, 
               const next = Number(event.target.value);
               if (!Number.isNaN(next)) onChange(next);
             }}
-            className="mono-font h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-right text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+            className="mono-font h-9 w-28 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
           />
         ) : (
-          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#8E99AD]">{autoLabel}</span>
+          <span className="min-w-28 text-right text-sm text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{autoLabel}</span>
         )}
       </div>
     </div>
@@ -1215,7 +1215,7 @@ function ReadOnlyParamRow({ label, description, value }: { label: string; descri
   return (
     <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
-      <span className="mono-font text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2] lg:justify-self-end lg:text-right">{value}</span>
+      <span className="mono-font text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)] lg:justify-self-end lg:text-right">{value}</span>
     </div>
   );
 }
@@ -1231,9 +1231,9 @@ function TextParamRow({ label, description, value, onChange, placeholder }: {
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
-          className="h-9 min-w-0 flex-1 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
+          className="h-9 min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
         />
-        <ChevronRight className="h-4 w-4 flex-shrink-0 text-[#8C8576] dark:text-[#8E99AD]" />
+        <ChevronRight className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
       </div>
     </div>
   );
@@ -1251,14 +1251,14 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
           <select
             value={value}
             onChange={(event) => onChange(event.target.value)}
-            className="h-9 w-28 rounded-md border border-[#DCD8CF] bg-[#FBFAF6] px-2 text-sm text-[#2F2C26] outline-none transition-colors focus:border-[#D06646] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+            className="h-9 w-28 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
           >
             {CACHE_TYPES.map((type) => (
               <option key={type} value={type}>{type}</option>
             ))}
           </select>
         ) : (
-          <span className="min-w-28 text-right text-sm text-[#7D766B] dark:text-[#8E99AD]">默认 f16</span>
+          <span className="min-w-28 text-right text-sm text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">默认 f16</span>
         )}
       </div>
     </div>
@@ -1267,7 +1267,7 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
 
 function CheckboxParamRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[#2F2C26] transition-colors hover:bg-[#F8F6F1] dark:text-[#E2E8F2] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
       <span className="min-w-0 truncate font-medium">{label}</span>
       <div className="flex justify-end">
         <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
@@ -1278,10 +1278,10 @@ function CheckboxParamRow({ label, checked, onChange }: { label: string; checked
 
 function InfoCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
-      <Icon className="mb-2 h-4 w-4 text-[#D06646]" />
-      <div className="mb-0.5 text-xs text-[#7D766B] dark:text-[#8E99AD]">{label}</div>
-      <div className="break-words text-sm font-medium text-[#2F2C26] dark:text-[#E2E8F2]">{value}</div>
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <Icon className="mb-2 h-4 w-4 text-[var(--accent)]" />
+      <div className="mb-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{label}</div>
+      <div className="break-words text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
     </div>
   );
 }
@@ -1290,11 +1290,11 @@ function MetadataCard({ name, value }: { name: string; value: string }) {
   const displayValue = truncateValue(value);
 
   return (
-    <div className="min-w-0 rounded-xl border border-[#DCD8CF] bg-[#FAF9F5] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
-      <div className="mono-font truncate text-[11px] text-[#D06646]" title={name}>
+    <div className="min-w-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="mono-font truncate text-[11px] text-[var(--accent)]" title={name}>
         {name}
       </div>
-      <div className="mt-2 break-words text-xs leading-relaxed text-[#7D766B] dark:text-[#8E99AD]" title={value}>
+      <div className="mt-2 break-words text-xs leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" title={value}>
         {displayValue}
       </div>
     </div>

@@ -1104,7 +1104,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden bg-[#FAFAF9] text-[15.5px] text-[#202123] dark:bg-[#0D0F14] dark:text-[#E2E8F2]"
+      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--surface)] text-[15.5px] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1116,12 +1116,12 @@ export default function ChatPage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border border-dashed border-[#D7663E] bg-[#FAFAF9]/95 dark:bg-[#0D0F14]/95"
+            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--surface)]/95 dark:bg-[var(--app-bg)]/95"
           >
-            <div className="rounded-lg bg-white px-5 py-4 text-center dark:bg-[#171B24]">
-              <FileText className="mx-auto mb-2 h-6 w-6 text-[#D7663E]" />
-              <div className="text-[15px] font-semibold text-[#403C32] dark:text-[#E2E8F2]">松开即可上传到当前对话</div>
-              <div className="mt-1 text-[13px] text-[#8C8576] dark:text-[#8E99AD]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
+            <div className="rounded-lg bg-white px-5 py-4 text-center dark:bg-[var(--app-bg)]">
+              <FileText className="mx-auto mb-2 h-6 w-6 text-[var(--accent)]" />
+              <div className="text-[15px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">松开即可上传到当前对话</div>
+              <div className="mt-1 text-[13px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
             </div>
           </motion.div>
         )}
@@ -1159,14 +1159,14 @@ export default function ChatPage() {
         vramPercent={vramPercent}
       />
 
-      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[#FAFAF9] dark:bg-[#0D0F14]">
+      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[var(--surface)] dark:bg-[var(--app-bg)]">
         <header className="flex min-w-0 items-center justify-between border-b border-black/[0.055] px-5 dark:border-white/[0.055]">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold text-[#403C32] dark:text-[#E2E8F2]">{activeTitle}</h1>
-              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[#969083] dark:text-[#8E99AD]">
+              <h1 className="truncate text-base font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{activeTitle}</h1>
+              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
                 <span className="truncate">{compactModelName(activeHeaderModelName)}</span>
-                <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[#B8B1A3] dark:bg-white/30" />
+                <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/30" />
                 <span className="truncate">{canChat ? 'llama-server 已连接' : '历史对话可查看'}</span>
               </p>
             </div>
@@ -1176,10 +1176,10 @@ export default function ChatPage() {
             <span
               className={`mr-1 hidden h-8 flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium transition-colors sm:inline-flex ${
                 isGenerating
-                    ? 'text-[#B76540] dark:text-[#6EA8DC]'
+                    ? 'text-[var(--state-warning)] dark:text-[var(--accent)]'
                     : canChat
-                      ? 'text-[#4E7751] dark:text-[#7EC8A0]'
-                      : 'text-[#817A6D] dark:text-[#8E99AD]'
+                      ? 'text-[var(--state-success)] dark:text-[var(--state-success)]'
+                      : 'text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]'
               }`}
             >
               <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
@@ -1211,7 +1211,7 @@ export default function ChatPage() {
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 28, opacity: 0 }}
                 transition={{ duration: 0.18 }}
-                className="h-full w-full max-w-sm border-l border-[#DED9CC] bg-[#F4F4F2] p-5 shadow-xl dark:border-white/[0.08] dark:bg-[#11141B]"
+                className="h-full w-full max-w-sm border-l border-[var(--border)] bg-[var(--surface-muted)] p-5 shadow-xl dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
                 onClick={(event) => event.stopPropagation()}
               >
                 <ChatSettingsPanel onClose={() => setShowSettings(false)} />
@@ -1242,9 +1242,9 @@ export default function ChatPage() {
               {modelMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-center">
                   <div className="max-w-md px-8 py-9">
-                    <div className="mx-auto mb-4 text-sm font-semibold tracking-[0.22em] text-[#D7663E] dark:text-[#6EA8DC]">LOCAL LLM</div>
-                    <h2 className="mb-2 text-xl font-semibold text-[#403C32] dark:text-[#E2E8F2]">{activeTitle}</h2>
-                    <p className="text-sm leading-relaxed text-[#817A6D] dark:text-[#8E99AD]">{emptyMessage}</p>
+                    <div className="mx-auto mb-4 text-sm font-semibold tracking-[0.22em] text-[var(--accent)] dark:text-[var(--accent)]">LOCAL LLM</div>
+                    <h2 className="mb-2 text-xl font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{activeTitle}</h2>
+                    <p className="text-sm leading-relaxed text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">{emptyMessage}</p>
                   </div>
                 </div>
               ) : (
@@ -1293,7 +1293,7 @@ export default function ChatPage() {
                     exit={{ opacity: 0, scale: 0.8, y: 6 }}
                     transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                     onClick={jumpToBottom}
-                    className="pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full border border-black/[0.10] bg-[#FAFAF9] text-[#6F685A] transition-colors hover:bg-[#EEEEEC] hover:text-[#403C32] dark:border-white/[0.10] dark:bg-[#171B24] dark:text-[#B8C2D4] dark:hover:bg-[#222733] dark:hover:text-[#E2E8F2]"
+                    className="pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full border border-black/[0.10] bg-[var(--surface)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] hover:text-[var(--text-primary)] dark:border-white/[0.10] dark:bg-[var(--app-bg)] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--text-primary)]"
                     title="滚动到最底部"
                   >
                     <ArrowDown className="h-4 w-4" />
@@ -1302,20 +1302,20 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-[#FAFAF9] via-[#FAFAF9]/95 to-transparent px-[clamp(12px,4vw,48px)] pb-4 pt-10 dark:from-[#0D0F14] dark:via-[#0D0F14]/95">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-[var(--surface)] via-[var(--surface)]/95 to-transparent px-[clamp(12px,4vw,48px)] pb-4 pt-10 dark:from-[var(--app-bg)] dark:via-[var(--app-bg)]/95">
               <div className="pointer-events-auto mx-auto w-full max-w-3xl min-w-0">
                 {(pendingAttachments.length > 0 || attachmentError || attachmentNotice || stopMessage) && (
                   <div className="mb-2 space-y-2">
                     {pendingAttachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
                         {pendingAttachments.map((file) => (
-                          <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-md bg-black/[0.045] px-3 py-2 text-xs text-[#756E61] dark:bg-white/[0.055] dark:text-[#8E99AD]">
-                            <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[#D7663E]" />
-                            <span className="max-w-[220px] truncate text-[#403C32] dark:text-[#E2E8F2]">{file.name}</span>
+                          <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-md bg-black/[0.045] px-3 py-2 text-xs text-[var(--text-secondary)] dark:bg-white/[0.055] dark:text-[var(--text-secondary)]">
+                            <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
+                            <span className="max-w-[220px] truncate text-[var(--text-primary)] dark:text-[var(--text-primary)]">{file.name}</span>
                             <span className="mono-font flex-shrink-0">{formatFileSize(file.size)}</span>
                             <button
                               onClick={() => removeAttachment(file.id)}
-                              className="rounded-md p-0.5 transition-colors hover:bg-[#E7E2D6] dark:hover:bg-white/[0.08]"
+                              className="rounded-md p-0.5 transition-colors hover:bg-[var(--border)] dark:hover:bg-white/[0.08]"
                               title="移除附件"
                             >
                               <X className="h-3 w-3" />
@@ -1325,24 +1325,24 @@ export default function ChatPage() {
                       </div>
                     )}
                     {attachmentError && (
-                      <div className="flex items-center gap-2 text-xs text-[#C44E36] dark:text-[#5A96D0]">
+                      <div className="flex items-center gap-2 text-xs text-[var(--state-danger)] dark:text-[var(--state-danger)]">
                         <FileWarning className="h-3.5 w-3.5 flex-shrink-0" />
                         <span>{attachmentError}</span>
                       </div>
                     )}
                     {attachmentNotice && !attachmentError && (
-                      <div className="flex items-center gap-2 text-xs text-[#9B664C] dark:text-[#6EA8DC]">
+                      <div className="flex items-center gap-2 text-xs text-[var(--state-danger)] dark:text-[var(--accent)]">
                         <Info className="h-3.5 w-3.5 flex-shrink-0" />
                         <span>{attachmentNotice}</span>
                       </div>
                     )}
                     {stopMessage && (
-                      <div className="text-xs text-[#8C8576] dark:text-[#8E99AD]">{stopMessage}</div>
+                      <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{stopMessage}</div>
                     )}
                   </div>
                 )}
 
-                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.10] dark:bg-[#171B24] dark:focus-within:border-[#6EA8DC]/45">
+                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.10] dark:bg-[var(--app-bg)] dark:focus-within:border-[var(--accent)]/45">
                   <textarea
                     ref={textareaRef}
                     value={inputText}
@@ -1351,7 +1351,7 @@ export default function ChatPage() {
                     placeholder={inputPlaceholder}
                     disabled={!canChat}
                     rows={2}
-                    className="chat-composer-input max-h-[180px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-[#202123] outline-none [overflow-wrap:anywhere] placeholder:text-[#8B8B94] disabled:opacity-60 dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
+                    className="chat-composer-input max-h-[180px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] placeholder:text-[var(--text-secondary)] disabled:opacity-60 dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
                   />
                   <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2.5">
                     <input
@@ -1371,8 +1371,8 @@ export default function ChatPage() {
                         disabled={!canChat}
                         className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:opacity-40 ${
                           state.chatConfig.reasoningMode === 'deep'
-                            ? 'border-[#B88CFF]/55 bg-[#F4ECFF] text-[#6E3BD1] hover:bg-[#EEE2FF] dark:border-[#A78BFA]/35 dark:bg-[#25183D] dark:text-[#A8B8F0] dark:hover:bg-[#2E1F4A]'
-                            : 'border-transparent bg-transparent text-[#5F5F67] hover:bg-black/[0.055] dark:text-[#B8C2D4] dark:hover:bg-[#222733]'
+                            ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[#6E3BD1] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[#25183D] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
+                            : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
                         }`}
                         title="思考强度"
                       >
@@ -1386,7 +1386,7 @@ export default function ChatPage() {
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             exit={{ opacity: 0, y: 6, scale: 0.98 }}
                             transition={{ duration: 0.14 }}
-                            className="absolute bottom-10 left-0 z-20 w-44 overflow-hidden rounded-xl border border-[#DDD8CC] bg-[#FBFAF6] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[#1A1E28]"
+                            className="absolute bottom-10 left-0 z-20 w-44 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
                           >
                             {REASONING_OPTIONS.map((item) => (
                               <button
@@ -1397,12 +1397,12 @@ export default function ChatPage() {
                                 }}
                                 className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
                                   state.chatConfig.reasoningMode === item.mode
-                                    ? 'bg-[#F1E7DE] text-[#D7663E] dark:bg-[#1C2836] dark:text-[#6EA8DC]'
-                                    : 'text-[#403C32] hover:bg-[#F1EEE7] dark:text-[#E2E8F2] dark:hover:bg-white/[0.07]'
+                                    ? 'bg-[var(--surface-muted)] text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]'
+                                    : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
                                 }`}
                               >
                                 <div className="text-sm font-semibold">{item.label}</div>
-                                <div className="mt-0.5 text-xs text-[#8C8576] dark:text-[#8E99AD]">{item.description}</div>
+                                <div className="mt-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.description}</div>
                               </button>
                             ))}
                           </motion.div>
@@ -1415,7 +1415,7 @@ export default function ChatPage() {
                       onClick={handleOpenToolsSettings}
                     />
                     <InputToolButton icon={Trash2} label="清除上下文" onClick={handleClearContext} disabled={!activeSession || isGenerating} />
-                    <span className="ml-auto hidden min-w-0 truncate px-2 text-xs text-[#716A5E] dark:text-[#8E99AD] min-[960px]:block">
+                    <span className="ml-auto hidden min-w-0 truncate px-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)] min-[960px]:block">
                       Enter 发送，Shift + Enter 换行
                     </span>
                     <button
@@ -1425,8 +1425,8 @@ export default function ChatPage() {
                         isAnyGenerating
                           ? 'bg-red-500/10 text-red-600 hover:bg-red-500/15 dark:text-red-400'
                           : (inputText.trim() || pendingAttachments.length > 0) && canChat
-                            ? 'bg-[#202020] text-white hover:bg-black dark:bg-[#6EA8DC] dark:text-[#0D0F14] dark:hover:bg-[#8BBDE8]'
-                            : 'bg-[#E4E4E7] text-[#99999F] dark:bg-white/[0.08] dark:text-[#6F6F6F]'
+                            ? 'bg-[var(--app-bg)] text-white hover:bg-black dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)]'
+                            : 'bg-[var(--border)] text-[var(--text-tertiary)] dark:bg-white/[0.08] dark:text-[var(--text-tertiary)]'
                       }`}
                       title={isAnyGenerating ? '停止生成' : '发送'}
                     >
@@ -1446,7 +1446,7 @@ export default function ChatPage() {
             animate={{ width: 344, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="hidden min-h-0 flex-shrink-0 overflow-hidden border-l border-black/[0.06] bg-[#F4F4F2] dark:border-white/[0.06] dark:bg-[#11141B] xl:block"
+            className="hidden min-h-0 flex-shrink-0 overflow-hidden border-l border-black/[0.06] bg-[var(--surface-muted)] dark:border-white/[0.06] dark:bg-[var(--app-bg)] xl:block"
           >
             <div className="h-full w-[344px] p-5">
               <ChatSettingsPanel onClose={() => setShowSettings(false)} />
@@ -1471,8 +1471,8 @@ function IconButton({ icon: Icon, label, onClick, disabled, tone = 'neutral' }: 
       disabled={disabled}
       className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
         tone === 'danger'
-          ? 'text-[#C44E36] hover:bg-[#F0DDD6] dark:text-[#5A96D0] dark:hover:bg-[#1C2836]'
-          : 'text-[#6F685A] hover:bg-[#EEEAE1] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]'
+          ? 'text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--surface-raised)]'
+          : 'text-[var(--text-secondary)] hover:bg-[#EEEAE1] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
       }`}
       title={label}
     >
@@ -1568,12 +1568,12 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
             <motion.span
               className={`block rounded-full ${
                 hovered
-                  ? 'bg-[#D7663E] dark:bg-[#6EA8DC]'
+                  ? 'bg-[var(--accent)] dark:bg-[var(--accent)]'
                   : influenced
-                    ? 'bg-[#C98A70] dark:bg-[#C98F70]'
+                    ? 'bg-[var(--state-danger-border)] dark:bg-[var(--state-danger-border)]'
                     : current
-                      ? 'bg-[#D7663E] dark:bg-[#6EA8DC]'
-                    : 'bg-[#9C9486] dark:bg-[#81796D]'
+                      ? 'bg-[var(--accent)] dark:bg-[var(--accent)]'
+                    : 'bg-[var(--text-tertiary)] dark:bg-[var(--text-tertiary)]'
               }`}
               initial={false}
               animate={{
@@ -1592,7 +1592,7 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.12 }}
-                  className={`pointer-events-none absolute left-10 z-40 w-[min(300px,calc(100vw-148px))] rounded-lg border border-[#DCD8CF] bg-[#FBFAF6] p-3 text-left shadow-[0_8px_24px_rgba(61,53,42,0.16)] dark:border-white/[0.10] dark:bg-[#1A1E28] ${
+                  className={`pointer-events-none absolute left-10 z-40 w-[min(300px,calc(100vw-148px))] rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 text-left shadow-[0_8px_24px_rgba(61,53,42,0.16)] dark:border-white/[0.10] dark:bg-[var(--surface-raised)] ${
                     index === 0
                       ? 'top-0'
                       : index === turns.length - 1
@@ -1600,16 +1600,16 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
                         : 'top-1/2 -translate-y-1/2'
                   }`}
                 >
-                  <span className="mb-2 block text-[11px] font-semibold text-[#8C8576] dark:text-[#8E99AD]">
+                  <span className="mb-2 block text-[11px] font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                     第 {index + 1} 组问答
                   </span>
                   <span className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#F0E7E1] text-[11px] font-semibold text-[#D7663E] dark:bg-[#1C2836] dark:text-[#6EA8DC]">问</span>
-                    <span className="line-clamp-2 text-xs leading-5 text-[#403C32] dark:text-[#E2E8F2]">{questionPreview}</span>
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#F0E7E1] text-[11px] font-semibold text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">问</span>
+                    <span className="line-clamp-2 text-xs leading-5 text-[var(--text-primary)] dark:text-[var(--text-primary)]">{questionPreview}</span>
                   </span>
-                  <span className="mt-2 flex items-start gap-2 border-t border-[#E4E0D8] pt-2 dark:border-white/[0.08]">
-                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#ECEAE4] text-[11px] font-semibold text-[#716A5E] dark:bg-white/[0.06] dark:text-[#B8C2D4]">答</span>
-                    <span className="line-clamp-2 text-xs leading-5 text-[#625B50] dark:text-[#B8C2D4]">{answerPreview}</span>
+                  <span className="mt-2 flex items-start gap-2 border-t border-[var(--border)] pt-2 dark:border-white/[0.08]">
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[11px] font-semibold text-[var(--text-secondary)] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]">答</span>
+                    <span className="line-clamp-2 text-xs leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{answerPreview}</span>
                   </span>
                 </motion.span>
               )}
@@ -1642,17 +1642,17 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="mb-4 flex items-center justify-between">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 truncate text-sm font-semibold text-[#403C32] dark:text-[#E2E8F2]">
-            <SlidersHorizontal className="h-4 w-4 flex-shrink-0 text-[#D7663E]" />
+          <h2 className="flex items-center gap-2 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+            <SlidersHorizontal className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
             对话参数
           </h2>
-          <p className="mt-1 truncate text-xs text-[#8C8576] dark:text-[#8E99AD]">当前会话 · 默认预设</p>
+          <p className="mt-1 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">当前会话 · 默认预设</p>
         </div>
         <button
           onClick={onClose}
           aria-label="关闭对话参数"
           title="关闭对话参数"
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-[#756E61] transition-colors hover:bg-[#E7E2D6] dark:text-[#B8C2D4] dark:hover:bg-white/[0.08]"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
         >
           <X className="h-4 w-4" />
         </button>
@@ -1661,33 +1661,33 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div>
           <div className="border-b border-black/[0.06] pb-5 dark:border-white/[0.06]">
-            <label className="mb-2 block text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">系统提示词</label>
+            <label className="mb-2 block text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">系统提示词</label>
             <textarea
               value={state.chatConfig.systemPrompt}
               onChange={(event) => dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: event.target.value } })}
               rows={7}
               placeholder="为当前对话设置角色、规则或输出格式"
-              className="w-full resize-none rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm leading-6 text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
+              className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm leading-6 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
             />
             <div className="mt-3 flex min-w-0 gap-2">
               <input
                 value={presetTitle}
                 onChange={(event) => setPresetTitle(event.target.value)}
                 placeholder="预设名称"
-                className="min-w-0 flex-1 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-3 py-2 text-sm text-[#403C32] outline-none transition-colors placeholder:text-[#A39C8C] focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2] dark:placeholder:text-[#6B7688]"
+                className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
               />
               <button
                 type="button"
                 onClick={handleSavePreset}
                 disabled={!currentPrompt}
-                className="h-10 flex-shrink-0 rounded-lg bg-[#403C32] px-3 text-sm font-medium text-[#FBFAF6] transition-colors hover:bg-[#2F2C25] disabled:cursor-not-allowed disabled:bg-[#D8D2C5] disabled:text-[#8C8576] dark:bg-[#6EA8DC] dark:text-[#0D0F14] dark:hover:bg-[#8BBDE8] dark:disabled:bg-white/[0.08] dark:disabled:text-[#6B7688]"
+                className="h-10 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] dark:disabled:bg-white/[0.08] dark:disabled:text-[var(--text-tertiary)]"
               >
                 保存
               </button>
             </div>
             {state.systemPromptPresets.length > 0 && (
               <div className="mt-3 space-y-2">
-                <div className="text-xs font-medium text-[#8C8576] dark:text-[#8E99AD]">提示词预设</div>
+                <div className="text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">提示词预设</div>
                 <div className="grid gap-2">
                   {state.systemPromptPresets.map((preset) => {
                     const selected = preset.prompt === state.chatConfig.systemPrompt;
@@ -1696,7 +1696,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                         key={preset.id}
                           className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 transition-colors ${
                           selected
-                            ? 'bg-[#F8EDE7] dark:bg-[#1C2836]'
+                            ? 'bg-[var(--state-danger-bg)] dark:bg-[var(--surface-raised)]'
                             : 'bg-black/[0.025] hover:bg-black/[0.045] dark:bg-white/[0.025] dark:hover:bg-white/[0.045]'
                         }`}
                       >
@@ -1706,13 +1706,13 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                           className="min-w-0 flex-1 text-left"
                           title={preset.prompt}
                         >
-                          <div className="truncate text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">{preset.title}</div>
-                          <div className="mt-0.5 truncate text-xs text-[#8C8576] dark:text-[#8E99AD]">{preset.prompt}</div>
+                          <div className="truncate text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{preset.title}</div>
+                          <div className="mt-0.5 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{preset.prompt}</div>
                         </button>
                         <button
                           type="button"
                           onClick={() => dispatch({ type: 'DELETE_SYSTEM_PROMPT_PRESET', payload: { presetId: preset.id } })}
-                          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-[#8A8374] transition-colors hover:bg-[#F0DDD6] hover:text-[#C44E36] dark:text-[#8E99AD] dark:hover:bg-[#1C2836] dark:hover:text-[#5A96D0]"
+                          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-[var(--text-tertiary)] transition-colors hover:bg-[var(--state-danger-border)] hover:text-[var(--state-danger)] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--state-danger)]"
                           title="删除预设"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
@@ -1773,7 +1773,7 @@ function InputToolButton({ icon: Icon, label, onClick, disabled }: {
     <button
       onClick={onClick}
       disabled={disabled}
-      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[#5F5F67] transition-colors hover:bg-black/[0.055] disabled:opacity-40 dark:text-[#B8C2D4] dark:hover:bg-[#222733]"
+      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[var(--text-primary)] transition-colors hover:bg-black/[0.055] disabled:opacity-40 dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]"
       title={label}
     >
       <Icon className="h-4 w-4" />
@@ -1795,7 +1795,7 @@ function ChatNumberSetting({ label, description, value, min, max, step, onChange
   return (
     <div className="border-b border-black/[0.06] py-4 last:border-b-0 dark:border-white/[0.06]">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <label className="text-sm font-medium text-[#403C32] dark:text-[#E2E8F2]">{label}</label>
+        <label className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</label>
         <input
           type="number"
           value={safeValue}
@@ -1806,11 +1806,11 @@ function ChatNumberSetting({ label, description, value, min, max, step, onChange
             const next = Number(event.target.value);
             if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, next)));
           }}
-          className="mono-font w-24 rounded-lg border border-[#DDD8CC] bg-[#FBFAF6] px-2 py-1 text-right text-sm text-[#403C32] outline-none transition-colors focus:border-[#D7663E] dark:border-white/[0.08] dark:bg-[#141720] dark:text-[#E2E8F2]"
+          className="mono-font w-24 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
         />
       </div>
       {description && (
-        <p className="mb-3 text-xs leading-5 text-[#7D766B] dark:text-[#8E99AD]">{description}</p>
+        <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{description}</p>
       )}
       <input
         type="range"
@@ -1819,9 +1819,9 @@ function ChatNumberSetting({ label, description, value, min, max, step, onChange
         max={max}
         step={step}
         onChange={(event) => onChange(Number(event.target.value))}
-        className="h-1.5 w-full cursor-pointer appearance-none rounded-full accent-[#D7663E] transition-[background] duration-200"
+        className="h-1.5 w-full cursor-pointer appearance-none rounded-full accent-[var(--accent)] transition-[background] duration-200"
         style={{
-          background: `linear-gradient(to right, #D7663E ${percent}%, rgba(120,110,95,0.18) ${percent}%)`,
+          background: `linear-gradient(to right, var(--accent) ${percent}%, rgba(120,110,95,0.18) ${percent}%)`,
         }}
       />
     </div>

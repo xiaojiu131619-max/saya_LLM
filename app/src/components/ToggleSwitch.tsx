@@ -16,7 +16,7 @@ export default function ToggleSwitch({ checked, onChange, className = '', label 
       aria-label={label}
       onClick={() => onChange(!checked)}
       className={`relative w-12 h-6 rounded-full transition-colors duration-300 focus:outline-none ${
-        checked ? 'bg-[#D06646]' : 'bg-[#BDB8AD]'
+        checked ? 'bg-[var(--accent)]' : 'bg-[var(--status-standby)]'
       } ${className}`}
     >
       <motion.div
