@@ -1,17 +1,9 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import {
-  Activity,
   ArrowLeft,
   ChevronRight,
-  CircleAlert,
-  CircleCheck,
   Database,
-  FilePlus2,
-  Gauge,
-  HardDrive,
-  MemoryStick,
   MessageSquare,
-  Power,
   Server,
   Settings,
   Terminal,
@@ -25,31 +17,13 @@ import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
 import {
-  addDesktopModelDir,
   getDesktopServerStatus,
   getDesktopServerLogs,
   isDesktopRuntime,
-  listenDesktopFileDrops,
-  loadDesktopModelFromPath,
-  scanDesktopModels,
   stopDesktopServer,
-  toFrontendModel,
 } from '@/lib/desktop';
 import type { ChatSession, MessageStats, ModelInfo } from '@/types';
-import { CHAT_HISTORY_MODEL_ID, latestRuntimeStatsFromServerLogs } from '@/features/chat/chatUtils';
-
-function isGgufPath(path: string) {
-  return path.toLowerCase().endsWith('.gguf');
-}
-
-function parentDirectory(path: string) {
-  const slash = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
-  return slash > 0 ? path.slice(0, slash) : '';
-}
-
-function isPresent<T>(value: T | null | undefined): value is T {
-  return value !== null && value !== undefined;
-}
+import { CHAT_HISTORY_MODEL_ID, estimateSessionCtxTokens, latestRuntimeStatsFromServerLogs } from '@/features/chat/chatUtils';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -74,18 +48,12 @@ function formatTokensPerSec(value?: number) {
   return value && value > 0 ? `${value.toFixed(value >= 10 ? 1 : 2)} tok/s` : '--';
 }
 
-function formatCtxUsage(stats: MessageStats | undefined, model: ModelInfo | undefined) {
-  const used = stats?.ctxUsed ?? 0;
-  const total = stats?.ctxTotal || model?.loadConfig.ctxLength || model?.ctxLength || 0;
-  if (!total) return '--';
-  return `${used.toLocaleString()} / ${total.toLocaleString()}`;
-}
-
-function ctxPercentValue(stats: MessageStats | undefined, model: ModelInfo | undefined): number | undefined {
-  const used = stats?.ctxUsed ?? 0;
-  const total = stats?.ctxTotal || model?.loadConfig.ctxLength || model?.ctxLength || 0;
-  if (!Number.isFinite(used) || !Number.isFinite(total) || used <= 0 || total <= 0) return undefined;
-  return Math.min(100, Math.max(0, (used / total) * 100));
+function formatCtxUsage(sessionCtxUsed: number, total: number) {
+  if (!total || total <= 0) return '--';
+  // 与对话气泡同口径：本地会话累计水位（估算），百分比为主。
+  const percent = Math.min(100, Math.max(0, (sessionCtxUsed / total) * 100));
+  const percentText = percent.toFixed(percent >= 10 ? 0 : 1);
+  return `${percentText}% · ≈${Math.round(sessionCtxUsed).toLocaleString()} / ${total.toLocaleString()}`;
 }
 
 function formatGbPair(used: number, total: number) {
@@ -99,8 +67,6 @@ export default function ModelWorkspace() {
   const { state, dispatch } = useApp();
   // 触发 systemStats 每秒轮询，便于服务状态卡显示实时显存/内存占用。
   const systemStats = useSystemStats();
-  const [dropActive, setDropActive] = useState(false);
-  const [dropBusy, setDropBusy] = useState(false);
   const [apiRuntimeStats, setApiRuntimeStats] = useState<MessageStats | undefined>();
   const detailOpen = state.currentView === 'modelLoad';
   const llamaLogsOpen = state.currentView === 'llamaLogs';
@@ -112,6 +78,16 @@ export default function ModelWorkspace() {
   const tokensPerSec = loadedStats?.tokensPerSec
     ?? loadedModel?.avgTokensPerSec
     ?? averageTokensPerSec(loadedUsage);
+  // 本地会话水位：当前加载模型的活跃会话的累计 token 估算（与对话气泡同口径）。
+  const loadedModelId = loadedModel?.id;
+  const loadedModelSessions = loadedModelId ? state.chatSessions[loadedModelId] ?? state.chatSessions[CHAT_HISTORY_MODEL_ID] ?? [] : [];
+  const loadedActiveSessionId = loadedModelId ? state.activeChatSessionIds[loadedModelId] : undefined;
+  const loadedActiveSession = (loadedActiveSessionId
+    ? loadedModelSessions.find((session) => session.id === loadedActiveSessionId)
+    : undefined)
+    ?? loadedModelSessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const sessionCtxUsed = estimateSessionCtxTokens(loadedActiveSession?.messages ?? []);
+  const sessionCtxCapacity = loadedModel?.loadConfig.ctxLength || loadedModel?.ctxLength || 0;
   const linkState = state.serverRunning && loadedModel ? '已连接' : state.serverRunning ? '服务在线' : '未连接';
   const handleStopServer = async () => {
     try {
@@ -131,83 +107,6 @@ export default function ModelWorkspace() {
     }
     dispatch({ type: 'SET_VIEW', payload: 'settings' });
   };
-
-  const addDroppedModels = useCallback(async (paths: string[]) => {
-    if (!isDesktopRuntime()) {
-      dispatch({ type: 'SET_APP_STATUS', payload: '请在桌面版中拖拽 GGUF 文件。' });
-      return;
-    }
-
-    const ggufPaths = paths.filter(isGgufPath);
-    if (ggufPaths.length === 0) {
-      dispatch({ type: 'SET_APP_STATUS', payload: '请拖拽 .gguf 模型文件到模型加载界面。' });
-      return;
-    }
-
-    setDropBusy(true);
-    dispatch({ type: 'SET_APP_STATUS', payload: '正在添加拖拽的 GGUF 模型...' });
-
-    try {
-      let latestDirs = state.modelDirs;
-      const dirs = Array.from(new Set(ggufPaths.map(parentDirectory).filter(Boolean)));
-      for (const dir of dirs) {
-        latestDirs = await addDesktopModelDir(dir);
-      }
-      dispatch({ type: 'SET_MODEL_DIRS', payload: latestDirs });
-
-      const parsed = (await Promise.all(
-        ggufPaths.map((path) => loadDesktopModelFromPath(path).catch(() => null))
-      )).filter(isPresent);
-      const droppedModels = parsed.map((model) => toFrontendModel(model));
-      if (droppedModels.length > 0) {
-        dispatch({ type: 'UPSERT_MODELS', payload: droppedModels });
-        dispatch({ type: 'SET_SELECTED_MODEL', payload: droppedModels[0].id });
-        dispatch({ type: 'SET_VIEW', payload: 'modelLoad' });
-      }
-
-      const scanned = await scanDesktopModels(true).catch(() => []);
-      if (scanned.length > 0) {
-        dispatch({ type: 'UPSERT_MODELS', payload: scanned.map(toFrontendModel) });
-      }
-
-      dispatch({
-        type: 'SET_APP_STATUS',
-        payload: droppedModels.length > 0
-          ? `已添加 ${droppedModels.length} 个拖拽模型，并记住模型目录。`
-          : '已记住模型目录，请刷新模型列表。',
-      });
-    } catch (error) {
-      dispatch({ type: 'SET_APP_STATUS', payload: `拖拽添加模型失败：${String(error)}` });
-    } finally {
-      setDropBusy(false);
-    }
-  }, [dispatch, state.modelDirs]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    void listenDesktopFileDrops((payload) => {
-      if (payload.type === 'enter' || payload.type === 'over') {
-        setDropActive(true);
-        return;
-      }
-      if (payload.type === 'leave') {
-        setDropActive(false);
-        return;
-      }
-      if (payload.type === 'drop') {
-        setDropActive(false);
-        void addDroppedModels(payload.paths ?? []);
-      }
-    }).then((nextUnlisten) => {
-      if (cancelled) { nextUnlisten?.(); return; }
-      unlisten = nextUnlisten;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [addDroppedModels]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -261,60 +160,17 @@ export default function ModelWorkspace() {
     };
   }, [loadedModel, shouldFetchRuntimeStats]);
 
-  const handleDragOver = (event: React.DragEvent) => {
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-    setDropActive(true);
-  };
-
-  const handleDragLeave = (event: React.DragEvent) => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      setDropActive(false);
-    }
-  };
-
-  const handleDomDrop = (event: React.DragEvent) => {
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
-    event.preventDefault();
-    setDropActive(false);
-    const paths = Array.from(event.dataTransfer.files ?? [])
-      .map((file) => (file as File & { path?: string }).path ?? '')
-      .filter(Boolean);
-    if (paths.length > 0) {
-      void addDroppedModels(paths);
-      return;
-    }
-    dispatch({ type: 'SET_APP_STATUS', payload: '未读取到文件路径，请在桌面版窗口内拖拽 .gguf 文件。' });
-  };
-
   return (
     <div
-      className="paper-surface relative flex h-full min-h-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-primary)] shadow-sm dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDomDrop}
+      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
     >
-      {(dropActive || dropBusy) && (
-        <div
-          className="anim-fade-in pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--app-bg)]/95 dark:bg-[var(--app-bg)]/95"
-        >
-          <div className="rounded-xl border border-[var(--border)] bg-[var(--app-bg)] px-5 py-4 text-center shadow-lg dark:border-white/[0.08] dark:bg-[var(--surface-raised)]">
-            <FilePlus2 className="mx-auto mb-2 h-6 w-6 text-[var(--accent)]" />
-            <div className="text-sm font-semibold text-[var(--text-primary)]">
-              {dropBusy ? '正在添加模型' : '松开即可添加 GGUF 模型'}
-            </div>
-            <div className="mt-1 text-xs text-[var(--text-secondary)]">会自动记住模型所在目录并读取模型表头</div>
-          </div>
-        </div>
-      )}
-      <aside className="hidden min-h-0 w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-[var(--border)] bg-[#F2F0EA] p-2 dark:border-white/[0.08] dark:bg-[var(--app-bg)] md:flex">
+      <aside className="hidden min-h-0 w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-[var(--border)] bg-[var(--surface-muted)] p-2 dark:border-white/[0.08] dark:bg-[var(--surface-muted)] md:flex">
         <div className="px-4 pb-4 pt-3">
           <div className="mb-4 flex items-center gap-3">
             <button
               type="button"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[#DDD7CB] hover:text-[var(--accent)]"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
               title="切换到对话"
               aria-label="切换到对话"
             >
@@ -348,14 +204,14 @@ export default function ModelWorkspace() {
           )}
         </nav>
 
-        <div className="mt-5 space-y-2 px-2">
+        <div className="mt-5 px-3">
           <LoadedModelPanel model={loadedModel} running={state.serverRunning} onStop={handleStopServer} />
           <ServiceStatusPanel
             running={state.serverRunning}
             port={state.serverPort}
             tokensPerSec={formatTokensPerSec(tokensPerSec)}
-            ctxUsage={formatCtxUsage(loadedStats, loadedModel)}
-            ctxPercent={ctxPercentValue(loadedStats, loadedModel)}
+            ctxUsage={formatCtxUsage(sessionCtxUsed, sessionCtxCapacity)}
+            ctxPercent={sessionCtxCapacity > 0 ? Math.min(100, (sessionCtxUsed / sessionCtxCapacity) * 100) : undefined}
             vramUsage={formatGbPair(systemStats.vramUsed, systemStats.vramTotal)}
             ramUsage={formatGbPair((systemStats.ramUsage / 100) * systemStats.ramTotal, systemStats.ramTotal)}
             linkState={linkState}
@@ -368,28 +224,28 @@ export default function ModelWorkspace() {
           />
         </div>
 
-        <div className="mx-2 mb-3 mt-auto space-y-2">
+        <div className="mx-3 mb-3 mt-auto border-t border-[var(--border-subtle)] pt-1">
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-            className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-colors hover:bg-[var(--surface-muted)]"
+            className="flex w-full items-center justify-between border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40"
             title="打开对话界面"
           >
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
-              <MessageSquare className="h-3.5 w-3.5 text-[var(--accent)]" />
-              当前目标
+            <div className="flex min-w-0 items-center gap-2">
+              <MessageSquare className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--text-tertiary)]">切换到对话</div>
+                <div className="truncate text-sm font-medium text-[var(--text-primary)]">
+                  {selectedModel?.name ?? '尚未选择模型'}
+                </div>
+              </div>
             </div>
-            <div className="truncate text-sm font-medium text-[var(--text-primary)]">
-              {selectedModel?.name ?? '尚未选择模型'}
-            </div>
-            <div className="mt-1 truncate text-xs text-[var(--text-tertiary)]">
-              {selectedModel ? `${selectedModel.params} · ${selectedModel.quant}` : '从模型列表进入参数界面'}
-            </div>
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 py-1">
             <ThemeToggleButton theme={state.theme} onClick={() => dispatch({ type: 'TOGGLE_THEME' })} />
             <button
               onClick={openSettings}
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--border)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
+              className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]/40"
               title="打开设置"
             >
               <Settings className="h-4 w-4 flex-shrink-0" />
@@ -433,27 +289,28 @@ export default function ModelWorkspace() {
 }
 
 function LoadedModelPanel({ model, running, onStop }: { model?: ModelInfo; running: boolean; onStop: () => void }) {
-  const Icon = running && model ? CircleCheck : CircleAlert;
   return (
-    <div className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
-      <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+    <div className="border-b border-[var(--border-subtle)] py-2.5">
+      <div className="mb-1 flex items-center justify-between text-[11px] text-[var(--text-tertiary)]">
         <span>已加载模型</span>
-        <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${running && model ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
+        <span
+          className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${running && model ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`}
+          title={running ? '运行中' : '未运行'}
+        />
       </div>
-      <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+      <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
         {model?.name ?? '暂无运行模型'}
       </div>
-      <div className="mt-1 truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+      <div className="mt-0.5 truncate text-[11px] text-[var(--text-tertiary)]">
         {model ? `${model.params} · ${model.quant}` : '加载后会显示名称与状态'}
       </div>
       <button
         type="button"
         onClick={onStop}
         disabled={!running}
-        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--state-danger-bg)] px-2 py-1.5 text-xs font-semibold text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] disabled:cursor-not-allowed disabled:bg-black/[0.03] disabled:text-[var(--text-tertiary)] dark:border-white/[0.08] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)] dark:disabled:bg-white/[0.04] dark:disabled:text-[var(--text-tertiary)]"
+        className="mt-1.5 text-[11px] font-medium text-[var(--state-danger)] transition-colors hover:underline disabled:cursor-not-allowed disabled:text-[var(--text-tertiary)] disabled:no-underline"
         title="停止当前 llama-server 服务"
       >
-        <Power className="h-3.5 w-3.5" />
         停止运行
       </button>
     </div>
@@ -465,26 +322,20 @@ function LlamaLogsCard({ running, active, onOpen }: { running: boolean; active: 
     <button
       type="button"
       onClick={onOpen}
-      className={`w-full rounded-md border px-3 py-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/35 ${
-        active
-          ? 'border-[var(--accent)]/40 bg-[var(--state-danger-bg)] hover:bg-[var(--state-danger-border)] dark:border-[var(--accent)]/40 dark:bg-[var(--surface-raised)] dark:hover:bg-[var(--state-danger-bg)]'
-          : 'border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]'
+      className={`flex w-full items-center justify-between border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40 ${
+        active ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
       }`}
       title="查看 llama-server 日志"
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
-          <Terminal className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)] dark:text-[var(--accent)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`} />
-          <span className="truncate">llama 日志</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className={`h-1.5 w-1.5 rounded-full ${running ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`} />
-          <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
-        </div>
+      <div className="flex min-w-0 items-center gap-2">
+        <Terminal className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`} />
+        <span className="text-sm">llama 日志</span>
+        <span
+          className={`ml-1 h-1.5 w-1.5 rounded-full ${running ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`}
+          title={running ? '服务运行中' : '服务未运行'}
+        />
       </div>
-      <div className="mt-1 truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-        {running ? '推理内核输出 · 实时刷新' : '服务未运行 · 可查看历史输出'}
-      </div>
+      <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
     </button>
   );
 }
@@ -506,61 +357,54 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
     <button
       type="button"
       onClick={onOpenDetails}
-      className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left transition-colors hover:bg-[var(--surface-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/35 dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
+      className="block w-full border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40"
       title="查看 API 状态详情"
     >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
-          <Server className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
-          <span className="truncate">服务状态</span>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+          <Server className="h-3.5 w-3.5 flex-shrink-0" />
+          <span>服务状态</span>
         </div>
         <div className="flex items-center gap-1">
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${running ? 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]' : 'bg-[#ECE7DC] text-[var(--text-tertiary)] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]'}`}>
+          <span className={`text-[10px] font-medium ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`}>
             {running ? `:${port}` : '未运行'}
           </span>
           <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        <ServiceMetric icon={Activity} label="速度" value={tokensPerSec} />
-        <ServiceMetric icon={Gauge} label="上下文" value={ctxUsage} extra={
-          ctxHas ? (
-            <div className="mt-1 flex items-center gap-1">
-              <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.10]">
-                <div
-                  className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
-                  style={{ width: `${Math.min(100, ctxPercent!)}%` }}
-                />
-              </div>
-              <span className="mono-font flex-shrink-0 text-[10px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{Math.round(ctxPercent!)}%</span>
-            </div>
-          ) : undefined
-        } />
-        <ServiceMetric icon={HardDrive} label="显存" value={vramUsage} />
-        <ServiceMetric icon={MemoryStick} label="内存" value={ramUsage} />
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="flex-shrink-0 text-[var(--text-tertiary)]">速度</span>
+          <span className="mono-font break-all text-right leading-4 text-[var(--text-primary)]" title={tokensPerSec}>{tokensPerSec}</span>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="flex-shrink-0 text-[var(--text-tertiary)]">上下文</span>
+          <span className="mono-font break-all text-right leading-4 text-[var(--text-primary)]" title={ctxUsage}>{ctxUsage}</span>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="flex-shrink-0 text-[var(--text-tertiary)]">显存</span>
+          <span className="mono-font break-all text-right leading-4 text-[var(--text-primary)]" title={vramUsage}>{vramUsage}</span>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="flex-shrink-0 text-[var(--text-tertiary)]">内存</span>
+          <span className="mono-font break-all text-right leading-4 text-[var(--text-primary)]" title={ramUsage}>{ramUsage}</span>
+        </div>
       </div>
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-        <LinkIcon className={`h-3.5 w-3.5 flex-shrink-0 ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
-        <span className="truncate">{linkState}</span>
+      {ctxHas && (
+        <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+          <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]">
+            <div
+              className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
+              style={{ width: `${Math.min(100, ctxPercent!)}%` }}
+            />
+          </div>
+          <span className="mono-font flex-shrink-0 text-[var(--text-tertiary)]">{Math.round(ctxPercent!)}% ctx</span>
+        </div>
+      )}
+      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+        <LinkIcon className={`h-3 w-3 flex-shrink-0 ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
+        <span className="break-words leading-4">{linkState}</span>
       </div>
     </button>
-  );
-}
-
-function ServiceMetric({ icon: Icon, label, value, extra }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  extra?: React.ReactNode;
-}) {
-  return (
-    <div className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1.5 dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
-      <div className="flex items-center gap-1 text-[10px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-        <Icon className="h-3 w-3 flex-shrink-0" />
-        <span>{label}</span>
-      </div>
-      <div className="mono-font mt-0.5 truncate text-[11px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
-      {extra}
-    </div>
   );
 }

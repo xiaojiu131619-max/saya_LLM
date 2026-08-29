@@ -4,7 +4,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowDown,
   ArrowUp,
+  Check,
   CheckCircle2,
+  ChevronDown,
   FileText,
   FileWarning,
   Info,
@@ -15,6 +17,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Tag,
   Trash2,
   Wrench,
   X,
@@ -23,7 +26,7 @@ import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion } from '@/lib/desktop';
+import { checkVideoRuntime, effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type VideoRuntimeInfo } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import type { ChatMessageContentPart } from '@/types';
 import {
@@ -38,6 +41,7 @@ import {
   ctxUsagePercent,
   dayLabel,
   downloadFile,
+  estimateTextTokens,
   exportSessionAsJson,
   exportSessionAsMarkdown,
   fileExtension,
@@ -133,10 +137,24 @@ export default function ChatPage() {
 
   const activeModel = state.models.find((m) => m.id === state.activeModelId);
   const activeVideoSupport = modelVideoSupport(activeModel);
+  // 视频候选模型的原生视频依赖 ffmpeg/ffprobe，提前检测一次并在提示里说明。
+  const [videoRuntime, setVideoRuntime] = useState<VideoRuntimeInfo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void checkVideoRuntime().then((info) => {
+      if (!cancelled) setVideoRuntime(info);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
   const attachmentNotice = useMemo(() => {
     if (!pendingAttachments.some((attachment) => attachment.kind === 'video')) return null;
     if (activeVideoSupport === 'candidate') {
-      return '当前模型属于视频候选：ffmpeg/ffprobe 就绪时使用原生视频，否则自动改用抽帧兼容。';
+      const ready = videoRuntime?.native_video_ready;
+      return ready
+        ? '当前模型属于视频候选：已检测到 ffmpeg/ffprobe，将以原生视频处理。'
+        : videoRuntime
+          ? '当前模型属于视频候选：未检测到 ffmpeg/ffprobe，将自动改用抽帧兼容；可安装 ffmpeg 或把 ffmpeg.exe/ffprobe.exe 放入 resources 目录。'
+          : '当前模型属于视频候选：ffmpeg/ffprobe 就绪时使用原生视频，否则自动改用抽帧兼容。';
     }
     if (activeVideoSupport === 'frames') {
       return '当前模型未验证原生视频，将最多抽取 8 帧作为图片分析，不能保证动作和时间关系。';
@@ -145,7 +163,7 @@ export default function ChatPage() {
       return '当前模型不支持视频输入，请切换到已验证的视频模型。';
     }
     return null;
-  }, [activeVideoSupport, pendingAttachments]);
+  }, [activeVideoSupport, pendingAttachments, videoRuntime]);
   const loadedModel = activeModel?.status === 'loaded'
     ? activeModel
     : state.models.find((model) => model.status === 'loaded');
@@ -178,6 +196,16 @@ export default function ChatPage() {
     ? Math.min(100, Math.max(0, (systemStats.vramUsed / systemStats.vramTotal) * 100))
     : undefined;
   const modelMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
+  // 本地会话累计水位：按消息顺序逐条粗估 token（气泡与服务状态面板共用这一口径）。
+  const sessionCtxTotals = useMemo(() => {
+    let acc = 0;
+    return modelMessages.map((msg) => {
+      acc += estimateTextTokens(msg.content) + estimateTextTokens(msg.reasoningContent ?? '');
+      return acc;
+    });
+  }, [modelMessages]);
+  // 水位基准：当前加载模型的上下文容量（-c）。
+  const ctxCapacity = activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0;
   const streamingMessage = modelMessages.find((message) => message.isStreaming);
   // 当前会话是否在生成——决定本会话的输入区状态。
   const isGenerating = Boolean(streamingMessage);
@@ -1104,7 +1132,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--surface)] text-[15.5px] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
+      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)] text-[15.5px] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1116,9 +1144,9 @@ export default function ChatPage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--surface)]/95 dark:bg-[var(--app-bg)]/95"
+            className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center border border-dashed border-[var(--accent)] bg-[var(--app-bg)]/80"
           >
-            <div className="rounded-lg bg-white px-5 py-4 text-center dark:bg-[var(--app-bg)]">
+            <div className="border-b border-[var(--border-subtle)] px-5 py-4 text-center">
               <FileText className="mx-auto mb-2 h-6 w-6 text-[var(--accent)]" />
               <div className="text-[15px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">松开即可上传到当前对话</div>
               <div className="mt-1 text-[13px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
@@ -1159,7 +1187,7 @@ export default function ChatPage() {
         vramPercent={vramPercent}
       />
 
-      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[var(--surface)] dark:bg-[var(--app-bg)]">
+      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
         <header className="flex min-w-0 items-center justify-between border-b border-black/[0.055] px-5 dark:border-white/[0.055]">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
@@ -1273,6 +1301,7 @@ export default function ChatPage() {
                           sessionId={activeSession?.id ?? ''}
                           sessionModelName={chatBubbleModelName}
                           sessionModelColor={activeSessionModelColor}
+                          sessionCtx={{ used: sessionCtxTotals[virtualRow.index] ?? 0, total: ctxCapacity }}
                           onEditAndResend={canChat && !isAnyGenerating ? handleEditAndResend : undefined}
                         />
                       </div>
@@ -1342,7 +1371,7 @@ export default function ChatPage() {
                   </div>
                 )}
 
-                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.10] dark:bg-[var(--app-bg)] dark:focus-within:border-[var(--accent)]/45">
+                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.14] dark:bg-[var(--surface)] dark:focus-within:border-white/25">
                   <textarea
                     ref={textareaRef}
                     value={inputText}
@@ -1351,6 +1380,9 @@ export default function ChatPage() {
                     placeholder={inputPlaceholder}
                     disabled={!canChat}
                     rows={2}
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
                     className="chat-composer-input max-h-[180px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] placeholder:text-[var(--text-secondary)] disabled:opacity-60 dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
                   />
                   <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2.5">
@@ -1371,7 +1403,7 @@ export default function ChatPage() {
                         disabled={!canChat}
                         className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:opacity-40 ${
                           state.chatConfig.reasoningMode === 'deep'
-                            ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[#6E3BD1] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[#25183D] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
+                            ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
                             : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
                         }`}
                         title="思考强度"
@@ -1472,7 +1504,7 @@ function IconButton({ icon: Icon, label, onClick, disabled, tone = 'neutral' }: 
       className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
         tone === 'danger'
           ? 'text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--surface-raised)]'
-          : 'text-[var(--text-secondary)] hover:bg-[#EEEAE1] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
+          : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
       }`}
       title={label}
     >
@@ -1604,7 +1636,7 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
                     第 {index + 1} 组问答
                   </span>
                   <span className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#F0E7E1] text-[11px] font-semibold text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">问</span>
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[11px] font-semibold text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">问</span>
                     <span className="line-clamp-2 text-xs leading-5 text-[var(--text-primary)] dark:text-[var(--text-primary)]">{questionPreview}</span>
                   </span>
                   <span className="mt-2 flex items-start gap-2 border-t border-[var(--border)] pt-2 dark:border-white/[0.08]">
@@ -1624,18 +1656,41 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
 
 function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
   const { state, dispatch } = useApp();
+  const [savingPreset, setSavingPreset] = useState(false);
   const [presetTitle, setPresetTitle] = useState('');
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const presetMenuRef = useRef<HTMLDivElement>(null);
   const currentPrompt = state.chatConfig.systemPrompt.trim();
+  const activePreset = state.systemPromptPresets.find((preset) => preset.prompt === state.chatConfig.systemPrompt);
 
-  const handleSavePreset = () => {
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (presetMenuRef.current && !presetMenuRef.current.contains(e.target as Node)) {
+        setPresetMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const applyPresetPrompt = (prompt: string) => {
+    dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: prompt } });
+    setPresetMenuOpen(false);
+  };
+
+  const cancelSavePreset = () => {
+    setSavingPreset(false);
+    setPresetTitle('');
+  };
+
+  const confirmSavePreset = () => {
+    if (!currentPrompt) return;
     dispatch({
       type: 'SAVE_SYSTEM_PROMPT_PRESET',
-      payload: {
-        title: presetTitle,
-        prompt: state.chatConfig.systemPrompt,
-      },
+      payload: { title: presetTitle, prompt: state.chatConfig.systemPrompt },
     });
     setPresetTitle('');
+    setSavingPreset(false);
   };
 
   return (
@@ -1661,7 +1716,19 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div>
           <div className="border-b border-black/[0.06] pb-5 dark:border-white/[0.06]">
-            <label className="mb-2 block text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">系统提示词</label>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <label className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">系统提示词</label>
+              {activePreset ? (
+                <span className="flex min-w-0 items-center gap-1 text-xs text-[var(--accent)]" title={`使用标签「${activePreset.title}」`}>
+                  <Tag className="h-3 w-3 flex-shrink-0" />
+                  <span className="truncate">{activePreset.title}</span>
+                </span>
+              ) : (
+                <span className="flex-shrink-0 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                  {state.chatConfig.systemPrompt.length > 0 ? `${state.chatConfig.systemPrompt.length} 字` : '未设置'}
+                </span>
+              )}
+            </div>
             <textarea
               value={state.chatConfig.systemPrompt}
               onChange={(event) => dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: event.target.value } })}
@@ -1669,55 +1736,156 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
               placeholder="为当前对话设置角色、规则或输出格式"
               className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm leading-6 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
             />
-            <div className="mt-3 flex min-w-0 gap-2">
-              <input
-                value={presetTitle}
-                onChange={(event) => setPresetTitle(event.target.value)}
-                placeholder="预设名称"
-                className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
-              />
-              <button
-                type="button"
-                onClick={handleSavePreset}
-                disabled={!currentPrompt}
-                className="h-10 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] dark:disabled:bg-white/[0.08] dark:disabled:text-[var(--text-tertiary)]"
-              >
-                保存
-              </button>
+
+            <div className="mt-3 flex min-w-0 items-center gap-2">
+              <div ref={presetMenuRef} className="relative min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => setPresetMenuOpen((value) => !value)}
+                  disabled={state.systemPromptPresets.length === 0}
+                  aria-expanded={presetMenuOpen}
+                  className="flex h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:hover:bg-white/[0.05]"
+                  title={state.systemPromptPresets.length === 0 ? '暂无预设，保存后可在此快速切换' : '选择已保存的预设'}
+                >
+                  <ChevronDown className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
+                  <span className={`min-w-0 truncate ${activePreset ? 'font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>
+                    {state.systemPromptPresets.length === 0
+                      ? '暂无预设'
+                      : activePreset
+                        ? activePreset.title
+                        : '选择预设'}
+                  </span>
+                  <span className="ml-auto flex-shrink-0 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                    {state.systemPromptPresets.length} 个
+                  </span>
+                </button>
+                <AnimatePresence>
+                  {presetMenuOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -4, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                      transition={{ duration: 0.14 }}
+                      className="absolute left-0 top-full z-30 mt-1.5 max-h-64 w-full overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                    >
+                      {state.systemPromptPresets.map((preset) => {
+                        const selected = preset.prompt === state.chatConfig.systemPrompt;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => applyPresetPrompt(preset.prompt)}
+                            title={preset.prompt}
+                            className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                              selected
+                                ? 'bg-[var(--surface-muted)] text-[var(--accent)] dark:bg-white/[0.07] dark:text-[var(--accent)]'
+                                : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate text-sm font-semibold">{preset.title}</span>
+                              {selected && <Check className="h-3.5 w-3.5 flex-shrink-0" />}
+                            </div>
+                            <div className="mt-0.5 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                              {preset.prompt || '（空）'}
+                            </div>
+                          </button>
+                        );
+                      })}
+                      <div className="px-3 pb-1 pt-2 text-[11px] leading-4 text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                        点击应用，同名保存会覆盖更新；删除请使用下方标签。
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+              {!savingPreset && (
+                <button
+                  type="button"
+                  onClick={() => setSavingPreset(true)}
+                  disabled={!currentPrompt}
+                  className="h-10 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] dark:disabled:bg-white/[0.08] dark:disabled:text-[var(--text-tertiary)]"
+                >
+                  存为标签
+                </button>
+              )}
             </div>
+
+            <AnimatePresence initial={false}>
+              {savingPreset && (
+                <motion.div
+                  key="save-preset-row"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.16 }}
+                  className="overflow-hidden"
+                >
+                  <div className="mt-2 flex min-w-0 gap-2">
+                    <input
+                      autoFocus
+                      value={presetTitle}
+                      onChange={(event) => setPresetTitle(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') confirmSavePreset();
+                        else if (event.key === 'Escape') cancelSavePreset();
+                      }}
+                      placeholder="输入标签名称，留空自动编号"
+                      className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={confirmSavePreset}
+                      disabled={!currentPrompt}
+                      className="h-9 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] disabled:dark:bg-white/[0.08] disabled:dark:text-[var(--text-tertiary)]"
+                    >
+                      确认
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelSavePreset}
+                      className="h-9 flex-shrink-0 rounded-lg px-3 text-sm text-[var(--text-secondary)] transition-colors hover:bg-black/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {state.systemPromptPresets.length > 0 && (
-              <div className="mt-3 space-y-2">
-                <div className="text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">提示词预设</div>
-                <div className="grid gap-2">
+              <div className="mt-4">
+                <div className="mb-2 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">预设标签 · 点击应用</div>
+                <div className="flex flex-wrap gap-1.5">
                   {state.systemPromptPresets.map((preset) => {
                     const selected = preset.prompt === state.chatConfig.systemPrompt;
                     return (
-                      <div
+                      <span
                         key={preset.id}
-                          className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 transition-colors ${
+                        className={`group/tag inline-flex max-w-full items-center gap-1 rounded-full border py-1 pl-2.5 pr-1 transition-colors ${
                           selected
-                            ? 'bg-[var(--state-danger-bg)] dark:bg-[var(--surface-raised)]'
-                            : 'bg-black/[0.025] hover:bg-black/[0.045] dark:bg-white/[0.025] dark:hover:bg-white/[0.045]'
+                            ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]'
+                            : 'border-[var(--border)] bg-black/[0.025] text-[var(--text-primary)] hover:border-black/20 hover:bg-black/[0.05] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
                         }`}
                       >
                         <button
                           type="button"
-                          onClick={() => dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: preset.prompt } })}
-                          className="min-w-0 flex-1 text-left"
-                          title={preset.prompt}
+                          onClick={() => applyPresetPrompt(preset.prompt)}
+                          className="max-w-[160px] truncate text-xs"
+                          title={selected ? `当前使用：${preset.title}` : `${preset.title}：${preset.prompt}`}
                         >
-                          <div className="truncate text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{preset.title}</div>
-                          <div className="mt-0.5 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{preset.prompt}</div>
+                          {preset.title}
                         </button>
                         <button
                           type="button"
                           onClick={() => dispatch({ type: 'DELETE_SYSTEM_PROMPT_PRESET', payload: { presetId: preset.id } })}
-                          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-[var(--text-tertiary)] transition-colors hover:bg-[var(--state-danger-border)] hover:text-[var(--state-danger)] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--state-danger)]"
-                          title="删除预设"
+                          aria-label={`删除标签 ${preset.title}`}
+                          title="删除该标签"
+                          className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-full text-current opacity-40 transition-all hover:bg-[var(--state-danger-border)] hover:text-[var(--state-danger)] hover:opacity-100 group-hover/tag:opacity-70 dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--state-danger)]"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <X className="h-3 w-3" />
                         </button>
-                      </div>
+                      </span>
                     );
                   })}
                 </div>

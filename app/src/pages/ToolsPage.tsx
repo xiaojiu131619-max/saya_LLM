@@ -5,7 +5,7 @@ import { LLAMA_CPP_TOOLS, toolLabel, toolScopeLabel } from '@/lib/llamaTools';
 
 function riskClass(risk: string) {
   if (risk === '高') return 'border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)]';
-  if (risk === '中') return 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[#9A6A00] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-warning)]';
+  if (risk === '中') return 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] dark:border-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-warning)]';
   return 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)] dark:border-[var(--state-success-border)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]';
 }
 
@@ -44,8 +44,8 @@ export default function ToolsPage() {
           />
         </div>
 
-        <div className="mx-auto max-w-3xl space-y-4 pb-12">
-          <section className="glass-panel p-4">
+        <div className="mx-auto max-w-3xl pb-12">
+          <section className="border-b border-[var(--border-subtle)] py-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div className="min-w-0">
                 <div className="mb-2 flex items-center gap-2">
@@ -72,7 +72,7 @@ export default function ToolsPage() {
                 <button
                   type="button"
                   onClick={() => updateTools(LLAMA_CPP_TOOLS.map((tool) => tool.id))}
-                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
                 >
                   <Check className="h-4 w-4" />
                   全部开启
@@ -80,7 +80,7 @@ export default function ToolsPage() {
                 <button
                   type="button"
                   onClick={() => updateTools([])}
-                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[#625C50] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.09]"
                 >
                   <RotateCcw className="h-4 w-4" />
                   全部关闭
@@ -89,8 +89,8 @@ export default function ToolsPage() {
             </div>
           </section>
 
-          <section className="glass-panel overflow-hidden">
-            <div className="border-b border-[var(--border)] px-5 py-4 dark:border-white/[0.08]">
+          <section className="overflow-hidden">
+            <div className="border-b border-[var(--border-subtle)] py-4">
               <div className="flex items-center gap-2">
                 <ShieldAlert className="h-4.5 w-4.5 text-[var(--accent)]" />
                 <h2 className="text-[15px] font-semibold text-primary-custom">可用工具</h2>
@@ -100,7 +100,7 @@ export default function ToolsPage() {
               </p>
             </div>
 
-            <div className="divide-y divide-[var(--border)] dark:divide-white/[0.08]">
+            <div className="divide-y divide-[var(--border-subtle)]">
               {LLAMA_CPP_TOOLS.map((tool) => {
                 const selected = enabledToolSet.has(tool.id);
                 return (
@@ -110,7 +110,7 @@ export default function ToolsPage() {
                     role="switch"
                     aria-checked={selected}
                     onClick={() => toggleTool(tool.id)}
-                    className="grid w-full gap-3 px-5 py-4 text-left transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.04] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                    className="grid w-full gap-3 py-4 text-left transition-colors hover:bg-[var(--surface-muted)]/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                   >
                     <span className="min-w-0">
                       <span className="flex min-w-0 flex-wrap items-center gap-2">

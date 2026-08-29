@@ -86,7 +86,7 @@ export default function ChatSidebar({
       initial={false}
       animate={{ width: sidebarWidth }}
       transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-      className="relative hidden min-h-0 flex-shrink-0 flex-col overflow-hidden border-r border-black/[0.055] bg-[var(--border)] will-change-[width] dark:border-white/[0.055] dark:bg-[var(--app-bg)] md:flex"
+      className="relative hidden min-h-0 flex-shrink-0 flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--surface-muted)] will-change-[width] dark:border-[var(--border-subtle)] dark:bg-[var(--surface-muted)] md:flex"
     >
       <button
         onClick={onToggleCollapse}
@@ -103,7 +103,7 @@ export default function ChatSidebar({
           <button
             type="button"
             onClick={onSwitchToModel}
-            className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-lg bg-black/[0.045] text-[14px] font-semibold text-[#55555D] transition-colors hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]"
+            className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-lg bg-black/[0.045] text-[14px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]"
             title="切换到模型管理"
             aria-label="切换到模型管理"
           >
@@ -123,7 +123,7 @@ export default function ChatSidebar({
 
         <button
           onClick={onNewSession}
-          className={`flex h-10 items-center gap-2 rounded-lg bg-black/[0.055] text-sm font-medium text-[var(--app-bg)] transition-[width,background-color,color] duration-200 hover:bg-black/[0.085] dark:bg-white/[0.065] dark:text-[var(--text-primary)] dark:hover:bg-[var(--surface-raised)] ${
+          className={`flex h-10 items-center gap-2 rounded-lg bg-black/[0.055] text-sm font-medium text-[var(--text-primary)] transition-[width,background-color,color] duration-200 hover:bg-black/[0.085] dark:bg-white/[0.065] dark:text-[var(--text-primary)] dark:hover:bg-[var(--surface-raised)] ${
             collapsed ? 'w-10 justify-center px-0' : 'w-full justify-start px-3'
           }`}
           title="新建对话"
@@ -155,7 +155,7 @@ export default function ChatSidebar({
           onClick={selectionMode && selectedSessionIds.size > 0 ? onDeleteSelectedSessions : onSelectionMode}
           className={`flex items-center gap-2 rounded-lg text-xs font-medium transition-[width,background-color,color] duration-200 ${
             selectionMode
-              ? 'bg-[var(--state-danger-border)] text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[#4A2D22]'
+              ? 'bg-[var(--state-danger-border)] text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)]'
               : 'text-[var(--text-secondary)] hover:bg-[var(--border)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
           } ${collapsed ? 'h-10 w-10 justify-center rounded-full px-0' : 'mt-1 h-9 w-full justify-start px-3'}`}
           title={selectionActionLabel}

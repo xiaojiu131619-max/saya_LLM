@@ -45,7 +45,9 @@ fn cache_path(file_path: &Path) -> PathBuf {
     get_cache_dir().join(format!("{:016x}.json", hash))
 }
 
-const SCANNER_VERSION: u32 = 16;
+// v18：MTP 架构白名单对齐部署内核二进制标记（补 GLM4/GLM-DSA/DeepSeek32/DeepSeek4/
+// MiMo2/Nemotron-H-MoE/Qwen3Next/HY-V3，保留 cohere2moe/step35），递增版本使旧扫描缓存失效。
+const SCANNER_VERSION: u32 = 18;
 
 fn infer_video_support(
     name: &str,
@@ -97,6 +99,8 @@ fn is_companion_gguf_stem(lower_stem: &str) -> bool {
     lower_stem.starts_with("mmproj")
         || lower_stem.contains("mmproj")
         || lower_stem.starts_with("mtp")
+        || lower_stem.starts_with("dspark")
+        || lower_stem.starts_with("dflash")
 }
 
 fn split_gguf_info(path: &Path) -> Option<(u32, u32)> {
@@ -224,6 +228,8 @@ fn file_meta(path: &Path) -> Option<(u64, u64)> {
 /// Include all sibling GGUF changes in the cache key. Official MTP heads are
 /// usually prefixed with `mtp-`, but Gemma 4 Assistant heads can use a regular
 /// model filename and are identified from their GGUF architecture metadata.
+/// Sidecar subdirectories (`MTP/`, `dspark/`, `dflash/`) are hashed too, so
+/// adding or removing a drafter there invalidates the cached pairing.
 fn companion_signature(model_path: &Path) -> u64 {
     let Some(parent) = model_path.parent() else {
         return 0;
@@ -237,10 +243,32 @@ fn companion_signature(model_path: &Path) -> u64 {
         .map(|entry| entry.path())
         .filter(|path| path != model_path)
         .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
         })
         .collect::<Vec<_>>();
+    for subdir in ["MTP", "dspark", "dflash"] {
+        for entry in std::fs::read_dir(parent).ok().into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().eq_ignore_ascii_case(subdir) {
+                let dir = entry.path();
+                if dir.is_dir() {
+                    if let Ok(children) = std::fs::read_dir(&dir) {
+                        companions.extend(children.flatten().map(|child| child.path()).filter(
+                            |path| {
+                                path.is_file()
+                                    && path.extension().is_some_and(|ext| {
+                                        ext.eq_ignore_ascii_case("gguf")
+                                    })
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
     companions.sort();
 
     let mut hasher = DefaultHasher::new();
@@ -484,6 +512,64 @@ pub(crate) fn mtp_draft_is_compatible(main: &GgufMetadata, draft: &GgufMetadata)
     true
 }
 
+/// 侧车文件的有效 stem（小写）；分片侧车（-00001-of-00002）折叠到分片前缀，
+/// 以便 `<模型名>-Q8_0-MTP-00001-of-00002.gguf` 能按 `-mtp` 后缀命中。
+fn companion_stem_lower(path: &Path) -> String {
+    let base = split_gguf_prefix(path).unwrap_or_else(|| {
+        path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
+    base.to_ascii_lowercase()
+}
+
+/// 侧车候选目录：模型所在目录 + unsloth 官方子目录布局（MTP/ dspark/ dflash/）。
+fn companion_search_dirs(dir: &Path, kind: &str) -> Vec<PathBuf> {
+    let mut dirs = vec![dir.to_path_buf()];
+    let subdir = match kind {
+        "mtp" => "MTP",
+        "dspark" => "dspark",
+        "dflash" => "dflash",
+        _ => return dirs,
+    };
+    for entry in std::fs::read_dir(dir).ok().into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().eq_ignore_ascii_case(subdir) && entry.path().is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    dirs
+}
+
+fn companion_stem_matches(stem: &str, kind: &str, target: Option<&GgufMetadata>) -> bool {
+    match kind {
+        "mmproj" => stem.starts_with("mmproj") || stem.contains("mmproj"),
+        // llama.cpp's converter and sibling resolver both use an `mtp-` prefix.
+        // Gemma 4 Assistant is a dedicated GGUF architecture and does not
+        // require that prefix, so inspect all siblings for Gemma 4 targets.
+        "mtp" => {
+            stem.starts_with("mtp-")
+                || stem.starts_with("mtp_")
+                || stem.ends_with("-mtp")
+                || target.is_some_and(|main| main.architecture == "gemma4")
+        }
+        // DSpark / DFlash 侧车按 unsloth 发布命名识别：前缀 `dspark-<模型名>`
+        // 或后缀 `<模型名>-dspark`（dflash 同理），其余兄弟文件不参与。
+        "dspark" => {
+            stem.starts_with("dspark-")
+                || stem.starts_with("dspark_")
+                || stem.ends_with("-dspark")
+        }
+        "dflash" => {
+            stem.starts_with("dflash-")
+                || stem.starts_with("dflash_")
+                || stem.ends_with("-dflash")
+        }
+        _ => false,
+    }
+}
+
 fn find_companion_gguf(
     path: &Path,
     name: &str,
@@ -494,67 +580,85 @@ fn find_companion_gguf(
     let model_stem = name.to_ascii_lowercase();
     let mut best: Option<(u32, PathBuf, GgufMetadata)> = None;
 
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let candidate = entry.path();
-        if !candidate
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-        {
-            continue;
-        }
-        if candidate == path {
-            continue;
-        }
-        if split_gguf_info(&candidate).is_some_and(|(part, _)| part != 1) {
-            continue;
-        }
-
-        let stem = path_stem_lower(&candidate);
-        let is_match = match kind {
-            "mmproj" => stem.starts_with("mmproj") || stem.contains("mmproj"),
-            // llama.cpp's converter and sibling resolver both use an `mtp-` prefix.
-            // Gemma 4 Assistant is a dedicated GGUF architecture and does not
-            // require that prefix, so inspect all siblings for Gemma 4 targets.
-            "mtp" => {
-                stem.starts_with("mtp-")
-                    || stem.starts_with("mtp_")
-                    || target.is_some_and(|main| main.architecture == "gemma4")
+    for search_dir in companion_search_dirs(dir, kind) {
+        // 某个子目录不可读只跳过该目录，不中断其余目录的侧车发现。
+        for entry in std::fs::read_dir(&search_dir).ok().into_iter().flatten().flatten() {
+            let candidate = entry.path();
+            if !candidate
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            {
+                continue;
             }
-            _ => false,
-        };
-        if !is_match {
-            continue;
-        }
+            if candidate == path {
+                continue;
+            }
+            if split_gguf_info(&candidate).is_some_and(|(part, _)| part != 1) {
+                continue;
+            }
 
-        let metadata = match parse_gguf_header(&candidate) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        let valid = match kind {
-            "mmproj" => metadata.mmproj_supports_vision || metadata.mmproj_supports_audio,
-            "mtp" => target.is_some_and(|main| mtp_draft_is_compatible(main, &metadata)),
-            _ => false,
-        };
-        if !valid {
-            continue;
-        }
+            let stem = companion_stem_lower(&candidate);
+            if !companion_stem_matches(&stem, kind, target) {
+                continue;
+            }
 
-        let prefix_bonus = if stem.starts_with(kind) {
-            10
-        } else if kind == "mtp" && metadata.architecture == "gemma4-assistant" {
-            5
-        } else {
-            0
-        };
-        let score = candidate_score(&model_stem, &candidate, prefix_bonus);
-        if score == 0 {
-            continue;
-        }
-        if best
-            .as_ref()
-            .map_or(true, |(best_score, _, _)| score > *best_score)
-        {
-            best = Some((score, candidate, metadata));
+            let metadata = match parse_gguf_header(&candidate) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            let valid = match kind {
+                "mmproj" => metadata.mmproj_supports_vision || metadata.mmproj_supports_audio,
+                "mtp" => target.is_some_and(|main| mtp_draft_is_compatible(main, &metadata)),
+                // DSpark/DFlash 草稿架构随 llama.cpp 版本演进，这里不做 GGUF 内部
+                // 校验：命名匹配 + 可解析即候选，真正的配对校验由 llama-server 在
+                // 加载时完成并报错。
+                "dspark" | "dflash" => true,
+                _ => false,
+            };
+            if !valid {
+                continue;
+            }
+
+            // DSpark/DFlash 没有元数据级配对校验：必须先有名字证据（token 重叠
+            // 或子串包含），否则目录里任何 dspark-* 都会挂到任意模型上。
+            if matches!(kind, "dspark" | "dflash")
+                && candidate_score(&model_stem, &candidate, 0) == 0
+            {
+                continue;
+            }
+
+            let prefix_bonus = if stem.starts_with(kind) {
+                10
+            } else if kind == "mtp" && metadata.architecture == "gemma4-assistant" {
+                5
+            } else if stem.ends_with(&format!("-{kind}")) {
+                8
+            } else {
+                0
+            };
+            // DSpark/DFlash 模型卡推荐 Q8_0：同名多精度侧车按推荐档位优先。
+            let precision_bonus = match kind {
+                "dspark" | "dflash" => {
+                    if stem.contains("-q8_0") {
+                        6
+                    } else if stem.contains("-q4_0") {
+                        3
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+            let score = candidate_score(&model_stem, &candidate, prefix_bonus) + precision_bonus;
+            if score == 0 {
+                continue;
+            }
+            if best
+                .as_ref()
+                .map_or(true, |(best_score, _, _)| score > *best_score)
+            {
+                best = Some((score, candidate, metadata));
+            }
         }
     }
 
@@ -685,14 +789,21 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
 
     let mmproj = find_companion_gguf(path, &name, "mmproj", gguf.as_ref());
     let mtp_draft = find_companion_gguf(path, &name, "mtp", gguf.as_ref());
+    let dspark_draft = find_companion_gguf(path, &name, "dspark", gguf.as_ref());
+    let dflash_draft = find_companion_gguf(path, &name, "dflash", gguf.as_ref());
     let mmproj_path = mmproj.as_ref().map(|(path, _)| path.clone());
     let mtp_draft_path = mtp_draft.as_ref().map(|(path, _)| path.clone());
+    let dspark_draft_path = dspark_draft.as_ref().map(|(path, _)| path.clone());
+    let dflash_draft_path = dflash_draft.as_ref().map(|(path, _)| path.clone());
     let mmproj_metadata = mmproj.as_ref().map(|(_, metadata)| metadata);
     let video_support = infer_video_support(&name, &gguf_tags, mmproj_metadata);
     let has_embedded_mtp = gguf
         .as_ref()
         .map(|metadata| metadata.has_embedded_mtp)
         .unwrap_or(false);
+    // unsloth Dynamic GGUF：量化标签带 UD- 前缀（UD-Q4_K_XL / UD-IQ4_XS 等）
+    let upper_file_name = file_name.to_ascii_uppercase();
+    let is_dynamic_quant = upper_file_name.contains("UD-Q") || upper_file_name.contains("UD-IQ");
 
     Some(ModelInfo {
         name,
@@ -756,6 +867,9 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
             .and_then(|metadata| metadata.mmproj_audio_projector_type.clone()),
         video_support,
         mtp_draft_path,
+        dspark_draft_path,
+        dflash_draft_path,
+        is_dynamic_quant,
         supports_reasoning,
         gguf_tags,
         has_tool_template,
@@ -787,6 +901,60 @@ fn detect_tool_template(template: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// 写一个可被 parse_gguf_header 接受的最小合成 GGUF
+    ///（general.architecture + block_count + 一个主模型张量）。
+    fn write_scanner_gguf(path: &Path, arch: &str, block_count: u32) {
+        fn push_string(data: &mut Vec<u8>, value: &str) {
+            data.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            data.extend_from_slice(value.as_bytes());
+        }
+        fn push_u32_kv(data: &mut Vec<u8>, key: &str, value: u32) {
+            push_string(data, key);
+            data.extend_from_slice(&4u32.to_le_bytes());
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"GGUF");
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes()); // tensor count
+        data.extend_from_slice(&4u64.to_le_bytes()); // kv count
+        push_string(&mut data, "general.architecture");
+        data.extend_from_slice(&8u32.to_le_bytes()); // string
+        push_string(&mut data, arch);
+        push_u32_kv(&mut data, &format!("{arch}.block_count"), block_count);
+        push_u32_kv(&mut data, "general.name", 0);
+        push_u32_kv(&mut data, "general.context_length", 32_768);
+        // 张量：名字 + n_dims=1 + dim + type + offset
+        push_string(&mut data, "blk.0.attn_norm.weight");
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut file = std::fs::File::create(path).expect("create synthetic GGUF");
+        file.write_all(&data).expect("write synthetic GGUF");
+    }
+
+    fn scanner_test_dir(label: &str) -> PathBuf {
+        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-scanner-{}-{}-{}",
+            std::process::id(),
+            id,
+            label
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
 
     fn vision_projector(projector: &str) -> GgufMetadata {
         GgufMetadata {
@@ -794,6 +962,69 @@ mod tests {
             mmproj_projector_type: Some(projector.to_string()),
             ..GgufMetadata::default()
         }
+    }
+
+    #[test]
+    fn discovers_dspark_dflash_sidecars_in_root_and_subdir() {
+        let dir = scanner_test_dir("dspark");
+        let main = dir.join("Qwen3.5-30B-A3B-Q4_K_M.gguf");
+        write_scanner_gguf(&main, "qwen35", 48);
+        // 根目录前缀命名
+        write_scanner_gguf(&dir.join("dspark-Qwen3.5-30B-A3B-Q8_0.gguf"), "qwen35", 1);
+        // dflash 官方子目录布局
+        write_scanner_gguf(
+            &dir.join("dflash").join("dflash-Qwen3.5-30B-A3B-Q8_0.gguf"),
+            "qwen35",
+            1,
+        );
+
+        let info = parse_model_info_from_path(&main).expect("parse main model");
+        assert!(info.dspark_draft_path.is_some(), "应发现根目录 DSpark 侧车");
+        assert!(info.dflash_draft_path.is_some(), "应发现 dflash/ 子目录侧车");
+        assert!(!info.is_dynamic_quant);
+        assert!(info.mtp_draft_path.is_none());
+    }
+
+    #[test]
+    fn ud_quant_marker_flags_dynamic_quant() {
+        let dir = scanner_test_dir("ud");
+        let main = dir.join("Qwen3.5-30B-A3B-UD-Q4_K_XL.gguf");
+        write_scanner_gguf(&main, "qwen35", 48);
+
+        let info = parse_model_info_from_path(&main).expect("parse main model");
+        assert!(info.is_dynamic_quant, "UD- 前缀应标记为动态量化");
+        assert_eq!(info.quantization.as_deref(), Some("Q4_K_XL"));
+    }
+
+    #[test]
+    fn sidecar_does_not_attach_across_models() {
+        let dir = scanner_test_dir("cross");
+        let model_a = dir.join("Qwen3.5-30B-A3B-Q4_K_M.gguf");
+        let model_b = dir.join("Nemotron-3-Nano-Q4_K_M.gguf");
+        write_scanner_gguf(&model_a, "qwen35", 48);
+        write_scanner_gguf(&model_b, "nemotron3", 32);
+        // 侧车命名只匹配 Qwen3.5 家族
+        write_scanner_gguf(&dir.join("dspark-Qwen3.5-30B-A3B-Q8_0.gguf"), "qwen35", 1);
+
+        let info_a = parse_model_info_from_path(&model_a).expect("parse model a");
+        let info_b = parse_model_info_from_path(&model_b).expect("parse model b");
+        assert!(info_a.dspark_draft_path.is_some());
+        assert!(
+            info_b.dspark_draft_path.is_none(),
+            "家族不匹配的侧车不得跨模型挂载"
+        );
+    }
+
+    #[test]
+    fn drafter_sidecar_stems_are_excluded_from_model_list() {
+        // unsloth 官方布局：mtp-*/dspark-*/dflash-* 侧车不能作为独立模型出现在列表里
+        assert!(is_companion_gguf_stem("mtp-gemma-4-12b-it"));
+        assert!(is_companion_gguf_stem("dspark-qwen3.5-30b-q8_0"));
+        assert!(is_companion_gguf_stem("dflash-qwen3.5-30b-q8_0"));
+        assert!(is_companion_gguf_stem("mmproj-model-f16"));
+        // 正常模型名不应被误排除
+        assert!(!is_companion_gguf_stem("qwen3.5-30b-a3b-ud-q4_k_xl"));
+        assert!(!is_companion_gguf_stem("deepspark-7b-q4_k_m"));
     }
 
     #[test]

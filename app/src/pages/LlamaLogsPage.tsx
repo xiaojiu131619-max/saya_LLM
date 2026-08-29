@@ -204,8 +204,8 @@ export default function LlamaLogsPage() {
             </div>
           </div>
 
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-[#1E2430] bg-[var(--app-bg)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            <div className="flex items-center gap-1.5 border-b border-white/[0.06] bg-[var(--app-bg)] px-3 py-2">
+          <div className="relative min-h-0 flex-1 overflow-hidden border-t border-[var(--border-subtle)]">
+            <div className="flex items-center gap-1.5 border-b border-[var(--border-subtle)] px-3 py-2">
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-danger)]" />
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-warning)]" />
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-success)]" />

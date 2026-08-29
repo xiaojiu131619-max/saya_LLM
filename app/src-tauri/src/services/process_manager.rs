@@ -277,7 +277,7 @@ fn append_server_tools(
     if configured.is_some_and(|tools| !tools.trim().is_empty())
         && !server_tools_are_protected(host, api_key)
     {
-        let message = "[server] 已阻止在非本机监听且未设置 API key 时公开 llama.cpp 原生工具；Agent 本地工具不受影响。";
+        let message = "[server] 出于安全考虑，已阻止在非本机监听且未设置 API key 时公开 llama.cpp 原生工具；设置 API key 或改回本机监听后可重新启用。";
         eprintln!("{}", message);
         add_log(message);
         return;
@@ -408,6 +408,8 @@ pub(crate) fn resolve_exe_path(path: &str) -> String {
         .and_then(|d| d.parent().map(|p| p.to_path_buf()));
 
     let candidates: Vec<PathBuf> = [
+        // 版本化核心目录优先：kernels/<版本>_<时间>/ 里的最新一个。
+        crate::services::auto_updater::active_kernel_exe(),
         exe_dir
             .as_ref()
             .map(|d| d.join("_up_").join("resources").join(fname)),
@@ -516,6 +518,19 @@ fn video_runtime_info_for_exe(server_exe: &Path) -> VideoRuntimeInfo {
         native_video_ready: ffmpeg.is_some() && ffprobe.is_some(),
         ffmpeg_path: ffmpeg.map(|path| path.to_string_lossy().to_string()),
         ffprobe_path: ffprobe.map(|path| path.to_string_lossy().to_string()),
+    }
+}
+
+/// 独立检测 ffmpeg/ffprobe 是否就绪（服务未启动时也可调用），
+/// 供前端在「视频候选」提示里说明原生视频所需的工具是否齐全。
+pub fn check_video_runtime() -> VideoRuntimeInfo {
+    // 搜索目录主要依赖 current_exe 与 PATH；llama-server 路径能解析时再补上它的同级目录。
+    let server_exe = resolve_exe_path("resources/llama-server.exe");
+    if server_exe.is_empty() {
+        let fallback = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-llm.exe"));
+        video_runtime_info_for_exe(&fallback)
+    } else {
+        video_runtime_info_for_exe(Path::new(&server_exe))
     }
 }
 
@@ -1410,15 +1425,26 @@ fn any_file_contains(candidates: &[PathBuf], markers: &[&[u8]]) -> bool {
 }
 
 fn runtime_supports_mtp_architecture(exe: &str, architecture: &str) -> bool {
+    // 标记以部署内核二进制中实际存在的 "<ARCH> MTP" 断言字符串为准（与
+    // gguf_parser.rs 的白名单保持同步）；未列出的架构一律视为不支持，显式报错
+    // 而不是放行后让 llama-server 崩溃。
     let markers: &[&[u8]] = match architecture {
         "cohere2moe" => &[b"COHERE2MOE MTP", b"models\\cohere2moe.cpp"],
+        "deepseek32" => &[b"DEEPSEEK32 MTP", b"models\\deepseek32.cpp"],
+        "deepseek4" => &[b"DEEPSEEK4 MTP", b"models\\deepseek4.cpp"],
         "gemma4-assistant" => &[
             b"Gemma4Assistant requires",
             b"Gemma 4 assistant requires",
             b"gemma4-assistant",
         ],
+        "glm-dsa" => &[b"GLM_DSA MTP", b"models\\glm-dsa.cpp"],
+        "glm4" => &[b"GLM4 MTP", b"models\\glm4.cpp"],
+        "hy-v3" => &[b"HY_V3 MTP", b"models\\hy-v3.cpp"],
+        "mimo2" => &[b"MIMO2 MTP", b"models\\mimo2.cpp"],
+        "nemotron_h_moe" => &[b"NEMOTRON_H_MOE MTP", b"models\\nemotron_h_moe.cpp"],
         "qwen35" => &[b"QWEN35 MTP", b"models\\qwen35.cpp"],
         "qwen35moe" => &[b"QWEN35MOE MTP", b"models\\qwen35moe.cpp"],
+        "qwen3next" => &[b"QWEN3NEXT MTP", b"models\\qwen3next.cpp"],
         "step35" => &[b"STEP35 MTP", b"models\\step35.cpp"],
         _ => return false,
     };
@@ -1439,8 +1465,70 @@ fn runtime_supports_mtp_architecture(exe: &str, architecture: &str) -> bool {
         && any_file_contains(&driver_candidates, &[b"draft-mtp"])
 }
 
-fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {
-    let draft_path = config
+/// DSpark/DFlash 侧车启动前校验：文件存在 + 内核带对应 --spec-type 能力。
+/// 与 MTP 校验同样采用显式失败：不支持时阻止启动并给出中文指引，
+/// 不做静默降级（用户显式选择的参数不能被悄悄丢弃）。
+fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
+    // 按 MTP > DSpark > DFlash 优先级，只有不会被更高优先级遮蔽时才校验侧车；
+    // 被遮蔽的侧车即使文件缺失也不应阻断本次启动。
+    let mtp_active = config
+        .mtp_draft_path
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|path| !path.is_empty());
+    if mtp_active {
+        return Ok(());
+    }
+    let candidates: [(&str, &str); 2] = [
+        (
+            config
+                .dspark_draft_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .unwrap_or(""),
+            "draft-dspark",
+        ),
+        (
+            config
+                .dflash_draft_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .unwrap_or(""),
+            "draft-dflash",
+        ),
+    ];
+    for (draft_path, marker) in candidates {
+        if draft_path.is_empty() {
+            continue;
+        }
+        if !Path::new(draft_path).is_file() {
+            bail!("推测解码侧车文件不存在：{}；请重新扫描模型或关闭该侧车。", draft_path);
+        }
+        let exe_path = Path::new(exe);
+        let runtime_candidates = [
+            exe_path.with_file_name("llama.dll"),
+            exe_path.with_file_name("libllama.so"),
+            exe_path.with_file_name("libllama.dylib"),
+            exe_path.with_file_name("llama-common.dll"),
+            exe_path.to_path_buf(),
+        ];
+        let marker_bytes = marker.as_bytes();
+        if !any_file_contains(&runtime_candidates, &[marker_bytes]) {
+            bail!(
+                "当前 llama.cpp 内核不支持 {} 推测解码（--spec-type {}）；请更新内核，或关闭该侧车后加载。",
+                marker.trim_start_matches("draft-"),
+                marker
+            );
+        }
+        // 只校验优先级最高的那个侧车。
+        break;
+    }
+    Ok(())
+}
+
+fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {    let draft_path = config
         .mtp_draft_path
         .as_deref()
         .map(str::trim)
@@ -1484,6 +1572,7 @@ fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {
 
 fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
     validate_mtp_config(exe, config)?;
+    validate_drafter_config(exe, config)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
     let selected_device = if config.no_cuda {
@@ -1630,13 +1719,29 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         cmd.arg("--mmproj").arg(mmproj_path);
         cmd.arg("--mmproj-offload");
     }
+    // 推测解码侧车：同一时刻只挂一个草稿模型，优先级 MTP > DSpark > DFlash。
     let mtp_draft_path = config
         .mtp_draft_path
         .as_ref()
         .map(|path| path.trim())
         .filter(|path| !path.is_empty());
-    if let Some(mtp_draft_path) = mtp_draft_path {
-        cmd.arg("-md").arg(mtp_draft_path);
+    let dspark_draft_path = config
+        .dspark_draft_path
+        .as_ref()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty());
+    let dflash_draft_path = config
+        .dflash_draft_path
+        .as_ref()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty());
+    // (草稿路径, 未显式指定 spec_type 时跟随的默认模式)
+    let drafter: Option<(&str, &str)> = mtp_draft_path
+        .map(|path| (path, "draft-mtp"))
+        .or_else(|| dspark_draft_path.map(|path| (path, "dspark")))
+        .or_else(|| dflash_draft_path.map(|path| (path, "dflash")));
+    if let Some((draft_path, _)) = drafter {
+        cmd.arg("-md").arg(draft_path);
         if !config.no_cuda {
             cmd.arg("--spec-draft-device").arg(&selected_device);
             cmd.arg("-ngld").arg(effective_ngl.to_string());
@@ -1647,10 +1752,22 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| mtp_draft_path.map(|_| "draft-mtp"));
+        // 显式 spec_type 必须与选中的草稿模式一致，避免 -md 与 --spec-type 来自不同模式。
+        .filter(|value| {
+            match drafter {
+                Some((_, default_mode)) => *value == default_mode,
+                // 没有 -md 时只接受内置 MTP 的 draft-mtp。
+                None => *value == "draft-mtp",
+            }
+        })
+        .or_else(|| drafter.map(|(_, default_mode)| default_mode));
     if let Some(spec_type) = spec_type {
         // Embedded MTP deliberately reaches this branch without `-md`.
         cmd.arg("--spec-type").arg(spec_type);
+    }
+    // 草稿深度（--spec-draft-n-max）只在用户显式设置时传递，保持内核默认行为。
+    if let Some(n_max) = config.spec_draft_n_max.filter(|value| *value > 0) {
+        cmd.arg("--spec-draft-n-max").arg(n_max.to_string());
     }
 
     let command_line = build_redacted_command_line(exe, &cmd);

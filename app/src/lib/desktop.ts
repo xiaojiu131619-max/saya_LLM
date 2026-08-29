@@ -1,12 +1,13 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { Effect, EffectState, getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
 import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
 import { filterLlamaCppServerTools } from '@/lib/llamaTools';
+import { resolveApiName } from '@/lib/modelIdentity';
 
 export interface DesktopModelInfo {
   name: string;
@@ -54,6 +55,9 @@ export interface DesktopModelInfo {
   mmproj_audio_projector_type?: string | null;
   video_support?: VideoSupportLevel;
   mtp_draft_path: string | null;
+  dspark_draft_path: string | null;
+  dflash_draft_path: string | null;
+  is_dynamic_quant?: boolean;
   supports_reasoning: boolean;
   gguf_tags: string[];
   has_tool_template: boolean;
@@ -76,6 +80,13 @@ export interface DesktopConfig {
   last_model_path: string | null;
   tune_history: unknown[];
   close_to_tray: boolean;
+  /** 核心更新使用的 HTTP(S) 代理地址；未配置为 null。 */
+  proxy_url: string | null;
+}
+
+export async function setDesktopProxyUrl(proxyUrl: string | null) {
+  if (!isDesktopRuntime()) return;
+  await invoke('set_proxy_url', { proxyUrl });
 }
 
 export interface PingResult {
@@ -178,6 +189,111 @@ export interface DesktopVideoRuntimeInfo {
   ffprobe_path: string | null;
 }
 
+// ============================================================
+// Auto-Tune（镜像后端 models/benchmark.rs）
+// ============================================================
+
+export type AutoTuneSortMode = 'ts' | 'ctx';
+
+export interface AutoTuneConfig {
+  executable_path: string;
+  model_path: string;
+  port: number;
+  total_layers: number;
+  expert_count: number;
+  max_ctx: number;
+  batch_size: number;
+  flash_attn: boolean;
+  kv_offload: boolean;
+  mmap: boolean;
+  mlock: boolean;
+  is_moe: boolean;
+  sort_mode: AutoTuneSortMode;
+}
+
+export interface TuneRecord {
+  model_type: string;
+  ngl: number;
+  ncmoe: number;
+  ctx: number;
+  kv: string;
+  vram_used_gb: number;
+  vram_total_gb: number;
+  vram_percent: number;
+  ts: number;
+  first_token_ms: number;
+  fits: boolean;
+}
+
+export interface AutoTuneProgress {
+  phase: string;
+  message: string;
+  record?: TuneRecord | null;
+}
+
+export interface AutoTuneResult {
+  best: TuneRecord;
+  records: TuneRecord[];
+}
+
+export interface TuneHistoryEntry {
+  model_name: string;
+  model_path: string;
+  ngl: number;
+  ctx: number;
+  kv: string;
+  ncmoe: number;
+  ts: number;
+  vram_percent: number;
+  sort_mode: string;
+  timestamp: number;
+}
+
+export async function startAutoTune(config: AutoTuneConfig) {
+  if (!isDesktopRuntime()) return;
+  await invoke('start_auto_tune', { config });
+}
+
+export async function saveTuneResult(entry: TuneHistoryEntry) {
+  if (!isDesktopRuntime()) return;
+  await invoke('save_tune_result', { entry });
+}
+
+// 模型运行记录：启动参数 + 实测表现，单独存放在 AppData 的 model_records.json，
+// 供显存预测校准、推荐启动参数与自动调参做数据支持。
+export interface ModelRunRecord {
+  model_id: string;
+  model_name: string;
+  kind: 'launch' | 'benchmark' | 'autotune';
+  timestamp: number;
+  ngl?: number | null;
+  ctx?: number | null;
+  kv?: string | null;
+  ncmoe?: number | null;
+  flash_attn?: boolean | null;
+  speculative?: string | null;
+  tokens_per_sec?: number | null;
+  first_token_ms?: number | null;
+  vram_gb?: number | null;
+  vram_predicted_gb?: number | null;
+  note?: string | null;
+}
+
+export async function saveModelRunRecord(record: ModelRunRecord) {
+  if (!isDesktopRuntime()) return;
+  await invoke('save_model_run_record', { record });
+}
+
+export async function getModelRunRecords(modelId: string) {
+  if (!isDesktopRuntime()) return [];
+  return invoke<ModelRunRecord[]>('get_model_run_records', { modelId });
+}
+
+export async function clearModelRunRecords(modelId: string) {
+  if (!isDesktopRuntime()) return;
+  await invoke('clear_model_run_records', { modelId });
+}
+
 export type ChatMessageContent = string | ChatMessageContentPart[];
 
 export interface ChatCompletionMessage {
@@ -214,6 +330,9 @@ interface ServerConfig {
   chat_template: string | null;
   mmproj_path: string | null;
   mtp_draft_path: string | null;
+  dspark_draft_path: string | null;
+  dflash_draft_path: string | null;
+  spec_draft_n_max: number | null;
   spec_type: string | null;
   ncmoe: number;
   tools: string | null;
@@ -458,6 +577,8 @@ function defaultLoadConfig(raw: DesktopModelInfo): ModelLoadConfig {
     seedEnabled: false,
     seed: -1,
     speculativeDecoding: 'off',
+    specDraftNMaxEnabled: false,
+    specDraftNMax: 4,
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -505,6 +626,9 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
         ? '检测到 NextN 元数据，但当前 llama.cpp 尚未实现该架构的 MTP graph。'
         : null,
       raw.mtp_draft_path ? `MTP 草稿模型：${raw.mtp_draft_path}` : null,
+      raw.dspark_draft_path ? `DSpark 侧车：${raw.dspark_draft_path}` : null,
+      raw.dflash_draft_path ? `DFlash 侧车：${raw.dflash_draft_path}` : null,
+      raw.is_dynamic_quant ? '动态量化（Dynamic GGUF）：按层分配位宽的预量化文件。' : null,
       raw.rope_scaling_type ? `RoPE 缩放：${raw.rope_scaling_type}${raw.rope_scaling_factor ? ` x${raw.rope_scaling_factor}` : ''}` : null,
       raw.tokenizer_model ? `Tokenizer：${raw.tokenizer_model}` : null,
       raw.supports_reasoning ? '支持思考输出（reasoning / thinking）。' : null,
@@ -517,6 +641,9 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
       ...(capabilities.audio ? ['Audio'] : []),
       ...(capabilities.video ? ['Video'] : []),
       ...(raw.mtp_support ? ['MTP'] : []),
+      ...(raw.dspark_draft_path ? ['DSpark'] : []),
+      ...(raw.dflash_draft_path ? ['DFlash'] : []),
+      ...(raw.is_dynamic_quant ? ['Dynamic GGUF'] : []),
       ...(raw.supports_reasoning ? ['Reasoning'] : []),
     ],
     downloadCount: '本地',
@@ -561,6 +688,9 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     mmprojVisionProjectorType: raw.mmproj_vision_projector_type ?? undefined,
     mmprojAudioProjectorType: raw.mmproj_audio_projector_type ?? undefined,
     mtpDraftPath: raw.mtp_draft_path ?? undefined,
+    dsparkDraftPath: raw.dspark_draft_path ?? undefined,
+    dflashDraftPath: raw.dflash_draft_path ?? undefined,
+    isDynamicQuant: Boolean(raw.is_dynamic_quant),
     ggufMetadata: raw.gguf_metadata?.map(([key, value]) => ({ key, value })) ?? [],
     supportsVision: capabilities.vision,
     supportsAudio: capabilities.audio,
@@ -758,6 +888,40 @@ export async function checkLatestLlamaRelease() {
   return invoke<LlamaReleaseInfo>('check_for_update');
 }
 
+export async function listRecentLlamaReleases(count = 8) {
+  if (!isDesktopRuntime()) return [];
+  return invoke<LlamaReleaseInfo[]>('list_recent_releases', { count });
+}
+
+export interface VideoRuntimeInfo {
+  ffmpeg_available: boolean;
+  ffprobe_available: boolean;
+  native_video_ready: boolean;
+  ffmpeg_path?: string | null;
+  ffprobe_path?: string | null;
+}
+
+export async function checkVideoRuntime() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<VideoRuntimeInfo>('check_video_runtime');
+}
+
+export async function cancelKernelUpdate() {
+  await invoke('cancel_kernel_update');
+}
+
+export interface InstalledKernelInfo {
+  name: string;
+  version: string;
+  installed_at: string;
+  is_active: boolean;
+}
+
+export async function listInstalledKernels() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<InstalledKernelInfo[]>('list_installed_kernels');
+}
+
 export async function updateLlamaKernel(url: string, version: string, useMirror = true, mirrorUrl?: string) {
   if (!isDesktopRuntime()) return '';
   return invoke<string>('download_and_update', { url, version, useMirror, mirrorUrl });
@@ -813,6 +977,32 @@ export async function getDesktopSystemAppearance(): Promise<DesktopSystemAppeara
     return await invoke<DesktopSystemAppearance>('get_system_appearance');
   } catch {
     return null;
+  }
+}
+
+/**
+ * 切换窗口系统材质。
+ * - mica：Win11 默认桌面材质，偏实、颜色变化弱（Win10 上不可用，等于无材质）
+ * - acrylic：系统亚克力毛玻璃，能透出壁纸色，同时带系统级模糊
+ * - Windows 10 上 Acrylic 可能不可用或无效果，自动回退 Blur（兼容性最好的模糊材质）
+ */
+export async function setDesktopWindowMaterial(material: 'mica' | 'acrylic') {
+  if (!isDesktopRuntime()) return;
+  try {
+    await getCurrentWindow().setEffects({
+      effects: [material === 'acrylic' ? Effect.Acrylic : Effect.Mica],
+      state: EffectState.Active,
+    });
+  } catch (acrylicError) {
+    if (material !== 'acrylic') return;
+    try {
+      await getCurrentWindow().setEffects({
+        effects: [Effect.Blur],
+        state: EffectState.Active,
+      });
+    } catch {
+      console.error('[window] acrylic/blur 材质均设置失败', acrylicError);
+    }
   }
 }
 
@@ -896,7 +1086,29 @@ function buildServerConfig(
   const chatTemplate = config.chatTemplate?.trim() || null;
   const enabledTools = filterLlamaCppServerTools(tools ?? []);
 
-  const mtpEnabled = config.speculativeDecoding === 'mtp' && Boolean(model.supportsMtp);
+  // 推测解码模式与模型实际能力的交集：用户选了但模型没有对应侧车/内置 MTP 时，
+  // 显式回退为 off（不静默传一个没有文件的路径）。
+  const requestedMode = config.speculativeDecoding;
+  const speculativeMode = requestedMode === 'mtp' && !model.supportsMtp
+    ? 'off'
+    : requestedMode === 'dspark' && !model.dsparkDraftPath
+      ? 'off'
+      : requestedMode === 'dflash' && !model.dflashDraftPath
+        ? 'off'
+        : requestedMode;
+  const mtpDraft = speculativeMode === 'mtp' ? (model.mtpDraftPath ?? null) : null;
+  const dsparkDraft = speculativeMode === 'dspark' ? (model.dsparkDraftPath ?? null) : null;
+  const dflashDraft = speculativeMode === 'dflash' ? (model.dflashDraftPath ?? null) : null;
+  // 显式模式传新拼写（dspark/dflash）；MTP 沿用兼容拼写 draft-mtp。
+  const specType = speculativeMode === 'mtp' ? 'draft-mtp'
+    : speculativeMode === 'dspark' ? 'dspark'
+      : speculativeMode === 'dflash' ? 'dflash'
+        : null;
+  // 草稿深度只在推测解码已启用且用户显式开启时传，None=不传（用内核默认）。
+  // 模式为 off 时即使持久化里开着也忽略，避免在没有 --spec-type 的命令行上残留孤立参数。
+  const specDraftNMax = speculativeMode !== 'off' && config.specDraftNMaxEnabled
+    ? Math.min(16, Math.max(1, Math.round(Number(config.specDraftNMax) || 1)))
+    : null;
   const hasMultimodalProjector = Boolean(
     model.mmprojPath && (model.supportsVision || model.supportsAudio)
   );
@@ -904,7 +1116,7 @@ function buildServerConfig(
   return {
     executable_path: executablePath || 'resources/llama-server.exe',
     model_path: model.filePath ?? '',
-    model_alias: model.name || null,
+    model_alias: resolveApiName(model),
     port,
     host: apiHost(apiConfig),
     api_key: apiKey(apiConfig),
@@ -929,8 +1141,11 @@ function buildServerConfig(
     seed,
     chat_template: chatTemplate,
     mmproj_path: hasMultimodalProjector ? (model.mmprojPath ?? null) : null,
-    mtp_draft_path: mtpEnabled ? (model.mtpDraftPath ?? null) : null,
-    spec_type: mtpEnabled ? 'draft-mtp' : null,
+    mtp_draft_path: mtpDraft,
+    dspark_draft_path: dsparkDraft,
+    dflash_draft_path: dflashDraft,
+    spec_draft_n_max: specDraftNMax,
+    spec_type: specType,
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,

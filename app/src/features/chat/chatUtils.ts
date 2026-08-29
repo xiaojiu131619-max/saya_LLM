@@ -1,4 +1,4 @@
-import type { ChatSession, ChatMessageContentPart, MessageStats } from '@/types';
+import type { ChatSession, ChatMessageContentPart, Message, MessageStats } from '@/types';
 
 export const CHAT_HISTORY_MODEL_ID = 'chat-workspace';
 
@@ -325,7 +325,38 @@ export function formatCtxUsageWithPercent(stats: MessageStats | undefined) {
   if (!stats || stats.ctxUsed <= 0 || stats.ctxTotal <= 0) return 'ctx 未返回';
   const percent = Math.min(999, Math.max(0, (stats.ctxUsed / stats.ctxTotal) * 100));
   const percentText = percent.toFixed(percent >= 10 ? 0 : 1);
-  return `${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()} ctx（${percentText}%）`;
+  // 百分比为主展示，已用/总量作为补充，方便对回上下文容量。
+  return `ctx ${percentText}%（${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()}）`;
+}
+
+// 粗估文本 token 数：CJK 字符按 1 token，其余按每 4 字符 1 token。
+// 用于「本地会话累计水位」口径——服务器日志只有最近一轮，无法反映整段会话。
+export function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (/[\u3000-\u9fff\uff00-\uffef]/.test(ch)) cjk += 1;
+    else other += 1;
+  }
+  return cjk + Math.ceil(other / 4);
+}
+
+// 会话累计上下文占用：把会话中所有消息（含思考内容）粗估加总。
+export function estimateSessionCtxTokens(messages: Message[]): number {
+  return messages.reduce(
+    (sum, msg) => sum + estimateTextTokens(msg.content) + estimateTextTokens(msg.reasoningContent ?? ''),
+    0,
+  );
+}
+
+// 本地会话水位展示：百分比为主，估算值/容量为补充。
+export function formatSessionCtxUsage(sessionCtx: { used: number; total: number } | undefined) {
+  if (!sessionCtx || sessionCtx.total <= 0) return 'ctx --';
+  const { used, total } = sessionCtx;
+  const percent = Math.min(100, Math.max(0, (used / total) * 100));
+  const percentText = percent.toFixed(percent >= 10 ? 0 : 1);
+  return `ctx ${percentText}%（≈${used.toLocaleString()} / ${total.toLocaleString()}）`;
 }
 
 export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: number): MessageStats | undefined {

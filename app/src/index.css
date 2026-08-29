@@ -32,7 +32,9 @@
     --shadow-flyout: 0 8px 16px rgba(0, 0, 0, 0.14);
     --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.22);
 
-    --titlebar-bg: rgba(252, 252, 252, 0.7);
+    --titlebar-bg: rgba(252, 252, 252, 0.58);
+    --acrylic-bg: rgba(252, 252, 252, 0.42);
+    --acrylic-border: rgba(0, 0, 0, 0.06);
 
     --app-bg: #FAFAFA;
     --surface: #FFFFFF;
@@ -74,22 +76,24 @@
   }
 
   .dark {
-    --titlebar-bg: rgba(32, 32, 32, 0.7);
+    --titlebar-bg: rgba(32, 32, 32, 0.48);
+    --acrylic-bg: rgba(32, 32, 32, 0.32);
+    --acrylic-border: rgba(255, 255, 255, 0.08);
 
-    --app-bg: #202020;
-    --surface: #2B2B2B;
-    --surface-raised: #323232;
-    --surface-muted: #383838;
-    --surface-hover: #404040;
+    --app-bg: #1B1B1B;
+    --surface: #262626;
+    --surface-raised: #303030;
+    --surface-muted: #353535;
+    --surface-hover: #3D3D3D;
     --surface-selected: #2B3A4A;
 
-    --border: rgba(255, 255, 255, 0.0837);
-    --border-strong: rgba(255, 255, 255, 0.15);
-    --border-subtle: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.14);
+    --border-strong: rgba(255, 255, 255, 0.22);
+    --border-subtle: rgba(255, 255, 255, 0.10);
 
-    --text-primary: #FFFFFF;
-    --text-secondary: #C5C5C5;
-    --text-tertiary: #8A8A8A;
+    --text-primary: #F5F5F5;
+    --text-secondary: #D4D4D4;
+    --text-tertiary: #B0B0B0;
     --text-on-accent: #000000;
 
     --accent: #4CC2FF;
@@ -116,6 +120,28 @@
 
   * { border-color: var(--border); }
   html { scroll-behavior: smooth; }
+
+  /* 浏览器模式"假壁纸"：只有非 Tauri 桌面（无真实壁纸）时才需要。
+     桌面模式由 window-vibrancy 提供真实 Mica/Acrylic，本层在 Tauri 窗体下不可见。
+     CSS 选择器：Tauri 注入的 body 标签带 [data-tauri] / .tauri 类。浏览器模式无此标识。 */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(at 16% 6%, rgba(0, 120, 212, 0.28) 0%, transparent 52%),
+      radial-gradient(at 84% 80%, rgba(178, 107, 0, 0.20) 0%, transparent 50%),
+      radial-gradient(at 48% 42%, rgba(0, 90, 158, 0.14) 0%, transparent 64%);
+  }
+
+  html.dark body::before {
+    background:
+      radial-gradient(at 16% 6%, rgba(76, 194, 255, 0.24) 0%, transparent 52%),
+      radial-gradient(at 84% 80%, rgba(210, 146, 59, 0.16) 0%, transparent 50%),
+      radial-gradient(at 48% 42%, rgba(76, 194, 255, 0.12) 0%, transparent 64%);
+  }
 
   body {
     background-color: var(--app-bg);
@@ -152,28 +178,138 @@
   }
   *::-webkit-scrollbar-track { background: transparent; }
 
-  :where(button, [role="button"], input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+  :where(button, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
     outline: 2px solid var(--accent) !important;
     outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
+
+  /* 输入类元素点击时不显示蓝色描边（用户明确要求）；反馈交给边框高亮 */
+  :where(input, select, textarea):focus-visible {
+    outline: none;
+  }
+
+  input, textarea, select {
+    caret-color: var(--text-primary);
+    accent-color: var(--accent);
+  }
+
+  /* 去掉 Chromium/WebView2 输入时的蓝色 IME 拼写下划线 */
+  input, textarea {
+    text-decoration: none !important;
+  }
+  ::spelling-error, ::grammar-error {
+    text-decoration: none !important;
+    background: transparent !important;
+  }
+  ::highlight(ime), ::highlight(composition) {
+    text-decoration: none !important;
+    background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: inherit;
+  }
 }
+
+  /* ===== 毛玻璃模式（设置 → 界面与外观） =====
+     桌面：系统 Acrylic 做真正的壁纸霜化；网页只铺一层固定色罩，避免多层半透明叠成实色。
+     浏览器：没有系统材质，用 body::before 假壁纸 + body::after 模糊层模拟。
+     注意：与 .acrylic 工具类（浮层毛玻璃）是两回事，勿混淆。 */
+  html.acrylic-mode {
+    --app-bg: rgba(250, 250, 250, 0.60);
+    --surface: rgba(255, 255, 255, 0.48);
+    --surface-raised: rgba(255, 255, 255, 0.62);
+    --surface-muted: rgba(248, 248, 248, 0.38);
+    --surface-hover: rgba(255, 255, 255, 0.52);
+    --titlebar-bg: rgba(252, 252, 252, 0.45);
+    --acrylic-bg: rgba(252, 252, 252, 0.52);
+  }
+
+  html.acrylic-mode.dark {
+    --app-bg: rgba(18, 18, 18, 0.72);
+    --surface: rgba(32, 32, 32, 0.58);
+    --surface-raised: rgba(42, 42, 42, 0.66);
+    --surface-muted: rgba(38, 38, 38, 0.48);
+    --surface-hover: rgba(52, 52, 52, 0.60);
+    --titlebar-bg: rgba(18, 18, 18, 0.60);
+    --acrylic-bg: rgba(24, 24, 24, 0.64);
+  }
+
+  html.acrylic-mode body {
+    background-color: transparent;
+  }
+
+  /* 浏览器：假壁纸在下，霜化层在上，用 CSS 模糊模拟毛玻璃。 */
+  html.acrylic-mode:not(.tauri-desktop) body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: rgba(252, 252, 252, 0.62);
+    backdrop-filter: blur(48px) saturate(1.8);
+    -webkit-backdrop-filter: blur(48px) saturate(1.8);
+  }
+  html.acrylic-mode.dark:not(.tauri-desktop) body::after {
+    background: rgba(18, 18, 18, 0.82);
+  }
+
+  /* 桌面：系统 Acrylic 负责模糊；色罩只铺在 body 一层，避免 html+body 叠成实色。 */
+  html.acrylic-mode.tauri-desktop {
+    background-color: transparent;
+  }
+  html.acrylic-mode.tauri-desktop body {
+    background-color: transparent;
+  }
+  html.acrylic-mode.dark.tauri-desktop body {
+    background-color: transparent;
+  }
+  html.acrylic-mode.tauri-desktop body::before,
+  html.acrylic-mode.tauri-desktop body::after {
+    display: none;
+  }
+
+  /* 无障碍：系统开启"减少透明度"时退回不透明表面 */
+  @media (prefers-reduced-transparency: reduce) {
+    html.acrylic-mode,
+    html.acrylic-mode:not(.tauri-desktop),
+    html.acrylic-mode.tauri-desktop {
+      --app-bg: #FAFAFA; --surface: #FFFFFF; --surface-raised: #FFFFFF;
+      --surface-muted: #F3F3F3; --surface-hover: #EDEDED; --titlebar-bg: rgba(252, 252, 252, 0.58);
+    }
+    html.acrylic-mode.dark,
+    html.acrylic-mode.dark:not(.tauri-desktop),
+    html.acrylic-mode.dark.tauri-desktop {
+      --app-bg: #202020; --surface: #2B2B2B; --surface-raised: #323232;
+      --surface-muted: #383838; --surface-hover: #404040; --titlebar-bg: rgba(32, 32, 32, 0.48);
+    }
+    html.acrylic-mode body::after,
+    html.acrylic-mode:not(.tauri-desktop) body::after {
+      display: none;
+    }
+    html.acrylic-mode body {
+      background-color: var(--app-bg);
+    }
+  }
 
 @layer components {
   .glass-panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-card);
-    transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border-subtle);
+    border-radius: 0;
+    box-shadow: none;
+    transition: background-color 160ms ease, border-color 160ms ease;
   }
-
   .glass-panel-strong {
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
+    background: var(--acrylic-bg);
+    border: 1px solid var(--acrylic-border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-flyout);
+    backdrop-filter: blur(16px) saturate(1.35);
+    -webkit-backdrop-filter: blur(16px) saturate(1.35);
     transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  }
+  .line-section {
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .text-primary-custom { color: var(--text-primary); }
@@ -182,9 +318,24 @@
 
   .titlebar {
     background: var(--titlebar-bg);
-    backdrop-filter: blur(40px) saturate(1.8);
-    -webkit-backdrop-filter: blur(40px) saturate(1.8);
+    backdrop-filter: blur(16px) saturate(1.35);
+    -webkit-backdrop-filter: blur(16px) saturate(1.35);
     border-bottom: 1px solid var(--border-subtle);
+  }
+
+  /* 通用克制毛玻璃：用于浮层、输入区、命令面板。 */
+  .acrylic {
+    background: var(--acrylic-bg);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    border: 1px solid var(--acrylic-border);
+  }
+
+  .acrylic-strong {
+    background: var(--titlebar-bg);
+    backdrop-filter: blur(18px) saturate(1.4);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    border: 1px solid var(--acrylic-border);
   }
 
   .model-list-container, .model-load-summary, .model-toolbar {
@@ -201,9 +352,22 @@
   .model-toolbar-controls { grid-template-columns: auto minmax(0, 1fr); }
   .model-toolbar-view-controls { grid-template-columns: minmax(0, 1fr) auto auto; }
 
+  /* 多列磁贴模式：独立方块卡片，带间距，Win10 磁贴质感。
+     auto-fill 固定列宽，让磁贴接近 1:1，不会随窗口变宽被拉成横条。 */
   .model-grid--multi {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 1rem;
+    grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    gap: 0.625rem;
+  }
+
+  .model-tile {
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-subtle);
+    background: var(--surface);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  }
+  .model-tile:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
   }
 
   .model-load-summary-metrics { display: grid; min-width: 0; gap: 0.375rem; }
@@ -220,40 +384,33 @@
       align-items: center;
     }
     .model-toolbar-controls { display: contents; }
-    .model-grid--multi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .model-load-summary-metrics { grid-template-columns: auto minmax(0, 1fr); }
     .model-load-summary-pills { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  }
-
-  @container (min-width: 1080px) {
-    .model-grid--multi { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
 
   .model-dotted-surface { background: var(--app-bg); }
 
   .model-glass-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-card);
-    transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border-subtle);
+    border-radius: 0;
+    box-shadow: none;
+    transition: background-color 160ms ease, color 160ms ease;
   }
 
   .model-glass-card:hover, .model-glass-card--active {
-    border-color: var(--accent);
-    background: var(--surface-raised);
-    box-shadow: var(--shadow-flyout);
+    background: var(--surface-hover);
   }
 
   .model-glass-card--loading, .model-glass-card--loading:hover {
-    border-color: var(--state-warning);
-    background: var(--surface-raised);
+    background: var(--state-warning-bg);
     animation: model-glass-card-loading 1.4s ease-in-out infinite;
   }
 
   @keyframes model-glass-card-loading {
-    0%, 100% { box-shadow: var(--shadow-card); }
-    50% { box-shadow: 0 0 0 2px var(--state-warning-bg), var(--shadow-flyout); }
+    0%, 100% { background-color: transparent; }
+    50% { background-color: var(--state-warning-bg); }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -263,6 +420,13 @@
   .mono-font {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+  }
+
+  .chat-composer-input,
+  input, textarea {
+    text-decoration: none !important;
+    text-decoration-thickness: 0 !important;
+    text-underline-offset: 0;
   }
 
   /* Markdown code highlight (Win11 palette) */
@@ -285,7 +449,7 @@
     @apply h-8 w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface)]
            px-2.5 text-sm text-[var(--text-primary)] outline-none transition-colors
            placeholder:text-[var(--text-tertiary)]
-           focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-subtle)]
+           focus:border-[var(--accent)] focus:ring-0
            disabled:cursor-not-allowed disabled:opacity-60;
   }
 

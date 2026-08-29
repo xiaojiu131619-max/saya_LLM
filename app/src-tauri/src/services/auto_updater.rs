@@ -7,8 +7,24 @@ use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static UPDATE_LOG: Lazy<PathBuf> = Lazy::new(|| resource_dir().join("update.log"));
+
+/// 用户请求取消当前更新任务的全局标志。
+/// 下载循环与各安装阶段都会检查它，命中后尽快返回错误并清理现场。
+static UPDATE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_cancel() {
+    UPDATE_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+fn ensure_not_cancelled() -> Result<(), String> {
+    if UPDATE_CANCELLED.load(Ordering::SeqCst) {
+        return Err("更新已被用户取消。".to_string());
+    }
+    Ok(())
+}
 
 fn resource_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -22,6 +38,134 @@ fn resource_dir() -> PathBuf {
     fs::create_dir_all(&resources).ok();
     resources
 }
+
+/// 版本化核心根目录：每次更新安装到 `kernels/<版本>_<安装时间>/`，
+/// 始终保留最近两个（最新 + 上一个），更早的在安装成功后自动清理。
+fn kernels_dir() -> PathBuf {
+    let k = resource_dir().join("kernels");
+    fs::create_dir_all(&k).ok();
+    k
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledKernel {
+    pub name: String,
+    pub version: String,
+    pub installed_at: String,
+    pub is_active: bool,
+}
+
+/// 从目录名 `<版本>_<YYYYmmdd>_<HHMMSS>` 解析出安装时间（用于排序）。
+/// 不能直接按目录名整体排序：版本号 `b1000` 会排在 `b999` 前面。
+fn kernel_dir_timestamp(name: &str) -> Option<String> {
+    let parts: Vec<&str> = name.split('_').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let (date, time) = (parts[parts.len() - 2], parts[parts.len() - 1]);
+    let ts = format!("{}_{}", date, time);
+    if ts.len() != 15 || !ts.chars().all(|c| c.is_ascii_digit() || c == '_') {
+        return None;
+    }
+    Some(ts)
+}
+
+fn parse_kernel_version(name: &str) -> String {
+    let parts: Vec<&str> = name.split('_').collect();
+    if parts.len() > 2 {
+        parts[..parts.len() - 2].join("_")
+    } else {
+        name.to_string()
+    }
+}
+
+/// 当前生效的核心目录：kernels 下安装时间最新的一个。
+pub fn active_kernel_dir() -> Option<PathBuf> {
+    let mut best: Option<(String, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(kernels_dir()) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(ts) = kernel_dir_timestamp(&name) {
+                if best.as_ref().map_or(true, |(best_ts, _)| ts > *best_ts) {
+                    best = Some((ts, entry.path()));
+                }
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// 当前生效核心的 llama-server.exe 完整路径；没有版本化目录时返回 None（回退旧版平铺布局）。
+pub fn active_kernel_exe() -> Option<PathBuf> {
+    active_kernel_dir().map(|dir| dir.join(exe_name()))
+}
+
+/// 列出本机已安装的版本化核心，按安装时间从新到旧。
+pub fn list_installed_kernels() -> Vec<InstalledKernel> {
+    let active = active_kernel_dir();
+    let mut kernels: Vec<(String, InstalledKernel)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(kernels_dir()) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(ts) = kernel_dir_timestamp(&name) {
+                // 目录名里的时间是本地时间，展示时格式化为可读样式。
+                let installed_at = chrono::NaiveDateTime::parse_from_str(&ts, "%Y%m%d_%H%M%S")
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|_| ts.clone());
+                kernels.push((
+                    ts,
+                    InstalledKernel {
+                        is_active: active.as_ref().map_or(false, |a| *a == entry.path()),
+                        version: parse_kernel_version(&name),
+                        name,
+                        installed_at,
+                    },
+                ));
+            }
+        }
+    }
+    kernels.sort_by(|a, b| b.0.cmp(&a.0));
+    kernels.into_iter().map(|(_, k)| k).collect()
+}
+
+/// 安装成功后清理：按安装时间只保留最近 keep 个核心目录。
+fn cleanup_old_kernels(keep: usize) {
+    let sorted = list_installed_kernels();
+    for kernel in sorted.into_iter().skip(keep) {
+        let _ = fs::remove_dir_all(kernels_dir().join(&kernel.name));
+    }
+}
+
+/// 旧版平铺布局（exe/DLL 直接放在 resources 根目录）迁移为版本化目录。
+/// 仅在 kernels 目录为空且平铺核心存在时执行一次；迁移失败则保留平铺布局不动。
+fn migrate_legacy_runtime(resources: &Path) {
+    if !resources.join(exe_name()).exists() || active_kernel_dir().is_some() {
+        return;
+    }
+    let version = detect_installed_version(resources).unwrap_or_else(|| "legacy".to_string());
+    let dir = kernels_dir().join(format!(
+        "{}_{}",
+        safe_version_name(&version),
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    match copy_runtime_files(resources, &dir) {
+        Ok(_) => {
+            clear_runtime_files(resources).ok();
+            eprintln!("[updater] legacy runtime migrated to {}", dir.display());
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&dir);
+            eprintln!("[updater] legacy runtime migration failed: {}", error);
+        }
+    }
+}
+
 
 fn versions_dir() -> PathBuf {
     let v = resource_dir().join("versions");
@@ -464,20 +608,46 @@ pub struct AssetInfo {
     pub matches_host: bool,
 }
 
-fn github_api_json(path: &str) -> Result<serde_json::Value, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let urls = [format!(
-        "https://api.github.com/repos/ggml-org/llama.cpp/{}",
-        path
-    )];
+/// 校验并构造代理配置：仅接受 http/https 代理地址（本机代理如 http://127.0.0.1:7890 是主要用途）。
+pub fn build_proxy(proxy_url: Option<&str>) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("代理地址格式不正确：{}", url))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("代理地址仅支持 http/https 协议".to_string());
+    }
+    if parsed.host_str().map_or(true, |host| host.is_empty()) {
+        return Err("代理地址缺少主机名".to_string());
+    }
+    let proxy = reqwest::Proxy::all(parsed.as_str()).map_err(|e| format!("代理配置无效: {}", e))?;
+    Ok(Some(proxy))
+}
+
+fn build_client(proxy_url: Option<&str>, timeout_secs: u64, connect_timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+    if let Some(proxy) = build_proxy(proxy_url)? {
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
+fn github_api_json(path: &str, proxy_url: Option<&str>) -> Result<serde_json::Value, String> {
+    // 单条 release 的 JSON 可达数百 KB（上千个资产），
+    // 读取整个响应必须留足时间，否则会在流中断时报“解码失败”。
+    let client = build_client(proxy_url, 60, 30)?;
+    let url = format!("https://api.github.com/repos/ggml-org/llama.cpp/{}", path);
+    // 网络抖动或偶发中断重试一次；未认证限流（403）不重试。
     let mut last_error = String::new();
-    for url in urls {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
         let resp = match client
             .get(&url)
-            .header("User-Agent", "AgentLLM/0.1.0")
+            .header("User-Agent", "AgentLLM/0.2.0")
             .header("Accept", "application/vnd.github+json")
             .send()
         {
@@ -495,7 +665,14 @@ fn github_api_json(path: &str) -> Result<serde_json::Value, String> {
             last_error = format!("请求失败: {}", resp.status());
             continue;
         }
-        match resp.json() {
+        let body = match resp.bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                last_error = format!("读取更新源响应失败: {}", error);
+                continue;
+            }
+        };
+        match serde_json::from_slice(&body) {
             Ok(json) => return Ok(json),
             Err(error) => {
                 last_error = format!("更新源响应解析失败: {}", error);
@@ -506,131 +683,115 @@ fn github_api_json(path: &str) -> Result<serde_json::Value, String> {
     Err(last_error)
 }
 
-pub fn check_latest_release() -> Result<ReleaseInfo, String> {
-    let json = github_api_json("releases/latest")?;
-
-    let tag_name = json["tag_name"].as_str().unwrap_or("").to_string();
-    let body = json["body"].as_str().unwrap_or("").to_string();
-    let published_at = json["published_at"].as_str().unwrap_or("").to_string();
-
-    let (host_backend, gpu_name) = detect_host_gpu_backend();
-    let cuda_version = detect_cuda_version();
-    let blackwell = is_blackwell_gpu(gpu_name.as_deref());
+/// 从一条 release JSON 中提取 Windows x64 安装包资产，按本机硬件打分排序，
+/// 并报告是否存在与本机 CUDA 主版本匹配的 CUDA 包。
+fn collect_windows_assets(
+    item: &serde_json::Value,
+    cuda_version: Option<&str>,
+    host_backend: &str,
+    blackwell: bool,
+) -> (Vec<AssetInfo>, bool) {
     let mut assets = Vec::new();
     let mut cuda_matched = false;
-    if let Some(arr) = json["assets"].as_array() {
-        for item in arr {
-            let name = item["name"].as_str().unwrap_or("");
+    if let Some(arr) = item["assets"].as_array() {
+        for a in arr {
+            let name = a["name"].as_str().unwrap_or("");
             if is_windows_x64_package(name) {
                 let matches_cuda = name.to_ascii_lowercase().contains("cuda")
-                    && cuda_asset_matches(name, cuda_version.as_deref(), blackwell);
+                    && cuda_asset_matches(name, cuda_version, blackwell);
                 if matches_cuda {
                     cuda_matched = true;
                 }
-                let matches_host =
-                    host_matched_asset(name, cuda_version.as_deref(), &host_backend, blackwell);
+                let matches_host = host_matched_asset(name, cuda_version, host_backend, blackwell);
                 assets.push(AssetInfo {
                     name: name.to_string(),
-                    browser_download_url: item["browser_download_url"]
+                    browser_download_url: a["browser_download_url"]
                         .as_str()
                         .unwrap_or("")
                         .to_string(),
-                    size: item["size"].as_u64().unwrap_or(0),
+                    size: a["size"].as_u64().unwrap_or(0),
                     backend: asset_backend(name).to_string(),
                     matches_host,
                 });
             }
         }
     }
+    assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version, host_backend, blackwell));
+    (assets, cuda_matched)
+}
 
-    assets.sort_by_key(|asset| {
-        package_asset_score(
-            &asset.name,
-            cuda_version.as_deref(),
-            &host_backend,
-            blackwell,
-        )
-    });
-
+fn release_info_from_value(
+    item: &serde_json::Value,
+    cuda_version: &Option<String>,
+    host_backend: &str,
+    gpu_name: &Option<String>,
+    blackwell: bool,
+) -> ReleaseInfo {
+    let tag_name = item["tag_name"].as_str().unwrap_or("").to_string();
+    let (assets, cuda_matched) =
+        collect_windows_assets(item, cuda_version.as_deref(), host_backend, blackwell);
     let version = tag_name.trim_start_matches('v').to_string();
-
-    Ok(ReleaseInfo {
+    ReleaseInfo {
         tag_name,
         version,
         assets,
-        body,
-        published_at,
-        cuda_version,
+        body: item["body"].as_str().unwrap_or("").to_string(),
+        published_at: item["published_at"].as_str().unwrap_or("").to_string(),
+        cuda_version: cuda_version.clone(),
         cuda_matched,
-        host_backend,
-        gpu_name,
-    })
+        host_backend: host_backend.to_string(),
+        gpu_name: gpu_name.clone(),
+    }
 }
 
-pub fn list_recent_releases(count: usize) -> Result<Vec<ReleaseInfo>, String> {
-    let json = github_api_json("releases")?;
+/// 在发布列表（按时间倒序）中取第一个确实带 Windows x64 安装包的版本。
+/// 上游自 v0.3.0 起把 bXXXX 滚动构建标记为 prerelease，
+/// releases/latest 会落在不带安装包的稳定版上，因此不能再用 latest 端点。
+fn pick_latest_build_release(
+    json: &serde_json::Value,
+    cuda_version: &Option<String>,
+    host_backend: &str,
+    gpu_name: &Option<String>,
+    blackwell: bool,
+) -> Option<ReleaseInfo> {
+    json.as_array()?.iter().map(|item| {
+        release_info_from_value(item, cuda_version, host_backend, gpu_name, blackwell)
+    }).find(|info| !info.assets.is_empty())
+}
+
+pub fn check_latest_release(proxy_url: Option<&str>) -> Result<ReleaseInfo, String> {
+    let json = github_api_json("releases?per_page=15", proxy_url)?;
+
+    let (host_backend, gpu_name) = detect_host_gpu_backend();
+    let cuda_version = detect_cuda_version();
+    let blackwell = is_blackwell_gpu(gpu_name.as_deref());
+
+    pick_latest_build_release(&json, &cuda_version, &host_backend, &gpu_name, blackwell)
+        .ok_or_else(|| "最近的发布中未找到可用的 Windows x64 安装包，请稍后再试。".to_string())
+}
+
+pub fn list_recent_releases(count: usize, proxy_url: Option<&str>) -> Result<Vec<ReleaseInfo>, String> {
+    // 多请求一倍以过滤掉不带 Windows 安装包的公告版；比默认拉满 30 条响应小得多。
+    let per_page = (count.saturating_mul(2)).clamp(10, 30);
+    let json = github_api_json(&format!("releases?per_page={}", per_page), proxy_url)?;
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
     let blackwell = is_blackwell_gpu(gpu_name.as_deref());
 
     let mut releases = Vec::new();
     if let Some(arr) = json.as_array() {
-        for item in arr.iter().take(count) {
-            let tag_name = item["tag_name"].as_str().unwrap_or("").to_string();
-            let body = item["body"].as_str().unwrap_or("").to_string();
-            let published_at = item["published_at"].as_str().unwrap_or("").to_string();
-
-            let mut assets = Vec::new();
-            let mut cuda_matched = false;
-            if let Some(assets_arr) = item["assets"].as_array() {
-                for a in assets_arr {
-                    let name = a["name"].as_str().unwrap_or("");
-                    if is_windows_x64_package(name) {
-                        let matches_cuda = name.to_ascii_lowercase().contains("cuda")
-                            && cuda_asset_matches(name, cuda_version.as_deref(), blackwell);
-                        if matches_cuda {
-                            cuda_matched = true;
-                        }
-                        let matches_host = host_matched_asset(
-                            name,
-                            cuda_version.as_deref(),
-                            &host_backend,
-                            blackwell,
-                        );
-                        assets.push(AssetInfo {
-                            name: name.to_string(),
-                            browser_download_url: a["browser_download_url"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            size: a["size"].as_u64().unwrap_or(0),
-                            backend: asset_backend(name).to_string(),
-                            matches_host,
-                        });
-                    }
-                }
+        for item in arr.iter() {
+            if releases.len() >= count {
+                break;
             }
-            assets.sort_by_key(|asset| {
-                package_asset_score(
-                    &asset.name,
-                    cuda_version.as_deref(),
-                    &host_backend,
-                    blackwell,
-                )
-            });
-
-            let version = tag_name.trim_start_matches('v').to_string();
-            releases.push(ReleaseInfo {
-                tag_name,
-                version,
-                assets,
-                body,
-                published_at,
-                cuda_version: cuda_version.clone(),
-                cuda_matched,
-                host_backend: host_backend.clone(),
-                gpu_name: gpu_name.clone(),
-            });
+            let info =
+                release_info_from_value(item, &cuda_version, &host_backend, &gpu_name, blackwell);
+            // 跳过不带 Windows 安装包的发布（如 v0.3.0 这类纯公告稳定版），
+            // 否则列表里会出现无法安装的空条目。
+            if info.assets.is_empty() {
+                continue;
+            }
+            releases.push(info);
         }
     }
 
@@ -709,7 +870,7 @@ fn parse_release_asset_url(url: &str) -> Option<(String, String)> {
 
 /// 向 GitHub API 查询指定 asset 的官方 SHA256（API 返回形如 `sha256:abc...`）。
 /// 这是整条更新链的信任根：没有它就无法判断下载到的字节是否被篡改。
-fn fetch_expected_sha256(tag: &str, asset_name: &str) -> Result<String, String> {
+fn fetch_expected_sha256(tag: &str, asset_name: &str, proxy_url: Option<&str>) -> Result<String, String> {
     // tag 会拼进 API 路径，必须先排除路径穿越与注入字符。
     if tag.is_empty()
         || !tag
@@ -718,7 +879,7 @@ fn fetch_expected_sha256(tag: &str, asset_name: &str) -> Result<String, String> 
     {
         return Err(format!("release tag 非法：{}", tag));
     }
-    let json = github_api_json(&format!("releases/tags/{}", tag))?;
+    let json = github_api_json(&format!("releases/tags/{}", tag), proxy_url)?;
     let assets = json["assets"]
         .as_array()
         .ok_or_else(|| "更新源未返回 assets 列表，无法校验发布包。".to_string())?;
@@ -755,6 +916,7 @@ fn try_download_stream(
     use_mirror: bool,
     mirror_url: Option<&str>,
     expected_sha256: &str,
+    proxy_url: Option<&str>,
     on_progress: &dyn Fn(String),
 ) -> Result<Vec<u8>, String> {
     if use_mirror {
@@ -806,13 +968,9 @@ fn try_download_stream(
         on_progress("所有加速源失败，尝试直连...".to_string());
     }
 
-    // Try direct connection with longer timeout
+    // Try direct connection with longer timeout（配置了代理时同样经过代理）
     on_progress("直连下载中...".to_string());
-    let direct_client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let direct_client = build_client(proxy_url, 600, 30)?;
 
     match direct_client.get(url).send() {
         Ok(resp) => {
@@ -845,6 +1003,8 @@ fn download_with_progress(
 
     let mut buffer = [0u8; 8192];
     loop {
+        // 每个数据块都检查取消标志，让「停止下载」在最短时间内生效。
+        ensure_not_cancelled()?;
         let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
@@ -880,10 +1040,11 @@ fn download_zip_bytes(
     use_mirror: bool,
     mirror_url: Option<&str>,
     expected_sha256: &str,
+    proxy_url: Option<&str>,
     on_progress: &dyn Fn(String),
 ) -> Result<(Vec<u8>, String), String> {
     on_progress(format!("正在下载 {}...", label));
-    let bytes = try_download_stream(client, url, use_mirror, mirror_url, expected_sha256, &|msg| {
+    let bytes = try_download_stream(client, url, use_mirror, mirror_url, expected_sha256, proxy_url, &|msg| {
         eprintln!("[updater] {}", msg);
         on_progress(msg);
     })?;
@@ -1091,37 +1252,6 @@ fn detect_installed_version(resources: &Path) -> Option<String> {
         .or_else(|| load_log().current_version)
 }
 
-fn backup_current_runtime(resources: &Path) -> Result<Option<PathBuf>, String> {
-    let current_exe = resources.join(exe_name());
-    if !current_exe.exists() {
-        return Ok(None);
-    }
-
-    let backup_dir = versions_dir();
-    let old_version = detect_installed_version(resources).unwrap_or_else(|| "unknown".to_string());
-    let now = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_path = backup_dir.join(format!("{}_{}", safe_version_name(&old_version), now));
-    fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
-    copy_runtime_files(resources, &backup_path)?;
-    cleanup_old_backups(&backup_dir, 2);
-    Ok(Some(backup_path))
-}
-
-fn restore_backup(backup_path: Option<&Path>, resources: &Path) -> Result<(), String> {
-    if let Some(path) = backup_path {
-        clear_runtime_files(resources)?;
-        copy_runtime_files(path, resources)?;
-    }
-    Ok(())
-}
-
-fn install_from_staging(staging_dir: &Path, resources: &Path) -> Result<(), String> {
-    clear_runtime_files(resources)?;
-    copy_runtime_files(staging_dir, resources)?;
-    validate_llama_server(&resources.join(exe_name()))?;
-    Ok(())
-}
-
 fn expand_zip(zip_path: &Path, extract_dir: &Path) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("无法打开压缩文件: {}", e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法读取压缩文件: {}", e))?;
@@ -1168,28 +1298,31 @@ pub fn download_and_install(
     version: &str,
     use_mirror: bool,
     mirror_url: Option<&str>,
+    proxy_url: Option<&str>,
     on_progress: impl Fn(String),
 ) -> Result<String, String> {
     eprintln!(
-        "[updater] starting download: url={}, version={}, use_mirror={}",
-        url, version, use_mirror
+        "[updater] starting download: url={}, version={}, use_mirror={}, proxy={}",
+        url, version, use_mirror, proxy_url.unwrap_or("<none>")
     );
+
+    // 新任务开始，清除上一次的取消请求。
+    UPDATE_CANCELLED.store(false, Ordering::SeqCst);
 
     // 下载地址来自前端参数，必须先限定在 GitHub 官方域名，再取官方校验和。
     ensure_release_url_allowed(url)?;
     if let Some(mirror) = mirror_url {
         ensure_mirror_url_allowed(mirror)?;
     }
+    ensure_not_cancelled()?;
     let (release_tag, asset_name) = parse_release_asset_url(url)
         .ok_or_else(|| "无法从发布包地址解析出版本与文件名，已中止更新。".to_string())?;
 
     on_progress("正在获取官方校验和...".to_string());
-    let expected_sha256 = fetch_expected_sha256(&release_tag, &asset_name)?;
+    let expected_sha256 = fetch_expected_sha256(&release_tag, &asset_name, proxy_url)?;
+    ensure_not_cancelled()?;
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = build_client(proxy_url, 600, 30)?;
 
     let (bytes, sha256) = download_zip_bytes(
         &client,
@@ -1198,6 +1331,7 @@ pub fn download_and_install(
         use_mirror,
         mirror_url,
         &expected_sha256,
+        proxy_url,
         &on_progress,
     )?;
     eprintln!("[updater] download complete, size: {} bytes", bytes.len());
@@ -1229,6 +1363,7 @@ pub fn download_and_install(
     }
 
     on_progress("正在解压主程序包...".to_string());
+    ensure_not_cancelled()?;
     expand_zip(&zip_path, &extract_dir)?;
 
     on_progress("正在验证发布包...".to_string());
@@ -1239,17 +1374,19 @@ pub fn download_and_install(
     let server_version = validate_llama_server(&exe_path)?;
     eprintln!("[updater] validated package: {}", server_version);
 
+    ensure_not_cancelled()?;
     fs::create_dir_all(&staging_dir).map_err(|error| error.to_string())?;
     let copied = copy_runtime_files(source_dir, &staging_dir)?;
 
     let mut runtime_copied = Vec::new();
     if let Some(runtime_url) = companion_cudart_url(url) {
         on_progress("检测到 CUDA 发布包，正在下载配套 CUDA runtime...".to_string());
+        ensure_not_cancelled()?;
         // 配套 runtime 同样要过官方域名与校验和两道关。
         ensure_release_url_allowed(&runtime_url)?;
         let (runtime_tag, runtime_asset) = parse_release_asset_url(&runtime_url)
             .ok_or_else(|| "无法解析 CUDA runtime 地址，已中止更新。".to_string())?;
-        let expected_runtime_sha256 = fetch_expected_sha256(&runtime_tag, &runtime_asset)?;
+        let expected_runtime_sha256 = fetch_expected_sha256(&runtime_tag, &runtime_asset, proxy_url)?;
         let (runtime_bytes, runtime_sha256) = download_zip_bytes(
             &client,
             "CUDA runtime",
@@ -1257,6 +1394,7 @@ pub fn download_and_install(
             use_mirror,
             mirror_url,
             &expected_runtime_sha256,
+            proxy_url,
             &on_progress,
         )?;
         eprintln!(
@@ -1283,6 +1421,7 @@ pub fn download_and_install(
     }
 
     validate_llama_server(&staging_dir.join(exe_name()))?;
+    ensure_not_cancelled()?;
     on_progress(format!(
         "发布包已验证，准备安装 {} 个核心文件、{} 个 CUDA runtime 文件。",
         copied.len(),
@@ -1293,24 +1432,39 @@ pub fn download_and_install(
     let from_version = load_log()
         .current_version
         .or_else(|| detect_installed_version(&resources));
-    on_progress("正在备份当前核心...".to_string());
-    let backup = backup_current_runtime(&resources)?;
 
+    // 旧版平铺核心先迁移成版本化目录，作为「上一个版本」保留。
+    ensure_not_cancelled()?;
+    on_progress("正在整理本机核心目录...".to_string());
+    migrate_legacy_runtime(&resources);
+
+    // 每次更新都新建独立目录：kernels/<版本>_<安装时间>/，
+    // 装好并验证后才切换生效；失败只影响新目录，旧核心毫发无损。
     on_progress("正在安装新核心...".to_string());
-    if let Err(error) = install_from_staging(&staging_dir, &resources) {
+    let install_dir = kernels_dir().join(format!(
+        "{}_{}",
+        safe_version_name(version),
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    let install_result = (|| -> Result<(), String> {
+        fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+        copy_runtime_files(&staging_dir, &install_dir)?;
+        validate_llama_server(&install_dir.join(exe_name()))?;
+        Ok(())
+    })();
+
+    if let Err(error) = install_result {
         eprintln!("[updater] install failed: {}", error);
-        on_progress("安装失败，正在恢复旧核心...".to_string());
-        if backup.is_none() {
-            clear_runtime_files(&resources).ok();
-        }
-        if let Err(restore_error) = restore_backup(backup.as_deref(), &resources) {
-            return Err(format!("安装失败：{}；回滚失败：{}", error, restore_error));
-        }
-        return Err(format!("安装失败，已恢复旧核心：{}", error));
+        // 安装失败直接丢弃新目录；旧核心未被触碰，无需回滚。
+        let _ = fs::remove_dir_all(&install_dir);
+        return Err(format!("安装失败，原核心保持不变：{}", error));
     }
 
-    let installed_version = validate_llama_server(&resources.join(exe_name()))?;
-    eprintln!("[updater] installed version: {}", installed_version);
+    // 保留最近两个核心目录：最新的 + 更新前的一个。
+    cleanup_old_kernels(2);
+
+    let installed_version = validate_llama_server(&install_dir.join(exe_name()))?;
+    eprintln!("[updater] installed version: {} at {}", installed_version, install_dir.display());
 
     let mut log = load_log();
     log.entries.push(UpdateLogEntry {
@@ -1323,18 +1477,8 @@ pub fn download_and_install(
     log.current_version = Some(version.to_string());
     save_log(&log);
 
-    on_progress("安装完成，重启生效".to_string());
+    on_progress("安装完成，下次启动模型时生效".to_string());
     Ok(format!("llama.cpp 内核已更新到 {}", version))
-}
-
-fn cleanup_old_backups(dir: &Path, keep: usize) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
-        dirs.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
-        for entry in dirs.into_iter().skip(keep) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
 }
 
 pub fn list_backups() -> Vec<(String, String)> {
@@ -1452,5 +1596,71 @@ mod tests {
         assert!(host_allowed("objects.githubusercontent.com", ALLOWED_RELEASE_HOSTS));
         assert!(!host_allowed("notgithub.com", ALLOWED_RELEASE_HOSTS));
         assert!(!host_allowed("github.com.attacker.net", ALLOWED_RELEASE_HOSTS));
+    }
+
+    /// 上游 v0.3.0 式的稳定版公告：只有 nightly-tag.txt，没有 Windows 安装包。
+    fn assetless_stable_release_json() -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": "v0.3.0",
+            "body": "stable announcement",
+            "published_at": "2026-08-25T10:22:54Z",
+            "assets": [
+                { "name": "nightly-tag.txt", "browser_download_url": "https://github.com/ggml-org/llama.cpp/releases/download/v0.3.0/nightly-tag.txt", "size": 7 }
+            ]
+        })
+    }
+
+    fn build_release_json(tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "body": "build",
+            "published_at": "2026-08-27T00:00:00Z",
+            "assets": [
+                { "name": format!("cudart-llama-bin-win-cuda-12.4-x64.zip"), "browser_download_url": format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}/cudart-llama-bin-win-cuda-12.4-x64.zip"), "size": 5_000_000u64 },
+                { "name": format!("llama-{tag}-bin-win-cpu-x64.zip"), "browser_download_url": format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-win-cpu-x64.zip"), "size": 20_000_000u64 },
+                { "name": format!("llama-{tag}-bin-win-cuda-12.4-x64.zip"), "browser_download_url": format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-win-cuda-12.4-x64.zip"), "size": 40_000_000u64 },
+                { "name": format!("llama-{tag}-bin-ubuntu-x64.tar.gz"), "browser_download_url": format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-x64.tar.gz"), "size": 30_000_000u64 }
+            ]
+        })
+    }
+
+    #[test]
+    fn pick_latest_skips_assetless_stable_release() {
+        let json = serde_json::json!([
+            assetless_stable_release_json(),
+            build_release_json("b10642")
+        ]);
+        let info = pick_latest_build_release(&json, &None, "CPU", &None, false)
+            .expect("应选中带安装包的 b10642");
+        assert_eq!(info.tag_name, "b10642");
+        assert_eq!(info.version, "b10642");
+        // cudart 配套包不能作为主安装包出现，非 Windows 包也要过滤掉。
+        assert!(info.assets.iter().all(|a| !a.name.starts_with("cudart-")));
+        assert!(info.assets.iter().all(|a| a.name.contains("win")));
+        assert_eq!(info.assets.len(), 2);
+    }
+
+    #[test]
+    fn pick_latest_returns_none_when_no_windows_packages() {
+        let json = serde_json::json!([assetless_stable_release_json()]);
+        assert!(pick_latest_build_release(&json, &None, "CPU", &None, false).is_none());
+    }
+
+    #[test]
+    fn pick_latest_prefers_cuda_asset_matching_host_cuda_major() {
+        let json = serde_json::json!([build_release_json("b10642")]);
+        let info = pick_latest_build_release(
+            &json,
+            &Some("12.8".to_string()),
+            "CUDA",
+            &Some("NVIDIA GeForce RTX 4070".to_string()),
+            false,
+        )
+        .expect("应选中 b10642");
+        assert_eq!(info.assets[0].name, "llama-b10642-bin-win-cuda-12.4-x64.zip");
+        assert!(info.assets[0].matches_host);
+        assert!(info.cuda_matched);
+        let cpu_asset = info.assets.iter().find(|a| a.name.contains("cpu")).expect("应有 CPU 包");
+        assert!(!cpu_asset.matches_host);
     }
 }

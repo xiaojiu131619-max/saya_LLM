@@ -31,16 +31,16 @@ const TONE_STYLES: Record<ConfirmDialogTone, {
   border: string;
 }> = {
   warning: {
-    iconBg: 'bg-[#F59E0B]/15',
-    iconColor: 'text-[#F59E0B]',
-    confirmBg: 'bg-[#F59E0B] hover:bg-[#D97706]',
+    iconBg: 'bg-[var(--state-warning)]/15',
+    iconColor: 'text-[var(--state-warning)]',
+    confirmBg: 'bg-[var(--state-warning)] hover:bg-[var(--state-warning)]/85',
     confirmText: 'text-white',
-    border: 'border-[#F59E0B]/30',
+    border: 'border-[var(--state-warning)]/30',
   },
   danger: {
     iconBg: 'bg-[var(--state-danger)]/15',
     iconColor: 'text-[var(--state-danger)]',
-    confirmBg: 'bg-[var(--state-danger)] hover:bg-[#DC2626]',
+    confirmBg: 'bg-[var(--state-danger)] hover:bg-[var(--state-danger)]/85',
     confirmText: 'text-white',
     border: 'border-[var(--state-danger)]/40',
   },
@@ -158,7 +158,7 @@ function ConfirmDialogContent({
                 value={typed}
                 onChange={(event) => setTyped(event.target.value)}
                 disabled={busy}
-                className="w-full glass-panel px-3 py-2 text-sm text-primary-custom bg-transparent outline-none disabled:opacity-50"
+                className="form-input w-full bg-transparent px-3 py-2 text-sm text-primary-custom disabled:opacity-50"
                 placeholder={confirmPhrase}
               />
             </div>

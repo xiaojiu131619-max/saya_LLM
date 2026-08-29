@@ -17,7 +17,7 @@ type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus';
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
   if (view === 'apiStatus') return 'apiStatus';
-  if (view === 'settings' || view === 'tools' || view === 'logs') return 'settings';
+  if (view === 'settings' || view === 'tools' || view === 'kernel' || view === 'usage' || view === 'logs') return 'settings';
   return 'model';
 }
 
@@ -42,7 +42,7 @@ export default function WorkspaceShell() {
     <div className="flex h-screen w-screen overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
         <WindowTitleBar />
-        <div className="min-h-0 flex-1 overflow-hidden p-2 pt-0">
+        <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<WorkspaceFallback />}>
             {renderWorkspace()}
           </Suspense>
@@ -76,7 +76,7 @@ function WindowTitleBar() {
     <header
       data-tauri-drag-region
       onDoubleClick={appWindow ? handleToggleMaximize : undefined}
-      className="flex h-10 flex-shrink-0 items-center border-b border-[var(--border)] bg-[var(--surface-muted)]/95 pl-4 text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]/95 dark:text-[var(--text-primary)]"
+      className="titlebar flex h-10 flex-shrink-0 items-center pl-4 text-[var(--text-primary)] dark:text-[var(--text-primary)]"
     >
       <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2">
         <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[var(--border)] text-[10px] font-semibold text-[var(--accent)] dark:bg-white/[0.07] dark:text-[var(--accent)]">

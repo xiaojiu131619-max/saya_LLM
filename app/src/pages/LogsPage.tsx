@@ -14,7 +14,7 @@ export default function LogsPage() {
             className="mb-6"
           />
 
-          <section className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <section className="border-b border-[var(--border-subtle)] py-4">
             <div className="mb-4 flex items-center gap-2.5">
               <Terminal className="h-4.5 w-4.5 text-[var(--accent)]" />
               <h2 className="text-[15px] font-semibold text-primary-custom">日志列表</h2>

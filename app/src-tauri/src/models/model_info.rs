@@ -89,6 +89,15 @@ pub struct ModelInfo {
     pub video_support: VideoSupportLevel,
     #[serde(default)]
     pub mtp_draft_path: Option<String>,
+    /// 同目录或 dspark/ 子目录发现的 DSpark 推测解码侧车。
+    #[serde(default)]
+    pub dspark_draft_path: Option<String>,
+    /// 同目录或 dflash/ 子目录发现的 DFlash 推测解码侧车。
+    #[serde(default)]
+    pub dflash_draft_path: Option<String>,
+    /// 文件名带 UD- 量化标记（unsloth Dynamic GGUF，按层位宽分配的预量化）。
+    #[serde(default)]
+    pub is_dynamic_quant: bool,
     pub supports_reasoning: bool,
     // 来自 GGUF 的 general.tags 数组（小写），用于权威能力推断
     #[serde(default)]

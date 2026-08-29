@@ -10,6 +10,7 @@ import {
   isDesktopRuntime,
   saveDesktopRuntimeSettings,
 } from '@/lib/desktop';
+import { resolveApiName } from '@/lib/modelIdentity';
 
 function clampPort(value: number) {
   if (!Number.isFinite(value)) return 8080;
@@ -46,8 +47,14 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
     };
   }, []);
 
-  const configuredApiKey = newApiKey
-    ?? (state.apiConfig.hasApiKey ? state.apiConfig.apiKey?.trim() || null : null);
+  // 复制目标：刚申请的 Key > 待生效的 Key > 当前会话保存的 Key。
+  // 运行中的 llama-server 只认启动时的旧 Key（apiKey），新 Key 在重新加载模型后生效；
+  // 软件内对话继续用旧 Key，因此两者分开存，互不影响。
+  const storedApiKey = state.apiConfig.hasApiKey ? state.apiConfig.apiKey?.trim() || null : null;
+  const pendingKey = state.apiConfig.pendingApiKey?.trim() || null;
+  const configuredApiKey = newApiKey ?? pendingKey ?? storedApiKey;
+  // 服务运行中且存在待生效的新 Key 时给出提示。
+  const keyPendingApply = Boolean(state.serverRunning && (newApiKey || pendingKey));
   const clientHost = state.apiConfig.enabled
     ? lanIpAddress ?? '<本机局域网 IP>'
     : '127.0.0.1';
@@ -101,13 +108,15 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
       .then(() => {
         setNewApiKey(nextKey);
         if (state.serverRunning) {
-          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: true } });
-          setMessage('新的 API Key 已生成。当前 llama-server 仍使用旧 Key，软件内对话不受影响；重新加载模型后新 Key 对外生效。');
+          // 运行中的服务只认启动时加载的旧 Key；新 Key 先挂到 pendingApiKey，
+          // 软件内对话继续用旧 Key，重新加载模型后新 Key 转正。
+          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: true, pendingApiKey: nextKey } });
+          setMessage('新的 API Key 已生成并保存。运行中的 llama-server 仍在使用旧 Key（软件内对话不受影响）；重新加载模型后新 Key 生效。');
         } else {
-          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: true, apiKey: nextKey } });
+          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: true, apiKey: nextKey, pendingApiKey: undefined } });
           setMessage('新的 API Key 已生成，下一次加载模型时生效。');
         }
-        void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, hasApiKey: true, apiKey: nextKey });
+        void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, hasApiKey: true });
       })
       .catch((error) => {
         setMessage(`API Key 生成失败：${String(error)}`);
@@ -123,13 +132,13 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
       .then(() => {
         setNewApiKey(null);
         if (state.serverRunning) {
-          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: false } });
+          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: false, pendingApiKey: undefined } });
           setMessage('API Key 已撤销。当前 llama-server 仍要求旧 Key 鉴权，软件内对话不受影响。重新加载模型后外部访问将不再需要 Key。');
         } else {
-          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: false, apiKey: undefined } });
+          dispatch({ type: 'SET_API_CONFIG', payload: { hasApiKey: false, apiKey: undefined, pendingApiKey: undefined } });
           setMessage('API Key 已撤销。下一次加载模型时将不再要求外部请求鉴权。');
         }
-        void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, hasApiKey: false, apiKey: undefined });
+        void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, hasApiKey: false });
       })
       .catch((error) => {
         setMessage(`API Key 撤销失败：${String(error)}`);
@@ -141,7 +150,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
       setMessage('暂未识别到局域网 IP，请确认电脑已连接局域网后重试。');
       return;
     }
-    const modelName = state.models.find((model) => model.id === state.activeModelId)?.name ?? 'local-model';
+    const modelName = resolveApiName(state.models.find((model) => model.id === state.activeModelId));
     const payload = JSON.stringify({
       model: modelName,
       messages: [{ role: 'user', content: '你好' }],
@@ -183,12 +192,12 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
           )}
 
           <div className={embedded ? 'space-y-4' : 'space-y-4 pb-12'}>
-            <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <section>
               <div className="mb-3 flex items-center gap-2">
                 <Globe2 className="h-4 w-4 text-[var(--accent)]" />
                 <h2 className="text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">对外 API</h2>
               </div>
-              <div className="divide-y divide-[#E6E0D5] dark:divide-white/[0.06]">
+              <div className="divide-y divide-[var(--border-subtle)]">
               <ApiSettingRow
                 label="释放 OpenAI / Anthropic 兼容 API"
                 description={state.apiConfig.enabled ? `下一次加载模型时监听 ${state.apiConfig.host || '0.0.0.0'}:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
@@ -235,7 +244,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                     <button
                       onClick={() => void handleCopyConfiguredApiKey()}
                       className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]"
-                      title="复制 API Key"
+                      title="复制最新的 API Key"
                     >
                       <Copy className="h-4 w-4" />
                     </button>
@@ -258,9 +267,9 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
               </ApiSettingRow>
               </div>
               {newApiKey && (
-                <div className="mt-3 rounded-xl border border-[var(--accent-subtle)] bg-[var(--accent-subtle)] p-3 dark:border-[var(--accent)] dark:bg-[#25183D]">
+                <div className="mt-3 rounded-xl border border-[var(--accent-subtle)] bg-[var(--accent-subtle)] p-3 dark:border-[var(--accent)] dark:bg-[var(--accent-subtle)]">
                   <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
-                    <KeyRound className="h-3.5 w-3.5 text-[#8B5CF6]" />
+                    <KeyRound className="h-3.5 w-3.5 text-[var(--accent)]" />
                     新 API Key
                   </div>
                   <div className="flex min-w-0 items-center gap-2">
@@ -269,7 +278,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                     </code>
                     <button
                       onClick={() => void handleCopyNewApiKey()}
-                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] text-[#6E3BD1] hover:bg-[var(--accent-subtle)] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--accent)]"
+                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--accent)]"
                       title="复制 API Key"
                     >
                       <Copy className="h-4 w-4" />
@@ -281,9 +290,14 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                       隐藏
                     </button>
                   </div>
+                  {keyPendingApply && (
+                    <p className="mt-2 text-[11px] leading-4 text-[var(--state-warning)] dark:text-[var(--accent)]">
+                      运行中的服务仍在使用旧 Key，上面的复制按钮随时可用；重新加载模型后新 Key 自动生效。
+                    </p>
+                  )}
                 </div>
               )}
-              <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-3 dark:border-white/[0.08] dark:bg-black/20">
+              <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">OpenAI 接口根地址（Base URL）</div>

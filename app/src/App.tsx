@@ -30,7 +30,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: bo
     if (!this.state.hasError) return this.props.children;
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-[var(--app-bg)] p-6 text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
-        <div className="w-full max-w-md rounded-lg border border-[var(--border)] bg-[var(--surface)] p-5 text-center dark:border-white/[0.1] dark:bg-[var(--surface-raised)]">
+        <div className="w-full max-w-md border-b border-[var(--border-subtle)] py-5 text-center">
           <h1 className="text-lg font-semibold">界面加载失败</h1>
           <p className="mt-2 text-sm text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">请重新加载界面；若问题持续，请查看服务日志。</p>
           <button type="button" onClick={() => window.location.reload()} className="mt-4 h-10 rounded-md bg-[var(--accent)] px-4 text-sm font-semibold text-white hover:bg-[var(--accent-hover)]">

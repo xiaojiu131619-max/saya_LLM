@@ -30,7 +30,28 @@ fn resolve_allowed_dirs(model_dirs: &[std::path::PathBuf]) -> Vec<std::path::Pat
     if let Ok(cwd) = std::env::current_dir().map(|p| p.canonicalize().unwrap_or(p)) {
         dirs.push(cwd);
     }
+    // 用户常用目录：聊天附件（read_file_content / read_media_file 的唯一消费方）
+    // 需要支持从桌面、文档、下载等位置拖拽文件，不再局限于模型目录。
+    for folder in user_attachment_dirs() {
+        if let Ok(canonical) = folder.canonicalize() {
+            dirs.push(canonical);
+        }
+    }
     dirs
+}
+
+/// 用户主目录下的常用文件夹（附件白名单）。目录不存在时自然被 canonicalize 过滤。
+fn user_attachment_dirs() -> Vec<std::path::PathBuf> {
+    let base = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from);
+    let Some(base) = base else {
+        return Vec::new();
+    };
+    ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"]
+        .iter()
+        .map(|name| base.join(name))
+        .collect()
 }
 
 fn is_path_in_allowed_dirs(path: &std::path::Path, model_dirs: &[std::path::PathBuf]) -> bool {
@@ -474,9 +495,14 @@ pub struct SystemAppearance {
 /// - apps_use_light_theme 从 `HKCU\...\Personalize\AppsUseLightTheme` 读出。
 /// - 注册表读取仅在 Windows 平台有效，其他平台走兜底值。
 /// - 不监听系统变化事件：Windows 改 accent/theme 时让用户重启 App 即可，事件钩子太重。
+/// 检测视频链路所需的 ffmpeg / ffprobe 是否就绪（无需启动 llama-server）。
 #[tauri::command]
-pub fn get_system_appearance() -> SystemAppearance {
-    #[cfg(windows)]
+pub fn check_video_runtime() -> process_manager::VideoRuntimeInfo {
+    process_manager::check_video_runtime()
+}
+
+#[tauri::command]
+pub fn get_system_appearance() -> SystemAppearance {    #[cfg(windows)]
     {
         let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
 

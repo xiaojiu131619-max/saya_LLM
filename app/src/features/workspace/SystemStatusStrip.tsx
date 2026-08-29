@@ -16,10 +16,10 @@ export default function SystemStatusStrip() {
   const vramPercent = stats.vramTotal > 0 ? (stats.vramUsed / stats.vramTotal) * 100 : 0;
 
   return (
-    <div className="paper-surface flex h-11 flex-shrink-0">
+    <div className="flex h-11 flex-shrink-0 border-t border-[var(--border-subtle)]">
       <button
         onClick={() => setShowOverlay(true)}
-        className="flex h-full w-full items-center gap-3 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 text-left text-[var(--text-primary)] shadow-sm transition-colors hover:bg-[#F2EEE5]"
+        className="flex h-full w-full items-center gap-3 overflow-hidden px-3 text-left text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
         title="打开系统监控"
       >
         <div className="flex items-center gap-2 pr-2">

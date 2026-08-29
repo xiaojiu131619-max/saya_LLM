@@ -105,7 +105,7 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
           </div>
 
           {/* VRAM Detail */}
-          <div className="glass-panel p-4">
+          <div className="border-b border-[var(--border-subtle)] py-4">
             <div className="flex items-center gap-2 mb-3">
               <HardDrive className="w-4 h-4 text-[var(--accent)]" />
               <span className="text-sm font-medium text-primary-custom">显存详情</span>
@@ -134,7 +134,7 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
           </div>
 
           {/* Real-time Chart */}
-          <div className="glass-panel p-4">
+          <div className="border-b border-[var(--border-subtle)] py-4">
             <div className="flex items-center gap-2 mb-3">
               <Activity className="w-4 h-4 text-[var(--status-loaded)]" />
               <span className="text-sm font-medium text-primary-custom">算力趋势 (60秒)</span>
@@ -162,15 +162,15 @@ export default function SystemStatusOverlay({ onClose }: SystemStatusOverlayProp
           </div>
 
           {/* Hardware Info */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="glass-panel p-4">
+          <div className="grid grid-cols-2">
+            <div className="border-r border-[var(--border-subtle)] py-4 pr-4">
               <div className="flex items-center gap-2 mb-2">
                 <Cpu className="w-4 h-4 text-[var(--accent)]" />
                 <span className="text-xs text-secondary-custom">GPU</span>
               </div>
               <div className="text-sm text-primary-custom font-medium">{stats.gpuName}</div>
             </div>
-            <div className="glass-panel p-4">
+            <div className="py-4 pl-4">
               <div className="flex items-center gap-2 mb-2">
                 <MemoryStick className="w-4 h-4 text-[var(--accent)]" />
                 <span className="text-xs text-secondary-custom">内存</span>

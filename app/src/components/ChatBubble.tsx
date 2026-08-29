@@ -17,7 +17,7 @@ import { useApp } from '@/context/AppContext';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
 import { isDesktopRuntime, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
-import { formatCtxUsageWithPercent } from '@/features/chat/chatUtils';
+import { formatSessionCtxUsage } from '@/features/chat/chatUtils';
 
 interface ChatBubbleProps {
   message: Message;
@@ -25,6 +25,8 @@ interface ChatBubbleProps {
   sessionId: string;
   sessionModelName?: string;
   sessionModelColor?: string;
+  /** 该条消息为止的本地会话累计水位（估算），与侧边栏服务状态同口径。 */
+  sessionCtx?: { used: number; total: number };
   onEditAndResend?: (messageId: string, content: string) => Promise<void> | void;
 }
 
@@ -87,7 +89,7 @@ function outputOnlyContent(content: string) {
     .trim();
 }
 
-export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, onEditAndResend }: ChatBubbleProps) {
+export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, sessionCtx, onEditAndResend }: ChatBubbleProps) {
   const { state, dispatch } = useApp();
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
@@ -307,7 +309,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         className="group grid w-full justify-items-end gap-1.5 pb-7"
       >
-        <div className="flex max-w-[80%] items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[#7A8598]">
+        <div className="flex max-w-[80%] items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
           <strong className="font-medium text-[var(--text-primary)] dark:text-[var(--text-secondary)]">你</strong>
           <span>{formatMessageTime(message.timestamp)}</span>
         </div>
@@ -336,7 +338,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={cancelEdit}
                 disabled={savingEdit}
-                className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[#625C50] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]"
+                className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]"
               >
                 取消
               </button>
@@ -344,7 +346,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={() => void submitEdit(draftContent)}
                 disabled={savingEdit || !draftContent.trim()}
-                className="h-8 rounded-md bg-[var(--accent)] px-3 text-sm font-semibold text-white transition-colors hover:bg-[#C95732] disabled:opacity-50"
+                className="h-8 rounded-md bg-[var(--accent)] px-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
               >
                 {savingEdit ? '发送中' : '保存并发送'}
               </button>
@@ -379,8 +381,8 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       className="group grid w-full min-w-0 gap-2.5 pb-9 text-[var(--text-primary)] dark:text-[var(--text-primary)]"
     >
-      <div className="flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[#7A8598]">
-        <strong className="truncate font-semibold text-[#303036] dark:text-[var(--text-primary)]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
+      <div className="flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+        <strong className="truncate font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
         <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/25" />
         <span className="truncate">{formatMessageTime(message.timestamp)}</span>
       </div>
@@ -391,12 +393,12 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
 
-      <div className="min-w-0 text-[15.5px] leading-[1.9] text-[#2F2F35] dark:text-[var(--text-primary)]">
+      <div className="min-w-0 text-[15.5px] leading-[1.9] text-[var(--text-primary)] dark:text-[var(--text-primary)]">
         <MarkdownRenderer content={message.content} />
         {message.isStreaming && (
           <div className="mt-3 flex w-fit items-center gap-2 py-1 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
             <span className="relative flex h-4 w-4 items-center justify-center">
-              <span className="absolute h-4 w-4 rounded-full border-2 border-[#E4DDD1] dark:border-white/[0.14]" />
+              <span className="absolute h-4 w-4 rounded-full border-2 border-[var(--border)] dark:border-white/[0.14]" />
               <motion.span
                 className="absolute h-4 w-4 rounded-full border-2 border-transparent border-t-[var(--accent)] border-r-[var(--accent)] dark:border-t-[var(--accent)] dark:border-r-[var(--accent)]"
                 animate={{ rotate: 360 }}
@@ -424,7 +426,8 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
 
       {stats && !message.isStreaming && (
         <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-          <Metric icon={Gauge} label={formatCtxUsageWithPercent(stats)} />
+          {/* ctx 与侧边栏服务状态同口径：本地会话累计水位（估算）。 */}
+          <Metric icon={Gauge} label={formatSessionCtxUsage(sessionCtx)} />
           <Metric icon={Zap} label={stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : 'tok 未返回'} />
           <Metric icon={Clock} label={stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : 'TTFT 未返回'} />
           <Metric icon={Clock} label={`${formatMetric(stats.tokensPerSec, ' tok/s')}`} />

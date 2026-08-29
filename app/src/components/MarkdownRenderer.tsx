@@ -153,7 +153,7 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
 
   return (
     <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-[var(--surface)]">
-      <div className="flex items-center justify-between border-b border-[var(--border)] bg-[#ECE6DB] px-4 py-2 dark:border-white/[0.08] dark:bg-[var(--surface-hover)]">
+      <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface-muted)] px-4 py-2 dark:border-white/[0.08] dark:bg-[var(--surface-hover)]">
         <span className="mono-font text-[12px] uppercase text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{lang}</span>
         <button
           onClick={handleCopy}
@@ -195,44 +195,49 @@ export function ThoughtBlock({ content }: { content: string }) {
 
   const lines = trimmed.split('\n').filter((line) => line.trim().length > 0);
   const lineCount = lines.length;
+  const wordCount = trimmed.length;
 
   return (
     <div
-      className="my-3 max-w-full overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-white/[0.05]"
+      className="my-3 max-w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-muted)]/70 transition-all dark:border-white/[0.08] dark:bg-white/[0.03]"
       style={{ overflowAnchor: 'none' }}
     >
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.06]"
       >
         <span className="flex min-w-0 items-center gap-2">
           <Brain className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
-          <span className="truncate">思考内容</span>
-          <span className="flex-shrink-0 rounded-full border border-[var(--border)] bg-[var(--app-bg)] px-1.5 py-px text-[11px] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]">
-            {lineCount} 行
+          <span className="truncate">思考过程</span>
+          <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04]">
+            {lineCount} 行 · {wordCount} 字
           </span>
         </span>
-        <ChevronDown
-          className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : 'rotate-0'}`}
-        />
+        <span className="flex items-center gap-1 text-[11px] text-[var(--text-tertiary)]">
+          <span>{expanded ? '收起' : '展开'}</span>
+          <ChevronDown
+            className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-200 ${expanded ? 'rotate-180' : 'rotate-0'}`}
+          />
+        </span>
       </button>
 
       {!expanded && (
         <div
           aria-hidden="true"
-          className="relative overflow-hidden"
-          style={{ height: 'calc(1.75rem * 2 + 0.75rem)' }}
+          className="relative overflow-hidden border-t border-dashed border-[var(--border)] dark:border-white/[0.06]"
+          style={{ maxHeight: '3.6rem' }}
         >
-          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap break-words px-3 pb-2 text-[15px] leading-7 text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
+          <div className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[13px] leading-relaxed text-[var(--text-tertiary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
             {trimmed}
           </div>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-[var(--surface-muted)] to-transparent dark:from-[var(--surface-raised)]" />
         </div>
       )}
 
       {expanded && (
-        <div className="whitespace-pre-wrap break-words px-3 pb-3 text-[15px] leading-8 text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
+        <div className="border-t border-[var(--border)] px-3.5 py-3 font-mono text-[13px] leading-relaxed text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:border-white/[0.06] dark:text-[var(--text-secondary)]">
           {trimmed}
         </div>
       )}

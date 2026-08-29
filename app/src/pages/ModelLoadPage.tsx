@@ -1,10 +1,19 @@
-﻿import { useRef, useState } from 'react';
-import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, Info, Square, ChevronRight, Settings2 } from 'lucide-react';
+﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2, ImagePlus } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
-import { getServerApiKey, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
-import type { ModelInfo, ModelLoadConfig } from '@/types';
+import { getServerApiKey, getDesktopSystemStats, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
+import type { AutoTuneConfig, AutoTuneProgress, AutoTuneResult, TuneRecord } from '@/lib/desktop';
+import { saveTuneResult, startAutoTune } from '@/lib/desktop';
+import { getVramCalibrationRatio, getVramCalibrationSamples, recordVramCalibration } from '@/lib/vramCalibration';
+import { predictVramUsage, type VramPrediction } from '@/lib/vramEstimate';
+import { saveModelRunRecord, getModelRunRecords, type ModelRunRecord } from '@/lib/desktop';
+import { recommendForHardware } from '@/lib/vramRecommend';
+import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
 import type { LucideIcon } from 'lucide-react';
 import { DEFAULT_GPU_LAYERS_WHEN_UNKNOWN, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import ModelFamilyLogo from '@/components/ModelFamilyLogo';
+import { resolveApiName, suggestedApiName } from '@/lib/modelIdentity';
+import { MODEL_LOGO_LIBRARY, LOBEHUB_CUSTOM_PREFIX } from '@/lib/modelLogo';
 
 function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
   return {
@@ -31,6 +40,8 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     seedEnabled: false,
     seed: -1,
     speculativeDecoding: 'off',
+    specDraftNMaxEnabled: false,
+    specDraftNMax: 4,
     chatTemplate: '',
     rememberSettings: true,
     showAdvancedSettings: false,
@@ -97,7 +108,7 @@ function modelSizeGb(model: ModelInfo) {
   return model.splitTotalSizeGb ?? model.fileSizeBytes / 1024 / 1024 / 1024;
 }
 
-function buildRecommendedLoadPreset(model: ModelInfo): RecommendedLoadPreset {
+function buildRecommendedLoadPreset(model: ModelInfo, stats?: SystemStats | null): RecommendedLoadPreset {
   const sizeGb = modelSizeGb(model);
   const layerCount = Math.max(0, model.blockCount ?? 0);
   const isSplitModel = Boolean(model.splitCount && model.splitCount > 1);
@@ -105,7 +116,7 @@ function buildRecommendedLoadPreset(model: ModelInfo): RecommendedLoadPreset {
   if (isSplitModel && sizeGb > 100) {
     return {
       title: '超大分片模型推荐',
-      description: `已识别 ${model.splitCount} 个分片，总大小约 ${formatGb(sizeGb)}。首次验证建议用单 slot、短上下文并跳过预热，确认能加载后再逐步调高参数。`,
+      description: `已识别 ${model.splitCount} 个分片（约 ${formatGb(sizeGb)}）。先单 slot、短上下文验证，再逐步调高。`,
       tone: 'warning',
       config: {
         ctxLength: 512,
@@ -132,7 +143,7 @@ function buildRecommendedLoadPreset(model: ModelInfo): RecommendedLoadPreset {
   if (sizeGb >= 40) {
     return {
       title: '大模型稳妥推荐',
-      description: `模型体积约 ${formatGb(sizeGb)}。建议先用较短上下文和单 slot 验证加载稳定性，再根据内存、显存余量调高。`,
+      description: `模型约 ${formatGb(sizeGb)}。先用短上下文验证加载，再逐步调高。`,
       tone: 'warning',
       config: {
         ctxLength: 4096,
@@ -158,9 +169,36 @@ function buildRecommendedLoadPreset(model: ModelInfo): RecommendedLoadPreset {
 
   const ctxLength = clamp(model.ctxLength || RECOMMENDED_CTX_LENGTH, 512, RECOMMENDED_CTX_LENGTH);
   const gpuLayers = recommendedGpuLayers(model.blockCount);
+  const hardwareRecommendation = recommendForHardware(model, stats);
+  if (hardwareRecommendation) {
+    return {
+      title: '基于实测显存的推荐',
+      description: `按当前显存（${hardwareRecommendation.vramUsedGb.toFixed(1)} / ${hardwareRecommendation.vramTotalGb.toFixed(1)} GB）生成，预估占用 ${hardwareRecommendation.predictedTotalGb.toFixed(1)} GB。`,
+      tone: 'normal',
+      config: {
+        ctxLength: hardwareRecommendation.ctxLength,
+        gpuLayers: hardwareRecommendation.gpuLayers,
+        batchSize: 512,
+        physicalBatchSize: 512,
+        parallel: -1,
+        fastAttention: true,
+        kvCache: true,
+        kvUnified: true,
+        mmap: true,
+        mlock: false,
+        noWarmup: false,
+      },
+      items: [
+        { label: '上下文长度', value: formatCtx(hardwareRecommendation.ctxLength) },
+        { label: 'GPU 卸载', value: layerCount > 0 ? `${hardwareRecommendation.gpuLayers} / ${layerCount} 层` : '自动尽量使用 GPU' },
+        { label: '预估显存', value: `${hardwareRecommendation.predictedTotalGb.toFixed(1)} GB` },
+        { label: '启动预热', value: '启用' },
+      ],
+    };
+  }
   return {
     title: '常规模型推荐',
-    description: '适合大多数本地 GGUF 模型的默认推荐，优先使用 GPU、保持 mmap，并让 llama-server 自动管理并发 slot。',
+    description: '默认推荐：优先 GPU、保持 mmap，并发由 llama-server 自动管理。',
     tone: 'normal',
     config: {
       ctxLength,
@@ -193,6 +231,44 @@ export default function ModelLoadPage() {
   const [loadProgressPercent, setLoadProgressPercent] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const cancelLoadRef = useRef<(() => void) | null>(null);
+  const [autoTuneRunning, setAutoTuneRunning] = useState(false);
+  const [autoTuneLog, setAutoTuneLog] = useState<string[]>([]);
+  const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResult | null>(null);
+  const [autoTuneApplied, setAutoTuneApplied] = useState(false);
+  const [logoMessage, setLogoMessage] = useState<string | null>(null);
+  // 每个模型单独的显存校准系数与运行记录（启动参数 + 跑分实测）。
+  const modelId = model?.id;
+  const calibrationRatio = getVramCalibrationRatio(modelId);
+  const calibrationSamples = getVramCalibrationSamples(modelId);
+  const [runRecords, setRunRecords] = useState<ModelRunRecord[]>([]);
+  const refreshRunRecords = useCallback(() => {
+    if (!modelId) return;
+    void getModelRunRecords(modelId).then((records) => setRunRecords(records)).catch(() => undefined);
+  }, [modelId]);
+
+  // 自动调参进度事件监听（组件生命周期内常驻）。
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    const unlisteners: Array<() => void> = [];
+    void listenDesktopEvent<AutoTuneProgress>('autotune:progress', (progress) => {
+      setAutoTuneLog((log) => [...log.slice(-59), progress.message]);
+    }).then((unlisten) => unlisteners.push(unlisten));
+    void listenDesktopEvent<AutoTuneResult>('autotune:done', (result) => {
+      setAutoTuneResult(result);
+      setAutoTuneRunning(false);
+      setAutoTuneLog((log) => [...log, `调参完成，最佳：ngl=${result.best.ngl} ctx=${result.best.ctx} kv=${result.best.kv} ts=${result.best.ts.toFixed(1)}`]);
+    }).then((unlisten) => unlisteners.push(unlisten));
+    void listenDesktopEvent<{ error: string }>('autotune:error', (payload) => {
+      setAutoTuneLog((log) => [...log, `自动调参失败：${payload.error}`]);
+      setAutoTuneRunning(false);
+    }).then((unlisten) => unlisteners.push(unlisten));
+    return () => unlisteners.forEach((unlisten) => unlisten());
+  }, []);
+
+  // 进入页面时读取本模型的运行记录；应用调参结果后也会刷新。
+  useEffect(() => {
+    refreshRunRecords();
+  }, [refreshRunRecords]);
 
   if (!model) {
     return (
@@ -201,6 +277,23 @@ export default function ModelLoadPage() {
       </div>
     );
   }
+
+  // 头像库：点击头像弹出内置 logo 库选择，不再支持上传图片。
+  const [logoLibraryOpen, setLogoLibraryOpen] = useState(false);
+  const handleChangeLogo = () => {
+    setLogoLibraryOpen(true);
+  };
+
+  const handleSelectLibraryLogo = (customLogo: string) => {
+    dispatch({ type: 'SET_MODEL_CUSTOM_LOGO', payload: { modelId: model.id, customLogo } });
+    setLogoMessage('已更新模型头像。');
+    setLogoLibraryOpen(false);
+  };
+
+  const handleClearLogo = () => {
+    dispatch({ type: 'SET_MODEL_CUSTOM_LOGO', payload: { modelId: model.id, customLogo: undefined } });
+    setLogoMessage('已恢复默认品牌图标。');
+  };
 
   const updateConfig = (key: string, value: unknown) => {
     dispatch({
@@ -220,6 +313,11 @@ export default function ModelLoadPage() {
       dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: model.id, status: 'loading' } });
 
       try {
+        // 显存校准基线：加载前实测 used，就绪后再读一次，差值即本模型真实占用。
+        let vramBaseline: number | null = null;
+        if (isDesktopRuntime()) {
+          vramBaseline = (await getDesktopSystemStats(state.systemStats).catch(() => null))?.vramUsed ?? null;
+        }
         const ready = new Promise<void>((resolve, reject) => {
           void listenDesktopEvent<{ message?: string }>('server:ready', () => resolve())
             .then((unlisten) => unlisteners.push(unlisten));
@@ -238,6 +336,31 @@ export default function ModelLoadPage() {
         await startDesktopServer(model, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools);
         setLoadProgressPercent((current) => Math.max(current, 12));
         await Promise.race([ready, cancelled]);
+
+        if (isDesktopRuntime() && vramBaseline != null) {
+          const after = await getDesktopSystemStats(state.systemStats).catch(() => null);
+          const actualGb = after?.vramUsed != null ? after.vramUsed - vramBaseline : null;
+          const predictedGb = predictVramUsage(model, model.loadConfig, 1.0).totalGb;
+          if (actualGb != null && actualGb > 0) {
+            // 按模型记录校准样本，并保存一条带实测数据的启动记录。
+            recordVramCalibration(predictedGb, actualGb, model.id);
+            await saveModelRunRecord({
+              model_id: model.id,
+              model_name: model.name,
+              kind: 'launch',
+              timestamp: Math.floor(Date.now() / 1000),
+              ngl: model.loadConfig.gpuLayers,
+              ctx: model.loadConfig.ctxLength,
+              kv: model.loadConfig.cacheTypeKEnabled ? model.loadConfig.cacheTypeK : 'f16',
+              ncmoe: model.loadConfig.moeCpuLayers > 0 ? model.loadConfig.moeCpuLayers : null,
+              flash_attn: model.loadConfig.fastAttention,
+              speculative: model.loadConfig.speculativeDecoding,
+              vram_gb: actualGb,
+              vram_predicted_gb: predictedGb,
+            }).catch(() => undefined);
+            refreshRunRecords();
+          }
+        }
 
         if (state.apiConfig.enabled) {
           const activeApiKey = await getServerApiKey().catch(() => null);
@@ -296,11 +419,92 @@ export default function ModelLoadPage() {
     dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
   };
 
+  const startAutoTuneRun = async () => {
+    if (!isDesktopRuntime() || autoTuneRunning || isLoading) return;
+    setAutoTuneRunning(true);
+    setAutoTuneLog([]);
+    setAutoTuneResult(null);
+    setAutoTuneApplied(false);
+    try {
+      const tuneConfig: AutoTuneConfig = {
+        executable_path: 'resources/llama-server.exe',
+        model_path: model.filePath ?? '',
+        port: state.serverPort,
+        total_layers: Math.max(0, model.blockCount ?? 0),
+        expert_count: Math.max(0, model.expertCount ?? 0),
+        max_ctx: Math.max(512, model.ctxLength || RECOMMENDED_CTX_LENGTH),
+        batch_size: config.batchSize,
+        flash_attn: config.fastAttention,
+        kv_offload: config.kvCache,
+        mmap: config.mmap,
+        mlock: config.mlock,
+        is_moe: model.modelType === 'moe',
+        sort_mode: 'ts',
+      };
+      await startAutoTune(tuneConfig);
+    } catch (error) {
+      setAutoTuneLog((log) => [...log, `自动调参启动失败：${String(error)}`]);
+      setAutoTuneRunning(false);
+    }
+  };
+
+  const applyTuneRecord = (record: TuneRecord) => {
+    const next: Partial<ModelLoadConfig> = {
+      gpuLayers: record.ngl,
+      ctxLength: record.ctx,
+      moeCpuLayers: record.ncmoe,
+      cacheTypeKEnabled: record.kv !== 'f16',
+      cacheTypeK: record.kv,
+      cacheTypeVEnabled: record.kv !== 'f16',
+      cacheTypeV: record.kv,
+    };
+    dispatch({
+      type: 'UPDATE_MODEL_CONFIG',
+      payload: { modelId: model.id, config: next },
+    });
+    setAutoTuneApplied(true);
+    if (isDesktopRuntime()) {
+      void saveTuneResult({
+        model_name: model.name,
+        model_path: model.filePath ?? '',
+        ngl: record.ngl,
+        ctx: record.ctx,
+        kv: record.kv,
+        ncmoe: record.ncmoe,
+        ts: record.ts,
+        vram_percent: record.vram_percent,
+        sort_mode: 'ts',
+        timestamp: Math.floor(Date.now() / 1000),
+      }).catch(() => undefined);
+      // 调参结果同时写入独立运行记录，供后续推荐与调参对比。
+      void saveModelRunRecord({
+        model_id: model.id,
+        model_name: model.name,
+        kind: 'autotune',
+        timestamp: Math.floor(Date.now() / 1000),
+        ngl: record.ngl,
+        ctx: record.ctx,
+        kv: record.kv,
+        ncmoe: record.ncmoe > 0 ? record.ncmoe : null,
+        tokens_per_sec: record.ts,
+        note: `自动调参 · 显存 ${record.vram_percent.toFixed(0)}%`,
+      }).catch(() => undefined);
+      refreshRunRecords();
+    }
+  };
+
   const config = model.loadConfig;
   const layerCount = Math.max(0, model.blockCount ?? 0);
   const ctxMax = Math.max(512, RECOMMENDED_CTX_LENGTH, model.ctxLength || 0, config.ctxLength || 0);
+  // ctx 快捷定位节点：超过本模型容量上限的节点自动隐藏。
+  const ctxTicks = [
+    { value: 10240, label: '10K' },
+    { value: 32768, label: '32K' },
+    { value: 65536, label: '64K' },
+    { value: 102400, label: '100K' },
+  ].filter((tick) => tick.value <= ctxMax);
   const vramPrediction = predictVramUsage(model, config);
-  const recommendedPreset = buildRecommendedLoadPreset(model);
+  const recommendedPreset = buildRecommendedLoadPreset(model, state.systemStats);
   const applyRecommendedConfig = () => {
     dispatch({
       type: 'UPDATE_MODEL_CONFIG',
@@ -331,24 +535,56 @@ export default function ModelLoadPage() {
           <ModelLoadTopBar
             model={model}
             prediction={vramPrediction}
+            calibrationRatio={calibrationRatio}
+            calibrationSamples={calibrationSamples}
             isLoading={isLoading}
             loadMessage={loadError ?? loadProgress}
             loadPercent={loadError ? 0 : loadProgressPercent}
             isError={Boolean(loadError)}
+            onChangeLogo={handleChangeLogo}
             onReset={() => dispatch({ type: 'UPDATE_MODEL_CONFIG', payload: { modelId: model.id, config: defaultModelLoadConfig(model) } })}
             onLoad={() => void handleLoad()}
             onStop={() => void handleStopLoading()}
+            onAutoTune={() => void startAutoTuneRun()}
+            autoTuneRunning={autoTuneRunning}
           />
 
-          <div className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+          {logoLibraryOpen && (
+            <LogoLibraryDialog
+              selected={model.customLogo}
+              onSelect={handleSelectLibraryLogo}
+              onClear={handleClearLogo}
+              onClose={() => setLogoLibraryOpen(false)}
+            />
+          )}
+
+          <div className="mb-2 border-b border-[var(--border-subtle)] py-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex min-w-0 items-center gap-3">
-                <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold dark:bg-white/[0.06]"
+                <button
+                  type="button"
+                  onClick={handleChangeLogo}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    handleClearLogo();
+                  }}
+                  className="relative flex h-9 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--surface-muted)] text-sm font-semibold transition-colors hover:bg-[var(--surface-hover)] dark:bg-white/[0.06]"
                   style={{ color: model.themeColorSolid }}
+                  title="点击更换头像，右键恢复默认"
                 >
-                  {model.family[0]}
-                </div>
+                  <ModelFamilyLogo
+                    family={model.family}
+                    architecture={model.architecture}
+                    name={model.name}
+                    size={18}
+                    customSrc={model.customLogo}
+                    tone={model.themeColorSolid}
+                    fallback={model.family[0]}
+                  />
+                  <span className="absolute inset-0 grid place-items-center bg-black/35 text-white opacity-0 transition-opacity hover:opacity-100">
+                    <ImagePlus className="h-3.5 w-3.5" />
+                  </span>
+                </button>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.family}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
@@ -388,13 +624,42 @@ export default function ModelLoadPage() {
                 })}
               </div>
             </div>
+            <div className="mt-3 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="flex-shrink-0 text-[11px] text-[var(--text-tertiary)]">API 调用名</span>
+                <input
+                  value={model.apiName ?? ''}
+                  placeholder={suggestedApiName(model)}
+                  onChange={(event) => dispatch({
+                    type: 'SET_MODEL_API_NAME',
+                    payload: { modelId: model.id, apiName: event.target.value },
+                  })}
+                  className="mono-font h-8 w-64 max-w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
+                />
+              </div>
+              <div className="text-[11px] leading-4 text-[var(--text-secondary)]">
+                对外 API 使用 <span className="mono-font text-[var(--text-primary)]">{resolveApiName(model)}</span>
+                {logoMessage ? ` · ${logoMessage}` : ''}
+              </div>
+            </div>
           </div>
 
           {activeTab === 'params' ? (
-            <div className="space-y-4">
+            <div>
               <RecommendedParamsCard preset={recommendedPreset} onApply={applyRecommendedConfig} />
 
-              <div className="grid items-start gap-4 lg:grid-cols-2">
+              <AutoTuneCard
+                running={autoTuneRunning}
+                disabled={!isDesktopRuntime() || isLoading}
+                log={autoTuneLog}
+                result={autoTuneResult}
+                applied={autoTuneApplied}
+                onApplyResult={() => autoTuneResult && applyTuneRecord(autoTuneResult.best)}
+                onClearLog={() => setAutoTuneLog([])}
+              />
+
+              <RunRecordsCard records={runRecords} />
+              <div className="grid items-start lg:grid-cols-2">
                 <ParamSection title="推理与显存" icon={Cpu}>
                   <SliderParamRow
                     label="上下文长度"
@@ -405,6 +670,7 @@ export default function ModelLoadPage() {
                     max={ctxMax}
                     step={512}
                     suffix="token"
+                    ticks={ctxTicks}
                   />
                   <SliderParamRow
                     label="GPU 卸载"
@@ -483,7 +749,7 @@ export default function ModelLoadPage() {
                 </ParamSection>
               </div>
 
-              <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="min-w-0 overflow-hidden border-b border-[var(--border-subtle)]">
                 <button
                   type="button"
                   onClick={() => updateConfig('showAdvancedSettings', !config.showAdvancedSettings)}
@@ -497,8 +763,8 @@ export default function ModelLoadPage() {
                   <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] transition-transform duration-200 dark:text-[var(--text-secondary)] ${config.showAdvancedSettings ? 'rotate-90' : ''}`} />
                 </button>
                 {config.showAdvancedSettings && (
-                  <div className="grid border-t border-[var(--border)] dark:border-white/[0.08] lg:grid-cols-2">
-                    <div className="min-w-0 lg:border-r lg:border-[var(--border)] dark:lg:border-white/[0.08]">
+                  <div className="grid border-t border-[var(--border-subtle)] lg:grid-cols-2">
+                      <div className="min-w-0 lg:border-r lg:border-[var(--border-subtle)]">
                       <NumberParamRow
                         label="CPU 线程池大小"
                         description="--threads；自动时不传该参数"
@@ -582,16 +848,26 @@ export default function ModelLoadPage() {
                         description="从 GGUF expert_count 读取"
                         value={model.modelType === 'moe' ? formatNumber(model.expertCount) : '稠密模型'}
                       />
-                      {model.supportsMtp ? (
-                        <ToggleParamRow
-                          label="推测解码（MTP）"
-                          description={model.mtpDraftPath
-                            ? `使用兼容的独立 MTP head：${fileNameFromPath(model.mtpDraftPath)}`
-                            : `使用主 GGUF 内置的 ${model.nextnPredictLayers ?? 1} 个 NextN 层，不传 -md`}
-                          badge="实验"
-                          checked={config.speculativeDecoding === 'mtp'}
-                          onChange={(v) => updateConfig('speculativeDecoding', v ? 'mtp' : 'off')}
-                        />
+                      {model.supportsMtp || model.dsparkDraftPath || model.dflashDraftPath ? (
+                        <>
+                          <SpecDecodeParamRow
+                            model={model}
+                            value={config.speculativeDecoding}
+                            onChange={(v) => updateConfig('speculativeDecoding', v)}
+                          />
+                          {config.speculativeDecoding !== 'off' ? (
+                            <OptionalNumberParamRow
+                              label="草稿深度"
+                              description="--spec-draft-n-max（1–16）；关闭时使用 llama-server 内核默认"
+                              enabled={config.specDraftNMaxEnabled}
+                              value={config.specDraftNMax}
+                              onToggle={(v) => updateConfig('specDraftNMaxEnabled', v)}
+                              onChange={(v) => updateConfig('specDraftNMax', Math.min(16, Math.max(1, Math.round(v))))}
+                              step={1}
+                              autoLabel="内核默认"
+                            />
+                          ) : null}
+                        </>
                       ) : (model.nextnPredictLayers ?? 0) > 0 ? (
                         <ReadOnlyParamRow
                           label="NextN / MTP 元数据"
@@ -625,13 +901,13 @@ export default function ModelLoadPage() {
               </div>
             </div>
           ) : (
-            <div className="max-w-5xl space-y-4">
-              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+            <div className="max-w-5xl">
+              <div className="border-b border-[var(--border-subtle)] py-5">
                 <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">模型介绍</h3>
                 <p className="text-sm leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.longDescription}</p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <div className="grid grid-cols-2 md:grid-cols-4">
                 <InfoCard icon={Calendar} label="发布日期" value={model.releaseDate} />
                 <InfoCard icon={FileText} label="许可协议" value={model.license} />
                 <InfoCard icon={Box} label="参数量" value={model.params} />
@@ -643,7 +919,7 @@ export default function ModelLoadPage() {
                   <h3 className="text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">GGUF 表头摘要</h3>
                   <span className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.ggufMetadata?.length ?? 0} 个字段</span>
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
                   {headerCards.map((item) => (
                     <InfoCard key={item.label} icon={item.icon} label={item.label} value={item.value} />
                   ))}
@@ -651,11 +927,11 @@ export default function ModelLoadPage() {
               </div>
 
               {model.benchmarks && (
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <div className="border-b border-[var(--border-subtle)] py-5">
                   <h3 className="mb-3 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">基准测试</h3>
-                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4">
                     {Object.entries(model.benchmarks).map(([key, value]) => (
-                      <div key={key} className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 text-center dark:border-white/[0.08] dark:bg-white/[0.04]">
+                      <div key={key} className="border-b border-[var(--border-subtle)] p-3 text-center last:border-b-0">
                         <div className="mb-1 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{key}</div>
                         <div className="mono-font text-lg font-semibold text-[var(--accent)]">{value}</div>
                       </div>
@@ -664,7 +940,7 @@ export default function ModelLoadPage() {
                 </div>
               )}
 
-              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="border-b border-[var(--border-subtle)] py-5">
                 <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">标签</h3>
                 <div className="flex flex-wrap items-center gap-2">
                   {model.tags.map((tag) => (
@@ -679,13 +955,13 @@ export default function ModelLoadPage() {
                   <span className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">仅展示真实读取到的元数据（metadata）</span>
                 </div>
                 {model.ggufMetadata && model.ggufMetadata.length > 0 ? (
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="grid grid-cols-1 lg:grid-cols-2">
                     {model.ggufMetadata.map(({ key, value }) => (
                       <MetadataCard key={key} name={key} value={value} />
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 text-sm text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-[var(--text-secondary)]">
+                  <div className="border-b border-[var(--border-subtle)] py-5 text-sm text-[var(--text-secondary)]">
                     未从该 GGUF 文件读取到可展示的表头元数据。
                   </div>
                 )}
@@ -698,33 +974,10 @@ export default function ModelLoadPage() {
   );
 }
 
-interface VramPrediction {
-  totalGb: number;
-  weightsGpuGb: number;
-  weightsCpuGb: number;
-  kvGb: number | null;
-  computeGb: number;
-  runtimeGb: number;
-  safetyGb: number;
-  offloadRatio: number;
-  expertGpuRatio: number;
-  missing: string[];
-}
-
-function cacheBytesPerValue(cacheType: string) {
-  const normalized = cacheType.toLowerCase();
-  if (normalized === 'f32') return 4;
-  if (normalized === 'f16' || normalized === 'bf16') return 2;
-  if (normalized === 'q8_0') return 1.0625;
-  if (normalized === 'q5_0' || normalized === 'q5_1') return 0.75;
-  if (normalized === 'q4_0' || normalized === 'q4_1' || normalized === 'iq4_nl') return 0.5625;
-  return 2;
-}
-
 const CACHE_TYPES = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1'];
 
 function rowBorderClass() {
-  return 'border-b border-[var(--border)] last:border-b-0 dark:border-white/[0.08]';
+  return 'border-b border-[var(--border-subtle)] last:border-b-0';
 }
 
 /**
@@ -780,107 +1033,75 @@ function ParamLabel({ label, description, badge }: { label: string; description?
   );
 }
 
-function predictVramUsage(model: ModelInfo, config: ModelLoadConfig): VramPrediction {
-  const gib = 1024 ** 3;
-  const modelBytes = Math.max(0, model.fileSizeBytes);
-  const modelGb = modelBytes / gib;
-  const layerCount = Math.max(0, model.blockCount ?? 0);
-  const offloadedLayers = layerCount > 0 ? clamp(config.gpuLayers, 0, layerCount) : Math.max(0, config.gpuLayers);
-  const offloadRatio = layerCount > 0 ? clamp(offloadedLayers / layerCount, 0, 1) : offloadedLayers > 0 ? 1 : 0;
-  const moeCpuLayers = model.modelType === 'moe' && layerCount > 0
-    ? clamp(config.moeCpuLayers, 0, offloadedLayers)
-    : 0;
-  const expertGpuRatio = layerCount > 0 ? clamp((offloadedLayers - moeCpuLayers) / layerCount, 0, 1) : offloadRatio;
-  const missing: string[] = [];
-  if (model.fileSizeBytes <= 0) missing.push('file_size');
+const RUN_RECORD_KIND_LABEL: Record<ModelRunRecord['kind'], string> = {
+  launch: '启动',
+  benchmark: '跑分',
+  autotune: '调参',
+};
 
-  const repeatingWeightShare = layerCount > 0 ? (model.modelType === 'moe' ? 0.96 : 0.92) : 0.9;
-  const fixedWeightShare = 1 - repeatingWeightShare;
-  const expertWeightShare = model.modelType === 'moe' && (model.expertCount ?? 0) > 1 ? 0.55 : 0;
-  const denseWeightShare = 1 - expertWeightShare;
-  const fixedGpuRatio = offloadedLayers >= layerCount && layerCount > 0
-    ? 1
-    : offloadedLayers > 0
-      ? 0.35
-      : 0;
-  const repeatingGpuRatio = (denseWeightShare * offloadRatio) + (expertWeightShare * expertGpuRatio);
-  const weightsGpuGb = Math.min(
-    modelGb,
-    modelGb * ((repeatingWeightShare * repeatingGpuRatio) + (fixedWeightShare * fixedGpuRatio))
+// 模型运行记录：单独保存的启动参数与实测表现，用于对比调参和验证显存预测偏差。
+// 默认折叠，点击标题展开。
+function RunRecordsCard({ records }: { records: ModelRunRecord[] }) {
+  const [expanded, setExpanded] = useState(false);
+  if (records.length === 0) return null;
+  return (
+    <div className="border-b border-[var(--border-subtle)] py-4">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+      >
+        <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)] transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        <History className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+        运行记录
+        <span className="text-xs font-normal text-[var(--text-tertiary)]">{records.length} 条 · 供推荐与调参对比</span>
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-1.5">
+          {records.slice(0, 8).map((record) => {
+            const deviation = record.vram_gb != null && record.vram_predicted_gb
+              ? ((record.vram_gb - record.vram_predicted_gb) / record.vram_predicted_gb * 100)
+              : null;
+            return (
+              <div
+                key={`${record.timestamp}-${record.kind}`}
+                className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-[11px] dark:bg-white/[0.04]"
+              >
+                <span className="rounded-sm bg-[var(--accent-subtle)] px-1 py-0.5 font-medium text-[var(--accent)] dark:bg-white/[0.06]">
+                  {RUN_RECORD_KIND_LABEL[record.kind] ?? record.kind}
+                </span>
+                <span className="mono-font text-[var(--text-primary)]">
+                  ngl={record.ngl ?? '--'} ctx={record.ctx?.toLocaleString() ?? '--'} kv={record.kv ?? 'f16'}
+                  {record.ncmoe != null ? ` ncmoe=${record.ncmoe}` : ''}
+                </span>
+                {record.tokens_per_sec != null && (
+                  <span className="mono-font text-[var(--text-secondary)]">{record.tokens_per_sec.toFixed(1)} tok/s</span>
+                )}
+                {record.vram_gb != null && (
+                  <span className="mono-font text-[var(--text-secondary)]">
+                    显存 {record.vram_gb.toFixed(1)} GB
+                    {deviation != null && Number.isFinite(deviation) ? `（预测偏差 ${deviation > 0 ? '+' : ''}${deviation.toFixed(0)}%）` : ''}
+                  </span>
+                )}
+                <span className="ml-auto text-[var(--text-tertiary)]">
+                  {new Date(record.timestamp * 1000).toLocaleString('zh-CN', { hour12: false })}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
-  const weightsCpuGb = Math.max(0, modelGb - weightsGpuGb);
-
-  let kvGb: number | null = null;
-  if (config.kvCache) {
-    const kvHeads = model.headCountKv ?? model.headCount;
-    const keyLength = model.keyLength;
-    const valueLength = model.valueLength;
-    if (layerCount > 0 && kvHeads && keyLength && valueLength) {
-      const parallelSlots = config.parallel > 0 ? clamp(Math.round(config.parallel), 1, 128) : 1;
-      const contextTokens = Math.max(1, config.ctxLength) * parallelSlots;
-      const keyBytes = cacheBytesPerValue(config.cacheTypeKEnabled ? config.cacheTypeK : 'f16');
-      const valueBytes = cacheBytesPerValue(config.cacheTypeVEnabled ? config.cacheTypeV : 'f16');
-      const kvBytes = contextTokens
-        * layerCount
-        * kvHeads
-        * ((keyLength * keyBytes) + (valueLength * valueBytes));
-      kvGb = kvBytes / gib;
-    } else {
-      if (layerCount <= 0) missing.push('block_count');
-      if (!kvHeads) missing.push('head_count_kv');
-      if (!keyLength) missing.push('key_length');
-      if (!valueLength) missing.push('value_length');
-    }
-  } else {
-    kvGb = 0;
-  }
-
-  const embedding = model.embeddingLength && model.embeddingLength > 0 ? model.embeddingLength : 4096;
-  if (!model.embeddingLength) missing.push('embedding_length');
-  const batch = clamp(config.batchSize || 1, 1, 8192);
-  const ubatch = clamp(config.physicalBatchSize || batch, 1, batch);
-  const effectiveBatch = Math.max(1, Math.min(batch, ubatch));
-  const ctxWindow = clamp(config.ctxLength || RECOMMENDED_CTX_LENGTH, 512, 262144);
-  const parallelSlots = config.parallel > 0 ? clamp(Math.round(config.parallel), 1, 128) : 1;
-  const headCount = Math.max(1, model.headCount ?? model.headCountKv ?? 32);
-  const activationBytes = 2;
-  const graphLayerFactor = clamp((layerCount || 32) / 32, 0.75, 3.5);
-  const graphMultiplier = config.fastAttention ? 18 : 28;
-  const graphScratchGb = (effectiveBatch * embedding * activationBytes * graphMultiplier * graphLayerFactor) / gib;
-  const attentionScratchGb = config.fastAttention
-    ? 0
-    : (effectiveBatch * Math.min(ctxWindow, 8192) * headCount * activationBytes) / gib;
-  const parallelScratchGb = Math.max(0, parallelSlots - 1) * Math.min(0.18, graphScratchGb * 0.25);
-  const computeGb = weightsGpuGb > 0
-    ? Math.max(0.12, graphScratchGb + attentionScratchGb + parallelScratchGb)
-    : 0;
-  const runtimeGb = weightsGpuGb > 0
-    ? 0.3 + Math.min(0.85, (layerCount || 32) * 0.006) + (parallelSlots > 1 ? 0.04 * (parallelSlots - 1) : 0)
-    : 0.05;
-  const subtotalGb = weightsGpuGb + (kvGb ?? 0) + computeGb + runtimeGb;
-  const safetyGb = subtotalGb > 0 ? Math.max(0.2, subtotalGb * 0.06) : 0;
-
-  return {
-    totalGb: subtotalGb + safetyGb,
-    weightsGpuGb,
-    weightsCpuGb,
-    kvGb,
-    computeGb,
-    runtimeGb,
-    safetyGb,
-    offloadRatio,
-    expertGpuRatio,
-    missing,
-  };
 }
 
 function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPreset; onApply: () => void }) {
   const warning = preset.tone === 'warning';
   return (
-    <div className={`rounded-xl border p-4 ${
+    <div className={`border-b py-4 ${
       warning
-        ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] dark:border-[var(--state-warning)] dark:bg-[var(--state-warning-bg)]'
-        : 'border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]'
+        ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)]'
+        : 'border-[var(--border-subtle)]'
     }`}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
@@ -897,7 +1118,7 @@ function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPre
           </div>
           <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
             {preset.items.map((item) => (
-              <div key={item.label} className="rounded-lg border border-black/[0.06] bg-white/55 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.05]">
+              <div key={item.label} className="border-l border-[var(--border-subtle)] px-3 py-1">
                 <div className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.label}</div>
                 <div className="mt-1 truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{item.value}</div>
               </div>
@@ -916,14 +1137,108 @@ function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPre
   );
 }
 
+function AutoTuneCard({ running, disabled, log, result, applied, onApplyResult, onClearLog }: {
+  running: boolean;
+  disabled: boolean;
+  log: string[];
+  result: AutoTuneResult | null;
+  applied: boolean;
+  onApplyResult: () => void;
+  onClearLog: () => void;
+}) {
+  const logViewportRef = useRef<HTMLDivElement | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (!collapsed && logViewportRef.current) {
+      logViewportRef.current.scrollTop = logViewportRef.current.scrollHeight;
+    }
+  }, [log.length, collapsed]);
+
+  return (
+    <div className={`border-b py-4 transition-colors ${
+      running
+        ? 'border-[var(--accent)] bg-[var(--accent-subtle)]/20'
+        : 'border-[var(--border-subtle)]'
+    }`}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+            <Wand2 className={`h-4 w-4 flex-shrink-0 ${running ? 'animate-pulse text-[var(--accent)]' : 'text-[var(--accent)]'}`} />
+            <span>自动调参（实测搜索）</span>
+            {running && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-white shadow-sm">
+                <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
+                搜索中…
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          {!disabled && result && !applied && (
+            <button
+              type="button"
+              onClick={onApplyResult}
+              className="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
+            >
+              应用最佳参数
+            </button>
+          )}
+          {applied && (
+            <span className="rounded-md bg-[var(--state-success-bg)] px-2.5 py-1.5 text-xs font-medium text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]">
+              已应用调参结果
+            </span>
+          )}
+        </div>
+      </div>
+
+      {log.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+            <span className="font-mono text-[11px]">搜索日志（共 {log.length} 条）</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCollapsed(!collapsed)}
+                className="hover:text-[var(--text-primary)] dark:hover:text-white"
+              >
+                {collapsed ? '展开日志' : '收起日志'}
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={onClearLog}
+                disabled={running}
+                className="hover:text-[var(--text-primary)] disabled:opacity-40 dark:hover:text-white"
+              >
+                清空
+              </button>
+            </div>
+          </div>
+          {!collapsed && (
+            <div
+              ref={logViewportRef}
+              className="max-h-36 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-2.5 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-secondary)]"
+            >
+              {log.map((line, index) => (
+                <div key={index} className="truncate">{line}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ParamSection({ title, icon: Icon, children }: {
   title: string;
   icon: LucideIcon;
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] dark:border-white/[0.08] dark:bg-white/[0.03]">
-      <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+    <div className="min-w-0 overflow-hidden border-b border-[var(--border-subtle)]">
+      <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-1 py-2.5">
         <Icon className="h-4 w-4 text-[var(--accent)]" />
         <h3 className="text-[13px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{title}</h3>
       </div>
@@ -932,16 +1247,88 @@ function ParamSection({ title, icon: Icon, children }: {
   );
 }
 
-function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercent, isError, onReset, onLoad, onStop }: {
+// 头像库弹窗：内置品牌 logo 网格，点选即用；不支持上传图片。
+function LogoLibraryDialog({ selected, onSelect, onClear, onClose }: {
+  selected?: string;
+  onSelect: (customLogo: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const isUsingLibrary = Boolean(selected?.startsWith(LOBEHUB_CUSTOM_PREFIX));
+  return (
+    <div
+      className="fixed inset-0 z-[80] grid place-items-center bg-black/40 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[80vh] w-[min(640px,92vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl dark:border-white/[0.10] dark:bg-[#2b2b2b]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-primary-custom">选择头像</div>
+            <div className="mt-0.5 text-xs text-secondary-custom">点击任意品牌图标即可应用；右键头像可恢复默认。</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-xs text-secondary-custom hover:bg-[var(--surface-muted)] hover:text-primary-custom dark:hover:bg-white/[0.08]"
+          >
+            关闭
+          </button>
+        </div>
+        <div className="grid max-h-[56vh] grid-cols-4 gap-2 overflow-y-auto p-4 sm:grid-cols-6 md:grid-cols-8">
+          {MODEL_LOGO_LIBRARY.map((entry) => {
+            const value = `${LOBEHUB_CUSTOM_PREFIX}${entry.key}`;
+            const active = selected === value;
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => onSelect(value)}
+                className={`flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2.5 transition-colors ${
+                  active
+                    ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+                    : 'border-[var(--border)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:hover:bg-white/[0.06]'
+                }`}
+                title={entry.label}
+              >
+                <ModelFamilyLogo customSrc={value} size={24} tone="var(--accent)" fallback={entry.label[0]} />
+                <span className="w-full truncate text-center text-[10px] text-secondary-custom">{entry.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] px-4 py-2.5">
+          <span className="text-xs text-secondary-custom">当前：{selected ? (isUsingLibrary ? '品牌图标' : '自定义图片') : '默认品牌图标'}</span>
+          <button
+            type="button"
+            onClick={() => { onClear(); onClose(); }}
+            className="rounded-md border border-[var(--border)] px-2.5 py-1 text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)] hover:text-primary-custom dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
+          >
+            恢复默认
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSamples, isLoading, loadMessage, loadPercent, isError, onChangeLogo, onReset, onLoad, onStop, onAutoTune, autoTuneRunning }: {
   model: ModelInfo;
   prediction: VramPrediction;
+  calibrationRatio: number;
+  calibrationSamples: number;
   isLoading: boolean;
   loadMessage: string | null;
   loadPercent: number;
   isError: boolean;
+  onChangeLogo: () => void;
   onReset: () => void;
   onLoad: () => void;
   onStop: () => void;
+  onAutoTune: () => void;
+  autoTuneRunning: boolean;
 }) {
   const safePercent = clamp(loadPercent, 0, 100);
   const offloadPercent = Math.round(prediction.offloadRatio * 100);
@@ -949,15 +1336,26 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
   const progressText = loadMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
 
   return (
-    <div className="model-load-summary sticky top-0 z-40 mb-3 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 shadow-[0_8px_22px_rgba(64,60,50,0.08)] dark:border-white/[0.08] dark:bg-[var(--surface-raised)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
+    <div className="model-load-summary sticky top-0 z-40 mb-1 overflow-hidden border-b border-[var(--border-subtle)] bg-[var(--app-bg)] px-1 py-2">
       <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div
-            className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-sm font-semibold dark:border-white/[0.08] dark:bg-white/[0.05]"
+          <button
+            type="button"
+            onClick={onChangeLogo}
+            className="grid h-8 w-8 flex-shrink-0 place-items-center overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface)] text-sm font-semibold dark:border-white/[0.08] dark:bg-white/[0.05]"
             style={{ color: model.themeColorSolid }}
+            title="点击更换头像"
           >
-            {model.family[0]}
-          </div>
+            <ModelFamilyLogo
+              family={model.family}
+              architecture={model.architecture}
+              name={model.name}
+              size={16}
+              customSrc={model.customLogo}
+              tone={model.themeColorSolid}
+              fallback={model.family[0]}
+            />
+          </button>
           <div className="min-w-0">
             <h1 className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</h1>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
@@ -971,15 +1369,22 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
         </div>
 
         <div className="model-load-summary-metrics xl:w-[560px] xl:flex-shrink-0">
-          <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <div className="flex items-center gap-2 border-l border-[var(--border-subtle)] px-2.5 py-1.5">
             <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
             <div className="min-w-0">
-              <div className="text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">预计 GPU 显存</div>
+              <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                <span>预计 GPU 显存</span>
+                {calibrationSamples > 0 && (
+                  <span className="rounded-sm bg-[var(--accent-subtle)] px-1 text-[9px] font-medium text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]" title={`已按 ${calibrationSamples} 次加载实测校准`}>
+                    已校准 ×{calibrationRatio.toFixed(2)}
+                  </span>
+                )}
+              </div>
               <div className="mono-font text-base font-semibold leading-tight text-[var(--accent)]">{formatGb(prediction.totalGb)}</div>
             </div>
           </div>
 
-          <div className="model-load-summary-pills">
+          <div className="model-load-summary-pills grid grid-cols-3 gap-1.5 sm:grid-cols-6 xl:flex xl:items-center">
             <PredictionPill label="权重" value={formatGb(prediction.weightsGpuGb)} />
             <PredictionPill label="KV" value={prediction.kvGb === null ? '缺表头' : formatGb(prediction.kvGb)} />
             <PredictionPill label="计算" value={formatGb(prediction.computeGb)} />
@@ -990,6 +1395,15 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
         </div>
 
         <div className="flex flex-wrap items-center gap-2 xl:flex-shrink-0 xl:justify-end">
+          <button
+            onClick={onAutoTune}
+            disabled={isLoading || autoTuneRunning}
+            className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09]"
+            title="实测搜索最优 ngl / ctx / KV 组合，完成后在「加载参数」页应用结果"
+          >
+            <Wand2 className={`h-4 w-4 text-[var(--accent)] ${autoTuneRunning ? 'animate-pulse' : ''}`} />
+            {autoTuneRunning ? '调参中…' : '自动调参'}
+          </button>
           <button
             onClick={onReset}
             disabled={isLoading}
@@ -1009,7 +1423,7 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
           {isLoading && (
             <button
               onClick={onStop}
-              className="flex h-9 items-center gap-2 rounded-lg border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 text-sm text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[#4A2D22]"
+              className="flex h-9 items-center gap-2 rounded-lg border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 text-sm text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)]"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
               停止
@@ -1042,22 +1456,44 @@ function ModelLoadTopBar({ model, prediction, isLoading, loadMessage, loadPercen
 
 function PredictionPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
+    <div className="min-w-0 border-l border-[var(--border-subtle)] px-2 py-1">
       <div className="truncate text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{label}</div>
       <div className="mono-font truncate text-[11px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
     </div>
   );
 }
 
-function SliderParamRow({ label, description, badge, value, onChange, min, max, step, suffix }: {
+function SliderParamRow({ label, description, badge, value, onChange, min, max, step, suffix, ticks }: {
   label: string; description?: string; badge?: string; value: number; onChange: (v: number) => void; min: number; max: number; step: number; suffix?: string;
+  /** 快捷定位节点：显示为滑杆下方的可点击标签。 */
+  ticks?: Array<{ value: number; label: string }>;
 }) {
   const safeMax = Math.max(min, max);
   const sliderValue = clamp(value, min, safeMax);
   const percent = safeMax === min ? 0 : ((sliderValue - min) / (safeMax - min)) * 100;
+  const [draft, setDraft] = useState<string | null>(null);
+
+  const displayValue = draft ?? value.toString();
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = Number(e.target.value);
-    if (!Number.isNaN(v)) onChange(clamp(v, min, safeMax));
+    const raw = e.target.value;
+    setDraft(raw);
+    if (raw.trim() === '') return;
+    const v = Number(raw);
+    if (!Number.isNaN(v)) {
+      onChange(clamp(Math.round(v), min, safeMax));
+    }
+  };
+
+  const handleBlur = () => {
+    if (draft === null) return;
+    if (draft.trim() === '') {
+      onChange(min);
+    } else {
+      const v = Number(draft);
+      onChange(Number.isNaN(v) ? min : clamp(Math.round(v), min, safeMax));
+    }
+    setDraft(null);
   };
 
   return (
@@ -1074,7 +1510,10 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
             step={step}
             value={sliderValue}
             disabled={safeMax === min && min === 0}
-            onChange={(e) => onChange(clamp(Number(e.target.value), min, safeMax))}
+            onChange={(e) => {
+              setDraft(null);
+              onChange(clamp(Number(e.target.value), min, safeMax));
+            }}
             className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full accent-[var(--accent)] transition-[background] duration-200"
             style={{
               background: `linear-gradient(to right, var(--accent) ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
@@ -1083,8 +1522,9 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
           <div className="flex w-28 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 transition-colors focus-within:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
             <input
               type="number"
-              value={value}
+              value={displayValue}
               onChange={handleInputChange}
+              onBlur={handleBlur}
               step={step}
               className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[var(--text-primary)] outline-none dark:text-[var(--text-primary)]"
             />
@@ -1095,6 +1535,28 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
           <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{min.toLocaleString()}</span>
           <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safeMax.toLocaleString()}</span>
         </div>
+        {ticks && ticks.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-[var(--text-tertiary)]">快速定位</span>
+            {ticks.map((tick) => (
+              <button
+                key={tick.value}
+                type="button"
+                onClick={() => {
+                  setDraft(null);
+                  onChange(clamp(tick.value, min, safeMax));
+                }}
+                className={`mono-font rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                  sliderValue === tick.value
+                    ? 'border-[var(--accent)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:hover:bg-white/[0.06]'
+                }`}
+              >
+                {tick.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1132,6 +1594,46 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
           <span className="whitespace-nowrap">分钟后自动卸载</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function SpecDecodeParamRow({ model, value, onChange }: {
+  model: ModelInfo;
+  value: ModelLoadConfig['speculativeDecoding'];
+  onChange: (v: ModelLoadConfig['speculativeDecoding']) => void;
+}) {
+  const mtpDescription = model.mtpDraftPath
+    ? `使用兼容的独立 MTP head：${fileNameFromPath(model.mtpDraftPath)}`
+    : `使用主 GGUF 内置的 ${model.nextnPredictLayers ?? 1} 个 NextN 层，不传 -md`;
+  const description = value === 'mtp' ? mtpDescription
+    : value === 'dspark' && model.dsparkDraftPath
+      ? `使用 DSpark 侧车：${fileNameFromPath(model.dsparkDraftPath)}`
+      : value === 'dflash' && model.dflashDraftPath
+        ? `使用 DFlash 侧车：${fileNameFromPath(model.dflashDraftPath)}`
+        : '关闭推测解码（默认，行为与 llama-server 内核一致）。';
+  const options: Array<{ value: ModelLoadConfig['speculativeDecoding']; label: string; disabled?: boolean }> = [
+    { value: 'off', label: '关闭' },
+    { value: 'mtp', label: 'MTP', disabled: !model.supportsMtp },
+    { value: 'dspark', label: 'DSpark', disabled: !model.dsparkDraftPath },
+    { value: 'dflash', label: 'DFlash', disabled: !model.dflashDraftPath },
+  ];
+
+  return (
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+      <ParamLabel label="推测解码" description={description} badge="实验" />
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as ModelLoadConfig['speculativeDecoding'])}
+        aria-label="推测解码模式"
+        className="h-9 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value} disabled={option.disabled}>
+            {option.label}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -1278,7 +1780,7 @@ function CheckboxParamRow({ label, checked, onChange }: { label: string; checked
 
 function InfoCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+    <div className="border-b border-[var(--border-subtle)] py-4">
       <Icon className="mb-2 h-4 w-4 text-[var(--accent)]" />
       <div className="mb-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{label}</div>
       <div className="break-words text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{value}</div>
@@ -1290,7 +1792,7 @@ function MetadataCard({ name, value }: { name: string; value: string }) {
   const displayValue = truncateValue(value);
 
   return (
-    <div className="min-w-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+    <div className="min-w-0 border-b border-[var(--border-subtle)] py-4">
       <div className="mono-font truncate text-[11px] text-[var(--accent)]" title={name}>
         {name}
       </div>

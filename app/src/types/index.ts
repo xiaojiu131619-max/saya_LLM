@@ -1,5 +1,9 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs';
 export type ThemeType = 'dark' | 'light';
+// 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
+export type ThemeMode = 'system' | ThemeType;
+// 强调色来源：auto=跟随 Windows 系统主题色，default=使用内置 Fluent 默认蓝。
+export type AccentSource = 'auto' | 'default';
 export type SortType = 'default' | 'name' | 'size' | 'updated';
 export type GridColumnType = 1 | 2;
 export type ModelType = 'dense' | 'moe';
@@ -29,8 +33,12 @@ export interface ModelLoadConfig {
   ropeFreqScale: number;
   seedEnabled: boolean;
   seed: number;
-  // 推测解码 / 多 token 预测（MTP）：可使用内置 MTP 层或兼容的独立 head。
-  speculativeDecoding: 'off' | 'mtp';
+  // 推测解码 / 多 token 预测：可用内置 MTP 层、兼容独立 MTP head，或 DSpark/DFlash 侧车。
+  // 四种模式互斥：同一时刻只挂一个草稿模型（后端优先级 MTP > DSpark > DFlash）。
+  speculativeDecoding: 'off' | 'mtp' | 'dspark' | 'dflash';
+  // 草稿深度（--spec-draft-n-max，1–16）；关闭时用 llama-server 内核默认。
+  specDraftNMaxEnabled: boolean;
+  specDraftNMax: number;
   chatTemplate: string;
   rememberSettings: boolean;
   showAdvancedSettings: boolean;
@@ -67,6 +75,9 @@ export interface ExternalApiConfig {
   host: string;
   hasApiKey: boolean;
   apiKey?: string;
+  // 刚申请、尚未对运行中的 llama-server 生效的新 Key。
+  // 只存在于当前会话，重新加载模型后会转正为 apiKey。
+  pendingApiKey?: string;
 }
 
 export interface ModelUsageStats {
@@ -108,7 +119,7 @@ export interface ModelInfo {
   splitPart?: number;
   splitCount?: number;
   splitTotalSizeGb?: number;
-  source?: 'catalog' | 'local';
+  source?: 'catalog' | 'local' | 'api';
   architecture?: string;
   blockCount?: number;
   expertCount?: number;
@@ -141,6 +152,12 @@ export interface ModelInfo {
   mmprojVisionProjectorType?: string;
   mmprojAudioProjectorType?: string;
   mtpDraftPath?: string;
+  /// DSpark 推测解码侧车路径（扫描时按 dspark- 前缀或 dspark/ 子目录发现）。
+  dsparkDraftPath?: string;
+  /// DFlash 推测解码侧车路径。
+  dflashDraftPath?: string;
+  /// 文件名带 UD- 量化标记（unsloth Dynamic GGUF）。
+  isDynamicQuant?: boolean;
   ggufMetadata?: Array<{ key: string; value: string }>;
   avgTokensPerSec?: number;
   serverPort?: number;
@@ -156,6 +173,10 @@ export interface ModelInfo {
   supportsTools?: boolean;
   supportsReasoning?: boolean;
   supportsMtp?: boolean;
+  /** 对外 API 调用名（llama.cpp --alias）；空则用提取到的关键词 */
+  apiName?: string;
+  /** 用户自定义头像，data URL */
+  customLogo?: string;
 }
 
 export type VideoSupportLevel = 'verified' | 'candidate' | 'frames' | 'none';
@@ -224,6 +245,12 @@ export interface SystemStats {
 export interface AppState {
   currentView: ViewType;
   theme: ThemeType;
+  // 主题模式（浅色/深色/跟随系统）与生效主题 theme 分离存储。
+  themeMode: ThemeMode;
+  // 是否自动同步 Windows 系统主题色（强调色）；关闭后回落到内置 Fluent 默认蓝。
+  syncSystemAccent: boolean;
+  // 毛玻璃模式：窗口与主要表面采用半透明亚克力质感。
+  acrylicMode: boolean;
   sidebarCollapsed: boolean;
   models: ModelInfo[];
   sortBy: SortType;

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
-import type { AppState, ViewType, ThemeType, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset } from '@/types';
+import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset } from '@/types';
 import {
   checkDesktopEngine,
   getDesktopConfig,
@@ -9,6 +9,7 @@ import {
   getExternalApiKeyStatus,
   getServerApiKey,
   isDesktopRuntime,
+  setDesktopWindowMaterial,
   createExternalApiKey,
   listenDesktopEvent,
   scanDesktopModels,
@@ -38,6 +39,9 @@ type Action =
   | { type: 'SET_VIEW'; payload: ViewType }
   | { type: 'SET_THEME'; payload: ThemeType }
   | { type: 'TOGGLE_THEME' }
+  | { type: 'SET_THEME_MODE'; payload: ThemeMode }
+  | { type: 'SET_SYNC_SYSTEM_ACCENT'; payload: boolean }
+  | { type: 'SET_ACRYLIC_MODE'; payload: boolean }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_SORT'; payload: SortType }
   | { type: 'SET_GRID_COLUMNS'; payload: GridColumnType }
@@ -62,6 +66,8 @@ type Action =
   | { type: 'MARK_MODEL_RECENTLY_USED'; payload: { modelId: string } }
   | { type: 'UPDATE_MODEL_STATUS'; payload: { modelId: string; status: ModelInfo['status'] } }
   | { type: 'UPSERT_MODELS'; payload: ModelInfo[] }
+  // 清理使用统计：只保留 payload 中的模型 id（以及 api- 前缀的接口模型）。
+  | { type: 'PRUNE_USAGE'; payload: string[] }
   | { type: 'SET_BACKEND_AVAILABLE'; payload: boolean }
   | { type: 'SET_SERVER_RUNNING'; payload: boolean }
   | { type: 'SET_SERVER_PORT'; payload: number }
@@ -74,6 +80,8 @@ type Action =
   | { type: 'DELETE_SYSTEM_PROMPT_PRESET'; payload: { presetId: string } }
   | { type: 'SET_MODEL_THEME_COLOR'; payload: { modelId: string; color: string } }
   | { type: 'SET_MODEL_GROUP_THEME_COLOR'; payload: { groupKey: string; color: string } }
+  | { type: 'SET_MODEL_API_NAME'; payload: { modelId: string; apiName: string } }
+  | { type: 'SET_MODEL_CUSTOM_LOGO'; payload: { modelId: string; customLogo?: string } }
   | {
       type: 'ADD_USAGE';
       payload: {
@@ -109,7 +117,9 @@ interface StoredAppState {
   recentModelUsage?: Record<string, number>;
   modelThemeColors?: Record<string, string>;
   modelThemeGroups?: Record<string, string>;
-  ui?: Partial<Pick<AppState, 'theme' | 'sidebarCollapsed' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
+  modelApiNames?: Record<string, string>;
+  modelCustomLogos?: Record<string, string>;
+  ui?: Partial<Pick<AppState, 'theme' | 'themeMode' | 'syncSystemAccent' | 'acrylicMode' | 'sidebarCollapsed' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
     themePreferenceVersion?: number;
   };
 }
@@ -155,10 +165,22 @@ const storedState = loadStoredState();
 const storedUi = storedState.ui ?? {};
 const storedApiConfig = storedState.apiConfig ?? {};
 const storedTheme = storedUi.themePreferenceVersion === 2 ? storedUi.theme : undefined;
+// themeMode 版本 3 起单独持久化；旧数据里只有 manual flag（=1 表示显式选过主题），
+// 此时把当时的 theme 视为用户的显式选择，否则默认跟随系统。
+const storedThemeMode = (mode: string | undefined, fallback: ThemeMode): ThemeMode =>
+  (mode === 'system' || mode === 'light' || mode === 'dark') ? mode : fallback;
+const legacyThemeMode: ThemeMode = typeof window !== 'undefined'
+  && window.localStorage.getItem(THEME_MANUAL_FLAG) === '1'
+  && (storedTheme === 'light' || storedTheme === 'dark')
+  ? storedTheme
+  : 'system';
 
 const initialState: AppState = {
   currentView: 'home',
   theme: storedTheme ?? 'light',
+  themeMode: storedThemeMode(storedUi.themeMode, legacyThemeMode),
+  syncSystemAccent: storedUi.syncSystemAccent ?? true,
+  acrylicMode: storedUi.acrylicMode ?? false,
   sidebarCollapsed: storedUi.sidebarCollapsed ?? false,
   models: [],
   sortBy: storedUi.sortBy ?? 'default',
@@ -237,7 +259,12 @@ function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig>
     ropeFreqScale: Math.max(0, Number(config.ropeFreqScale ?? 0)),
     seedEnabled: config.seedEnabled ?? false,
     seed: Math.round(Number(config.seed ?? -1)),
-    speculativeDecoding: config.speculativeDecoding === 'mtp' ? 'mtp' : 'off',
+    speculativeDecoding: (() => {
+      const mode = config.speculativeDecoding as ModelLoadConfig['speculativeDecoding'];
+      return mode === 'mtp' || mode === 'dspark' || mode === 'dflash' ? mode : 'off';
+    })(),
+    specDraftNMaxEnabled: config.specDraftNMaxEnabled ?? false,
+    specDraftNMax: Math.min(16, Math.max(1, Math.round(Number(config.specDraftNMax ?? 4)))),
     chatTemplate: config.chatTemplate ?? '',
     rememberSettings: config.rememberSettings ?? true,
     showAdvancedSettings: config.showAdvancedSettings ?? false,
@@ -267,6 +294,8 @@ function mergeModels(current: ModelInfo[], incoming: ModelInfo[]) {
     const themeColorSolid = existing?.themeColorSolid ?? storedColor ?? groupColor;
     const storedLoadConfig = storedState.modelLoadConfigs?.[model.id];
     const avgTokensPerSec = existing?.avgTokensPerSec ?? averageTokensPerSec(storedState.usageByModel?.[model.id]);
+    const apiName = existing?.apiName ?? storedState.modelApiNames?.[model.id] ?? model.apiName;
+    const customLogo = existing?.customLogo ?? storedState.modelCustomLogos?.[model.id] ?? model.customLogo;
     return existing
       ? {
           ...model,
@@ -275,11 +304,15 @@ function mergeModels(current: ModelInfo[], incoming: ModelInfo[]) {
           themeColor: themeColorSolid ? `${themeColorSolid}55` : model.themeColor,
           themeColorSolid: themeColorSolid ?? model.themeColorSolid,
           avgTokensPerSec,
+          apiName,
+          customLogo,
         }
       : {
           ...model,
           loadConfig: normalizeLoadConfig({ ...model.loadConfig, ...storedLoadConfig }),
           avgTokensPerSec,
+          apiName,
+          customLogo,
           ...(themeColorSolid ? { themeColorSolid, themeColor: `${themeColorSolid}55` } : {}),
         };
   });
@@ -314,6 +347,22 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, theme: action.payload };
     case 'TOGGLE_THEME':
       return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
+    case 'SET_THEME_MODE': {
+      // 切到跟随系统时立刻按当前系统偏好同步一次生效主题，避免 UI 停留在旧值。
+      let nextTheme = state.theme;
+      if (action.payload === 'system') {
+        const prefersDark = typeof window !== 'undefined' && window.matchMedia
+          && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        nextTheme = prefersDark ? 'dark' : 'light';
+      } else {
+        nextTheme = action.payload;
+      }
+      return { ...state, themeMode: action.payload, theme: nextTheme };
+    }
+    case 'SET_SYNC_SYSTEM_ACCENT':
+      return { ...state, syncSystemAccent: action.payload };
+    case 'SET_ACRYLIC_MODE':
+      return { ...state, acrylicMode: action.payload };
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed };
     case 'SET_SORT':
@@ -505,6 +554,13 @@ function appReducer(state: AppState, action: Action): AppState {
     }
     case 'UPSERT_MODELS':
       return { ...state, models: mergeModels(state.models, action.payload) };
+    case 'PRUNE_USAGE': {
+      const keepIds = new Set(action.payload);
+      const nextUsageByModel = Object.fromEntries(
+        Object.entries(state.usageByModel).filter(([modelId]) => keepIds.has(modelId) || modelId.startsWith('api-')),
+      );
+      return { ...state, usageByModel: nextUsageByModel };
+    }
     case 'SET_BACKEND_AVAILABLE':
       return { ...state, backendAvailable: action.payload };
     case 'SET_SERVER_RUNNING':
@@ -569,6 +625,20 @@ function appReducer(state: AppState, action: Action): AppState {
           : model),
       };
     }
+    case 'SET_MODEL_API_NAME':
+      return {
+        ...state,
+        models: state.models.map((model) => model.id === action.payload.modelId
+          ? { ...model, apiName: action.payload.apiName }
+          : model),
+      };
+    case 'SET_MODEL_CUSTOM_LOGO':
+      return {
+        ...state,
+        models: state.models.map((model) => model.id === action.payload.modelId
+          ? { ...model, customLogo: action.payload.customLogo }
+          : model),
+      };
     case 'SET_MODEL_GROUP_THEME_COLOR': {
       const color = action.payload.color;
       const matchingModelIds = new Set(
@@ -655,7 +725,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
    * 之后 matchMedia 跟随系统的 effect 看到这个标记就不再覆盖用户选择。
    */
   const dispatch = useCallback((action: Action) => {
-    if (action.type === 'SET_THEME' || action.type === 'TOGGLE_THEME') {
+    if (action.type === 'SET_THEME' || action.type === 'TOGGLE_THEME' || action.type === 'SET_THEME_MODE') {
       try { window.localStorage.setItem(THEME_MANUAL_FLAG, '1'); } catch { /* best-effort */ }
     }
     baseDispatch(action);
@@ -666,9 +736,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
    *
    * 直接写 <html style="--accent: #xxx"> 比放在 React state 更稳——避免
    * "主题切换 → 整树 re-render"。同时按当前亮/暗算出 hover/pressed/subtle 派生色。
+   * syncSystemAccent 关闭时移除内联覆盖，回落到 index.css 里的 Fluent 默认蓝。
    */
   useEffect(() => {
     if (typeof document === 'undefined') return;
+    const root = document.documentElement.style;
+    if (!state.syncSystemAccent) {
+      root.removeProperty('--accent');
+      root.removeProperty('--accent-hover');
+      root.removeProperty('--accent-pressed');
+      root.removeProperty('--accent-subtle');
+      return;
+    }
     let cancelled = false;
     void (async () => {
       const appearance = await getDesktopSystemAppearance();
@@ -679,24 +758,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const hover = dark ? mixAccent(accent, 0.18) : mixAccent(accent, -0.12);
       const pressed = dark ? mixAccent(accent, 0.08) : mixAccent(accent, -0.22);
       const subtle = `${accent}26`; // ~15% alpha
-      const root = document.documentElement.style;
       root.setProperty('--accent', accent);
       root.setProperty('--accent-hover', hover);
       root.setProperty('--accent-pressed', pressed);
       root.setProperty('--accent-subtle', subtle);
     })();
     return () => { cancelled = true; };
-  }, [state.theme]);
+  }, [state.theme, state.syncSystemAccent]);
 
   /**
-   * 跟随系统亮/暗：用户没显式改过 theme 时跟 matchMedia 自动切。
+   * 跟随系统亮/暗：themeMode 为 system 时跟随 matchMedia，否则尊重用户显式选择。
    * - Tauri 桌面端 + 浏览器都启用，prefers-color-scheme 在 WebView2 上自动可用。
-   * - 改主题用 dispatch 包装，包装会写 manual flag，effect 看到 flag 就不再覆盖。
+   * - 系统触发的切换直接走 baseDispatch，避免写 manual flag。
    */
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return;
-    const manual = window.localStorage.getItem(THEME_MANUAL_FLAG) === '1';
-    if (manual) return;
+    if (state.themeMode !== 'system') return;
     const mql = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = (e: MediaQueryListEvent | MediaQueryList) => {
       const dark = e.matches;
@@ -713,7 +790,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     mql.addListener(apply);
     return () => mql.removeListener(apply);
-  }, [state.theme]);
+  }, [state.theme, state.themeMode]);
+
+  /**
+   * 毛玻璃模式：
+   * - html.acrylic-mode 交给 CSS 铺一层可读的半透明霜化罩
+   * - 桌面运行时把窗口从 Mica 切到系统 Acrylic，才能真正透出壁纸颜色变化
+   * - html.tauri-desktop 用来关掉浏览器假壁纸，避免盖住系统材质
+   */
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    if (isDesktopRuntime()) root.classList.add('tauri-desktop');
+    root.classList.toggle('acrylic-mode', state.acrylicMode);
+    if (!isDesktopRuntime()) return;
+    void setDesktopWindowMaterial(state.acrylicMode ? 'acrylic' : 'mica');
+  }, [state.acrylicMode]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -789,10 +881,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: 'SET_SERVER_RUNNING', payload: serverRunning });
 
         if (engineInfo && !engineInfo.binary_exists) {
-          if (typeof window !== 'undefined') {
-            window.sessionStorage.setItem('agent-llm-focus-kernel-update', '1');
-          }
-          dispatch({ type: 'SET_VIEW', payload: 'settings' });
+          // 直接打开独立的核心更新页，引导用户下载内核。
+          dispatch({ type: 'SET_VIEW', payload: 'kernel' });
           dispatch({
             type: 'SET_APP_STATUS',
             payload: '未检测到 llama.cpp 内核，请先下载核心后再加载模型。',
@@ -813,7 +903,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const scanned = await scanDesktopModels(true);
         if (cancelled) return;
 
-        dispatch({ type: 'UPSERT_MODELS', payload: scanned.map(toFrontendModel) });
+        const scannedModels = scanned.map(toFrontendModel);
+        dispatch({ type: 'UPSERT_MODELS', payload: scannedModels });
+        // 只保留目录中现存的模型的统计数据，已删除的模型数据一并清掉。
+        dispatch({ type: 'PRUNE_USAGE', payload: scannedModels.map((model) => model.id) });
         dispatch({
           type: 'SET_APP_STATUS',
           payload: scanned.length > 0 ? `已发现 ${scanned.length} 个本地 GGUF 模型。` : '模型目录里暂未发现 GGUF 文件。',
@@ -933,6 +1026,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ...(existing.modelLoadConfigs ?? {}),
         ...Object.fromEntries(state.models.map((model) => [model.id, model.loadConfig])),
       };
+      const modelApiNames = { ...(existing.modelApiNames ?? {}) };
+      const modelCustomLogos = { ...(existing.modelCustomLogos ?? {}) };
+      for (const model of state.models) {
+        const apiName = model.apiName?.trim();
+        if (apiName) modelApiNames[model.id] = apiName;
+        else delete modelApiNames[model.id];
+        if (model.customLogo) modelCustomLogos[model.id] = model.customLogo;
+        else delete modelCustomLogos[model.id];
+      }
 
       const next: StoredAppState = {
         chatConfig: state.chatConfig,
@@ -950,9 +1052,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         recentModelUsage: state.recentModelUsage,
         modelThemeColors,
         modelThemeGroups,
+        modelApiNames,
+        modelCustomLogos,
         ui: {
           theme: state.theme,
-          themePreferenceVersion: 2,
+          themePreferenceVersion: 3,
+          themeMode: state.themeMode,
+          syncSystemAccent: state.syncSystemAccent,
+          acrylicMode: state.acrylicMode,
           sidebarCollapsed: state.sidebarCollapsed,
           sortBy: state.sortBy,
           gridColumns: state.gridColumns,

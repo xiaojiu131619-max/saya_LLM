@@ -122,20 +122,20 @@ export default function UsagePage() {
         <div className="mx-auto max-w-[1100px]">
           <PageHeader icon={BarChart3} title="使用详情" description="真实用量数据来自 llama.cpp 响应。" className="anim-fade-rise mb-6" />
 
-          <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="mb-1 grid grid-cols-2 lg:grid-cols-4">
             <MetricCard icon={Hash} label="总令牌数（Token）" value={totals.totalTokens.toLocaleString()} delay={0} />
             <MetricCard icon={Activity} label="输入令牌" value={totals.promptTokens.toLocaleString()} delay={40} />
             <MetricCard icon={CalendarDays} label="输出令牌" value={totals.completionTokens.toLocaleString()} delay={80} />
             <MetricCard icon={Gauge} label="平均速度（tok/s）" value={avgTokensPerSec > 0 ? avgTokensPerSec.toFixed(1) : '暂无'} delay={120} />
           </div>
 
-          <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="mb-2 grid grid-cols-1 sm:grid-cols-3">
             <MetricCard icon={Activity} label="真实响应次数" value={totals.responseCount.toLocaleString()} delay={160} />
             <MetricCard icon={Gauge} label="平均首字延迟" value={avgFirstTokenDelay > 0 ? `${avgFirstTokenDelay.toFixed(2)}s` : '暂无'} delay={200} />
             <MetricCard icon={CalendarDays} label="平均输出用时" value={avgGenTime > 0 ? `${avgGenTime.toFixed(2)}s` : '暂无'} delay={240} />
           </div>
 
-          <div className="anim-fade-rise mb-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]" style={{ animationDelay: '120ms' }}>
+          <div className="anim-fade-rise mb-5 border-b border-[var(--border-subtle)] py-5" style={{ animationDelay: '120ms' }}>
             <div className="mb-5 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <CalendarDays className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
@@ -145,7 +145,7 @@ export default function UsagePage() {
                 <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{activeDayCount} 天有记录</span>
               </div>
             </div>
-            <div className="overflow-x-auto overscroll-x-contain pb-3 [scrollbar-color:var(--accent)_#E8E1D6] [scrollbar-width:thin] dark:[scrollbar-color:var(--accent)_var(--surface-muted)">
+            <div className="overflow-x-auto overscroll-x-contain pb-3 [scrollbar-color:var(--accent)_var(--surface-muted)] [scrollbar-width:thin] dark:[scrollbar-color:var(--accent)_var(--surface-muted)">
               <div className="w-max min-w-[820px]">
                 {/* 月份标签 */}
                 <div className="mb-1.5 flex pl-9 text-[10px] leading-none text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
@@ -201,7 +201,7 @@ export default function UsagePage() {
             </div>
           </div>
 
-          <div className="anim-fade-rise rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 dark:border-white/[0.08] dark:bg-white/[0.03]" style={{ animationDelay: '180ms' }}>
+          <div className="anim-fade-rise border-b border-[var(--border-subtle)] py-5" style={{ animationDelay: '180ms' }}>
             <div className="mb-5 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <PieChart className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
@@ -244,7 +244,7 @@ export default function UsagePage() {
                 </div>
               </div>
             ) : (
-              <div className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-8 text-center text-sm text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]">
+              <div className="py-8 text-center text-sm text-[var(--text-secondary)]">
                 暂无真实 token 使用记录。
               </div>
             )}
@@ -297,7 +297,7 @@ function UsageRankRow({ rank, name, tokens, total, color, responseCount, avgToke
   const lastUsedText = lastUsedAt ? new Date(lastUsedAt).toLocaleString() : '暂无时间';
 
   return (
-    <div title={name} className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 transition-colors hover:border-[var(--accent)]/30 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:border-[var(--accent)]/40">
+    <div title={name} className="border-b border-[var(--border-subtle)] py-3 last:border-b-0">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <div
@@ -325,10 +325,10 @@ function UsageRankRow({ rank, name, tokens, total, color, responseCount, avgToke
 function MetricCard({ icon: Icon, label, value, delay = 0 }: { icon: LucideIcon; label: string; value: string; delay?: number }) {
   return (
     <div
-      className="anim-fade-rise rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 transition-colors hover:border-[var(--accent)]/30 dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:border-[var(--accent)]/40"
+      className="anim-fade-rise border-b border-[var(--border-subtle)] px-1 py-4 sm:px-3"
       style={{ animationDelay: `${delay}ms` }}
     >
-      <div className="mb-2.5 flex h-7 w-7 items-center justify-center rounded-md bg-[#F0E7E1] text-[var(--accent)] dark:bg-white/[0.06]">
+      <div className="mb-2.5 flex h-7 w-7 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--accent)] dark:bg-white/[0.06]">
         <Icon className="h-4 w-4" />
       </div>
       <div className="mb-1 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{label}</div>

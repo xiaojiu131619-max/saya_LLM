@@ -46,6 +46,15 @@ pub struct ServerConfig {
     pub mmproj_path: Option<String>,
     #[serde(default)]
     pub mtp_draft_path: Option<String>,
+    /// DSpark 推测解码侧车路径（与 mtp/dflash 互斥使用，优先级 MTP > DSpark > DFlash）。
+    #[serde(default)]
+    pub dspark_draft_path: Option<String>,
+    /// DFlash 推测解码侧车路径。
+    #[serde(default)]
+    pub dflash_draft_path: Option<String>,
+    /// 推测解码草稿深度（--spec-draft-n-max，1..16）。None 表示不传，用内核默认。
+    #[serde(default)]
+    pub spec_draft_n_max: Option<u32>,
     #[serde(default)]
     pub spec_type: Option<String>,
     pub ncmoe: u32,
@@ -104,6 +113,9 @@ impl Default for ServerConfig {
             chat_template: None,
             mmproj_path: None,
             mtp_draft_path: None,
+            dspark_draft_path: None,
+            dflash_draft_path: None,
+            spec_draft_n_max: None,
             spec_type: None,
             ncmoe: 0,
             tools: None,

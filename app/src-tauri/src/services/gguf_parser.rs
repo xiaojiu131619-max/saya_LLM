@@ -534,17 +534,50 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
     })
 }
 
+// 以实际部署内核二进制（resources/llama.dll）中的 "<ARCH> MTP" 断言标记为准，
+// 而非 third_party/llama-agent 源码检出（两者版本不一致，源码无 MTP graph 的架构
+// 可能在部署内核中已实现，反之亦然）。
+// 已验证标记：COHERE2MOE / DEEPSEEK32 / DEEPSEEK4 / GLM4 / GLM_DSA / HY_V3 / MIMO2 /
+// NEMOTRON_H_MOE / QWEN35 / QWEN35MOE / QWEN3NEXT / STEP35，另加 gemma4-assistant
+// （官方独立草稿架构）。glm4moe/exaone4/exaone-moe/bailingmoe2 在部署内核中无
+// MTP 标记，不列入；deepseek2（DeepSeek V2/V3 老 norm）同样无标记。
 fn supports_mtp_graph(architecture: &str) -> bool {
     matches!(
         architecture,
-        "cohere2moe" | "gemma4" | "gemma4-assistant" | "qwen35" | "qwen35moe" | "step35"
+        "cohere2moe"
+            | "deepseek32"
+            | "deepseek4"
+            | "gemma4"
+            | "gemma4-assistant"
+            | "glm-dsa"
+            | "glm4"
+            | "hy-v3"
+            | "mimo2"
+            | "nemotron_h_moe"
+            | "qwen35"
+            | "qwen35moe"
+            | "qwen3next"
+            | "step35"
     )
 }
 
+// gemma4 主模型不含内嵌 MTP：它通过与独立的 gemma4-assistant 草稿配对使用 MTP，
+// 因此不在此列；其余支持 MTP graph 的架构均可用内嵌 NextN 层或同架构独立草稿。
 fn supports_embedded_or_same_arch_mtp(architecture: &str) -> bool {
     matches!(
         architecture,
-        "cohere2moe" | "qwen35" | "qwen35moe" | "step35"
+        "cohere2moe"
+            | "deepseek32"
+            | "deepseek4"
+            | "glm-dsa"
+            | "glm4"
+            | "hy-v3"
+            | "mimo2"
+            | "nemotron_h_moe"
+            | "qwen35"
+            | "qwen35moe"
+            | "qwen3next"
+            | "step35"
     )
 }
 
@@ -868,6 +901,39 @@ mod tests {
         assert_eq!(parsed.nextn_predict_layers, 1);
         assert_eq!(parsed.mtp_tensor_count, 1);
         assert_eq!(parsed.vocab_size, Some(151_936));
+    }
+
+    #[test]
+    fn detects_embedded_glm_dsa_mtp() {
+        let parsed = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("glm-dsa")),
+                ("glm-dsa.block_count", TestValue::U32(47)),
+                ("glm-dsa.embedding_length", TestValue::U32(4096)),
+                ("glm-dsa.nextn_predict_layers", TestValue::U32(1)),
+            ],
+            &["blk.0.attn_norm.weight", "blk.46.nextn.eh_proj.weight"],
+        );
+
+        assert!(parsed.mtp_architecture_supported);
+        assert!(parsed.has_embedded_mtp);
+        assert!(!parsed.is_mtp_draft_model);
+    }
+
+    #[test]
+    fn glm4moe_has_no_mtp_graph_in_deployed_kernel() {
+        let parsed = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("glm4moe")),
+                ("glm4moe.block_count", TestValue::U32(47)),
+                ("glm4moe.nextn_predict_layers", TestValue::U32(1)),
+            ],
+            &["blk.0.attn_norm.weight", "blk.46.nextn.eh_proj.weight"],
+        );
+
+        assert!(!parsed.mtp_architecture_supported);
+        assert!(!parsed.has_embedded_mtp);
+        assert!(!parsed.is_mtp_draft_model);
     }
 
     #[test]

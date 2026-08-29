@@ -11,3 +11,8 @@
 ## 参数与排障
 
 - 不要静默修改默认加载或推理参数。用户的默认值是排障基线，`ctx`、`ngl`、KV、batch、parallel、max token、reasoning 等行为必须保持显式、可复现，除非用户明确要求更改默认值。
+
+## 构建产物
+
+- `app/src-tauri/target/release/` 是最新 exe（`agent-llm.exe`）的指定保存位置。精简仓库、清理磁盘或执行任何批量删除时，不得删除该目录及其中的可执行文件；即使清理 `target/` 的其余编译缓存，也必须先保留 `target/release/`。
+- 最新 exe 通过 `npm run desktop:build`（即 `tauri build`）产出到上述位置。

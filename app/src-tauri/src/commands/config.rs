@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tauri::State;
 
-use crate::models::app_state::{AppConfig, AppState, ModelPreset, TuneHistoryEntry};
+use crate::models::app_state::{AppConfig, AppState, ModelPreset, ModelRunRecord, TuneHistoryEntry};
 
 const EXTERNAL_API_SECRET_SERVICE: &str = "Agent LLM External API";
 const EXTERNAL_API_SECRET_ACCOUNT: &str = "openai-compatible";
@@ -78,6 +79,58 @@ fn get_app_data_root() -> PathBuf {
 
 fn get_config_path() -> PathBuf {
     get_app_data_root().join("config.json")
+}
+
+fn get_model_records_path() -> PathBuf {
+    get_app_data_root().join("model_records.json")
+}
+
+const MAX_RUN_RECORDS_PER_MODEL: usize = 30;
+
+fn load_model_records() -> HashMap<String, Vec<ModelRunRecord>> {
+    let path = get_model_records_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_model_records(records: &HashMap<String, Vec<ModelRunRecord>>) -> Result<(), String> {
+    let path = get_model_records_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(records).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("写入模型记录失败: {}", e))
+}
+
+/// 追加一条模型运行记录（启动 / 跑分 / 自动调参），每个模型最多保留 30 条。
+#[tauri::command]
+pub fn save_model_run_record(record: ModelRunRecord) -> Result<(), String> {
+    let mut records = load_model_records();
+    let entry = records.entry(record.model_id.clone()).or_default();
+    entry.insert(0, record);
+    entry.truncate(MAX_RUN_RECORDS_PER_MODEL);
+    save_model_records(&records)
+}
+
+/// 读取某个模型的运行记录，按时间从新到旧。
+#[tauri::command]
+pub fn get_model_run_records(model_id: String) -> Vec<ModelRunRecord> {
+    load_model_records()
+        .get(&model_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 删除某个模型的全部运行记录（配合模型删除 / 数据清理使用）。
+#[tauri::command]
+pub fn clear_model_run_records(model_id: String) -> Result<(), String> {
+    let mut records = load_model_records();
+    if records.remove(&model_id).is_some() {
+        save_model_records(&records)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -251,6 +304,22 @@ pub fn migrate_plaintext_api_key(state: &AppState, plaintext_key: String) {
             }
         }
     }
+}
+
+/// 保存核心更新使用的 HTTP(S) 代理地址；传空字符串或 null 表示清除。
+/// 仅接受 http/https 代理（本机代理如 http://127.0.0.1:7890 是主要用途）。
+#[tauri::command]
+pub fn set_proxy_url(state: State<'_, AppState>, proxy_url: Option<String>) -> Result<(), String> {
+    let proxy_url = proxy_url.map(|url| url.trim().to_string()).filter(|url| !url.is_empty());
+    if let Some(url) = &proxy_url {
+        crate::services::auto_updater::build_proxy(Some(url))?;
+    }
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    let mut new_config = (*config).clone();
+    new_config.proxy_url = proxy_url;
+    persist_config(&new_config)?;
+    *config = new_config;
+    Ok(())
 }
 
 #[tauri::command]
