@@ -69,7 +69,7 @@ __pycache__/
 .mimosa/
 app/.mimosa/
 app/src/.mimosa/
-app/src-tauri/src/.mimosa/
+**/.mimosa/
 app/test-results/
 reasonix.toml
 reason/
