@@ -321,14 +321,6 @@ export function ctxUsagePercent(stats: MessageStats | undefined): number | undef
   return Math.min(100, Math.max(0, (used / total) * 100));
 }
 
-export function formatCtxUsageWithPercent(stats: MessageStats | undefined) {
-  if (!stats || stats.ctxUsed <= 0 || stats.ctxTotal <= 0) return 'ctx 未返回';
-  const percent = Math.min(999, Math.max(0, (stats.ctxUsed / stats.ctxTotal) * 100));
-  const percentText = percent.toFixed(percent >= 10 ? 0 : 1);
-  // 百分比为主展示，已用/总量作为补充，方便对回上下文容量。
-  return `ctx ${percentText}%（${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()}）`;
-}
-
 // 粗估文本 token 数：CJK 字符按 1 token，其余按每 4 字符 1 token。
 // 用于「本地会话累计水位」口径——服务器日志只有最近一轮，无法反映整段会话。
 export function estimateTextTokens(text: string): number {

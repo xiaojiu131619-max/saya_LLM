@@ -136,27 +136,6 @@ export interface DesktopFileDropEvent {
   position?: { x: number; y: number };
 }
 
-export interface ModelDownloadRequest {
-  url: string;
-  fileName?: string;
-  targetDir: string;
-}
-
-export interface ModelDownloadProgress {
-  status: 'starting' | 'downloading' | 'finished';
-  fileName: string;
-  downloadedBytes: number;
-  totalBytes?: number | null;
-  percent?: number | null;
-  message: string;
-}
-
-export interface DownloadedModelFile {
-  path: string;
-  file_name: string;
-  size_bytes: number;
-}
-
 export interface LlamaReleaseInfo {
   tag_name: string;
   version: string;
@@ -871,21 +850,9 @@ export async function openExternalUrl(url: string) {
   await invoke('open_external_url', { url });
 }
 
-export async function downloadDesktopModel(request: ModelDownloadRequest) {
-  if (!isDesktopRuntime()) {
-    throw new Error('模型联网下载需要在桌面版中使用。');
-  }
-  return invoke<DownloadedModelFile>('download_model_file', { request });
-}
-
 export async function checkDesktopEngine(executablePath = 'resources/llama-server.exe') {
   if (!isDesktopRuntime()) return null;
   return invoke<DesktopEngineInfo>('check_engine_info', { exePath: executablePath });
-}
-
-export async function checkLatestLlamaRelease() {
-  if (!isDesktopRuntime()) return null;
-  return invoke<LlamaReleaseInfo>('check_for_update');
 }
 
 export async function listRecentLlamaReleases(count = 8) {

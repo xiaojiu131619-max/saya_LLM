@@ -77,11 +77,6 @@ pub async fn download_and_update(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn list_version_backups() -> Result<Vec<(String, String)>, String> {
-    Ok(auto_updater::list_backups())
-}
-
 /// 请求取消正在进行的下载/安装；更新流程会在最近的检查点中止。
 #[tauri::command]
 pub fn cancel_kernel_update() {
@@ -92,11 +87,6 @@ pub fn cancel_kernel_update() {
 #[tauri::command]
 pub fn list_installed_kernels() -> Vec<auto_updater::InstalledKernel> {
     auto_updater::list_installed_kernels()
-}
-
-#[tauri::command]
-pub fn rollback_to_version(version_dir: String) -> Result<(), String> {
-    auto_updater::rollback_to(&version_dir)
 }
 
 #[tauri::command]

@@ -40,27 +40,3 @@ export function resolveApiName(model?: Pick<ModelInfo, 'name' | 'family' | 'para
   const custom = model.apiName?.trim();
   return sanitizeApiName(custom || suggestedApiName(model));
 }
-
-export function pickImageAsDataUrl(maxBytes = 512 * 1024): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) {
-        resolve(null);
-        return;
-      }
-      if (file.size > maxBytes) {
-        reject(new Error(`图片请小于 ${(maxBytes / 1024).toFixed(0)} KB`));
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || '') || null);
-      reader.onerror = () => reject(new Error('读取图片失败'));
-      reader.readAsDataURL(file);
-    };
-    input.click();
-  });
-}

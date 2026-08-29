@@ -43,7 +43,6 @@ pub fn run() {
             commands::model::scan_fast,
             commands::model::clear_model_cache,
             commands::model::load_model_from_path,
-            commands::model::download_model_file,
             commands::hardware::get_hardware_info,
             commands::hardware::list_gpus,
             commands::hardware::set_gpu_device,
@@ -92,8 +91,6 @@ pub fn run() {
             commands::updater::download_and_update,
             commands::updater::cancel_kernel_update,
             commands::updater::list_installed_kernels,
-            commands::updater::list_version_backups,
-            commands::updater::rollback_to_version,
             commands::updater::get_update_history,
             show_main_window,
         ])

@@ -166,13 +166,6 @@ fn migrate_legacy_runtime(resources: &Path) {
     }
 }
 
-
-fn versions_dir() -> PathBuf {
-    let v = resource_dir().join("versions");
-    fs::create_dir_all(&v).ok();
-    v
-}
-
 fn parse_nvcc_cuda_version(output: &std::process::Output) -> Option<String> {
     let combined = format!(
         "{}\n{}",
@@ -1479,67 +1472,6 @@ pub fn download_and_install(
 
     on_progress("安装完成，下次启动模型时生效".to_string());
     Ok(format!("llama.cpp 内核已更新到 {}", version))
-}
-
-pub fn list_backups() -> Vec<(String, String)> {
-    let dir = versions_dir();
-    let mut backups = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let modified = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| {
-                        chrono::DateTime::<chrono::Local>::from(t)
-                            .format("%Y-%m-%d")
-                            .to_string()
-                    })
-                    .unwrap_or_default();
-                backups.push((name, modified));
-            }
-        }
-    }
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
-    backups
-}
-
-pub fn rollback_to(version_dir: &str) -> Result<(), String> {
-    // 防止路径穿越：version_dir 应为纯目录名（如 "b4567"），不允许路径分隔符
-    if version_dir.contains("..") || version_dir.contains('/') || version_dir.contains('\\') {
-        return Err("非法的版本目录名。".to_string());
-    }
-    let backup_dir = versions_dir().join(version_dir);
-    // 规范化后确认仍在 versions 目录下
-    let canonical = backup_dir.canonicalize().map_err(|_| "版本目录不存在。".to_string())?;
-    let versions_root = versions_dir().canonicalize().map_err(|_| "无法解析版本根目录。".to_string())?;
-    if !canonical.starts_with(&versions_root) {
-        return Err("版本目录路径异常，已拒绝。".to_string());
-    }
-    let resources = resource_dir();
-
-    if !backup_dir.exists() {
-        return Err("没有找到可回滚的核心备份。".to_string());
-    }
-    clear_runtime_files(&resources)?;
-    copy_runtime_files(&backup_dir, &resources)?;
-    validate_llama_server(&resources.join(exe_name()))?;
-
-    // Log rollback
-    let mut log = load_log();
-    log.entries.push(UpdateLogEntry {
-        version: version_dir.to_string(),
-        date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
-        action: "rolled_back".to_string(),
-        from_version: log.current_version.clone(),
-        sha256: None,
-    });
-    log.current_version = Some(version_dir.to_string());
-    save_log(&log);
-
-    Ok(())
 }
 
 pub fn get_update_log() -> Vec<UpdateLogEntry> {
