@@ -63,3 +63,13 @@ app/resources/*.pdb
 .trae/
 .opencode/
 __pycache__/
+
+# ZCode / Mimosa 工具产物
+.zcode/
+.mimosa/
+app/.mimosa/
+app/src/.mimosa/
+app/src-tauri/src/.mimosa/
+app/test-results/
+reasonix.toml
+reason/
