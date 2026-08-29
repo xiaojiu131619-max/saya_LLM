@@ -6,6 +6,80 @@
 
 ---
 
+## [0.3.0] - 2026-08-28
+
+本轮以「核心更新体验重做、API 中心精简、数据口径统一、模型管理磁贴化」为主线，未改动任何模型加载/推理默认参数（`ctx`/`ngl`/KV/batch/parallel/max token/reasoning 等）。
+
+### 新增
+
+**核心更新（llama.cpp 内核管理）**
+
+- `app/src/pages/KernelUpdatePage.tsx` —— 独立「核心更新」页（设置中心侧栏新标签）：内核状态徽章（已是最新 / 有可用更新 / 未安装）、最近 8 个 release 列表（逐版本「更新」按钮）、下载进度条与「停止下载」、本机核心目录列表（标注使用中）
+- `app/src-tauri/src/services/auto_updater.rs` —— **版本化内核目录**：每次更新安装到 `resources/kernels/<版本>_<安装时间>/`，装好并 `--version` 验证后才切换生效，自动只保留最近两份（最新 + 上一个）；旧平铺布局在首次更新时自动迁移
+- 同文件 —— **可取消下载**：全局取消标志，下载循环逐块检查，取消后清理临时文件、本机核心保持不变；新增 `cancel_kernel_update` / `list_installed_kernels` 命令
+- 同文件 —— **显式代理**：`AppConfig.proxy_url`（仅 http/https），GitHub API 与全部下载走该代理（Rust 端 reqwest 关闭了 system-proxy 特性，系统代理对本程序无效，必须显式配置）；`list_recent_releases` 按需拉取并放宽超时，修复默认 30 条响应过大导致的解码失败
+- `process_manager.rs` —— llama-server 启动路径优先解析版本化核心目录；`check_video_runtime` 命令独立检测 ffmpeg/ffprobe
+
+**模型运行记录**
+
+- `app/src-tauri/src/models/app_state.rs::ModelRunRecord` + `commands/config.rs` —— 独立存储 `AppData/model_records.json`：按模型记录启动参数（ngl/ctx/kv/ncmoe/flash-attn/推测解码）与实测表现（速度、显存增量、预测偏差%），启动与调参应用时自动写入，每模型上限 30 条；模型删除时一并清理
+- `app/src/pages/ModelLoadPage.tsx` —— 「运行记录」折叠卡片展示最近 8 条，供推荐参数与自动调参对比
+
+**显存校准按模型独立**
+
+- `app/src/lib/vramCalibration.ts` —— 校准系数从全局单值改为每模型一份（EMA α=0.25，上限 60 样本，旧数据自动迁移为全局兜底），显存预测/推荐参数按模型取系数
+
+**头像 logo 库**
+
+- `app/src/lib/modelLogo.ts` + `ModelFamilyLogo` + `ModelLoadPage` —— 点击头像弹出内置品牌 logo 库（32 个品牌网格，点选即用，`lobehub:<key>` 引用存储），移除上传图片入口；右键恢复默认保留
+
+### 变更
+
+**API 中心精简与口径分离**
+
+- `ApiStatusWorkspace` —— 移除侧边栏与应用日志入口，只保留 API 状态页；指标卡改为独立底色卡片并允许换行，相邻文本不再粘连
+- 「使用统计」（UsagePage）移入设置中心；API 页 ctx 指标维持「最近一次请求」口径（服务端日志解析），归属 API 数据
+- API Key 逻辑修复：新增会话级 `pendingApiKey`，服务运行中重新申请 Key 不再导致复制按钮消失，也不影响软件内对话（旧 Key 继续生效，新 Key 重新加载模型后转正）
+- 「接口可用模型」列表支持一键添加为软件内模型，按名称自动推断标签（工具/思考/视觉/嵌入/重排等）
+
+**上下文水位口径统一（本地对话）**
+
+- `chatUtils.ts` —— 新增会话 token 估算（CJK≈1 token/字，其余 4 字符/token）；对话气泡与模型页服务状态面板统一显示**本地会话累计水位** `ctx X%（≈已用/容量）`，气泡历史可回看水位变化
+- `chatUtils.ts::list_recent_releases` 响应解析修复见上（更新源）
+
+**模型管理磁贴化**
+
+- `app/src/components/ModelCard.tsx` —— 多列模式重写为 Win10 磁贴：主题色染底方形 logo、mono 信息行（参数·量化·大小）、能力徽章 5 列 × 2 行全显示、底部 ctx/速度 + 紧凑操作键；整卡可点进入参数页
+- `index.css` —— 多列网格 `auto-fill minmax(215px,1fr)` 自适应列数并限制磁贴宽度；移除旧 2/3/4 列断点
+- 侧栏服务状态重排为四行「标签左、数值右」，长数值换行不截断；ctx 快捷节点（10K/32K/64K/100K，超容量自动隐藏）；自动调参入口改为顶栏按钮（重置/加载之前）
+- API 调用名输入框改双排紧凑布局；全局 `:focus-visible` 不再对输入类元素显示蓝色描边
+
+**聊天与外观**
+
+- `ChatSidebar` —— 新建对话按钮浅色主题文字颜色修复（原 `--app-bg` 白字压浅底不可读）
+- `index.css` —— 毛玻璃面层透明度整体下调（浅 0.78→0.60 / 深 0.90→0.72）；`setDesktopWindowMaterial` 在 Win10 上 Acrylic 失败自动回退 Blur
+- 聊天附件拖拽读取白名单放宽至用户常用目录（桌面/文档/下载/图片/音乐/视频）；模型工作区拖拽导入移除（拖拽仅保留在聊天界面）
+
+**移除**
+
+- 模型下载功能（`ModelDownloadPanel` 组件删除，Rust `download_model_file` 保留未启用）；模型页工具栏新增「魔搭下载」按钮，跳转 https://www.modelscope.cn/
+
+**MTP / 校验修复**
+
+- `process_manager.rs` —— 推测解码：模式为 off 时不再残留 `--spec-draft-n-max`；显式 `spec_type` 与草稿路径强制跨模式一致；侧车校验只针对实际启用的那一个（被更高优先级遮蔽的侧车异常不再阻断启动）
+
+### 修复
+
+- `model_scanner`/`chatUtils` —— GitHub API 响应超时报「解码失败」的问题（见上）
+- `.gitignore` —— 排除 `.zcode/`、`.mimosa/`、`test-results/` 等工具产物并移出仓库
+
+### 验证
+
+- `npm run build` / `cargo check` —— 通过
+- `npm run desktop:build` —— 通过，产物 `app/src-tauri/target/release/agent-llm.exe`
+
+---
+
 ## [0.2.0] - 2026-07-07
 
 本轮以性能、安全、UI 一致性、深色模式为主线，未改动任何模型加载/推理默认参数（`ctx`/`ngl`/KV/batch/parallel/max token/reasoning 等）。
