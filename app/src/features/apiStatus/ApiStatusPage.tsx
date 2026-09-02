@@ -3,7 +3,7 @@ import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus,
 import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import ExternalApiSection from '@/features/apiStatus/ExternalApiSection';
-import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions } from '@/features/chat/chatUtils';
+import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions, sessionBelongsToModel } from '@/features/chat/chatUtils';
 import { createApiModel } from '@/lib/apiModel';
 import PageHeader from '@/components/PageHeader';
 
@@ -151,7 +151,13 @@ export default function ApiStatusPage() {
     const ctxTotal = activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0;
     return latestRuntimeStatsFromServerLogs(serverLogs, ctxTotal);
   }, [activeModel, serverLogs]);
-  const latestStats = logRuntimeStats ?? latestStatsForSessions(Object.values(state.chatSessions).flat());
+  // 日志解析不到时（当前模型还没生成过）兜底到该模型自己的会话 stats；
+  // 不跨模型回退——别的模型的 ctxUsed/ctxTotal 显示在这里毫无意义。
+  const modelSessions = useMemo(
+    () => Object.values(state.chatSessions).flat().filter((session) => sessionBelongsToModel(session, activeModel?.id)),
+    [state.chatSessions, activeModel?.id],
+  );
+  const latestStats = logRuntimeStats ?? latestStatsForSessions(modelSessions);
   const ctxPercent = ctxUsagePercent(latestStats);
 
   return (

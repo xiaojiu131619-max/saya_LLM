@@ -1,6 +1,6 @@
 [package]
 name = "agent-llm"
-version = "0.3.0"
+version = "0.3.1"
 description = "Agent LLM - local GGUF launcher with llama.cpp runner and hardware monitoring"
 authors = ["sky"]
 license = "MIT"
@@ -42,3 +42,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.50"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_System_Performance",
+] }

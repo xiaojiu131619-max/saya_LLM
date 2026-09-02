@@ -4,6 +4,7 @@ import { Minus, Square, X } from 'lucide-react';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
+import EnvCheckDialog from './EnvCheckDialog';
 
 // 工作区按需懒加载：首屏只加载默认的模型工作区，
 // 聊天页（含 highlight.js 等）与设置页在切换时再下载，缩短首屏可交互时间。
@@ -48,6 +49,8 @@ export default function WorkspaceShell() {
           </Suspense>
         </div>
       </main>
+      {/* 首次启动环境检测：组件自治（自动检测 + 未通过时弹窗），无需外部状态。 */}
+      <EnvCheckDialog onClose={() => {}} />
     </div>
   );
 }

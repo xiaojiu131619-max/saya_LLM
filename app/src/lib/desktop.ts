@@ -27,6 +27,13 @@ export interface DesktopModelInfo {
   embedding_length: number | null;
   head_count: number | null;
   head_count_kv: number | null;
+  /** 混合架构逐层 head_count_kv 数组的求和；标量形式时为 null。 */
+  kv_heads_sum?: number | null;
+  kv_heads_sum_full?: number | null;
+  kv_heads_sum_swa?: number | null;
+  sliding_window?: number | null;
+  key_length_swa?: number | null;
+  value_length_swa?: number | null;
   key_length: number | null;
   value_length: number | null;
   gguf_version?: number;
@@ -82,6 +89,8 @@ export interface DesktopConfig {
   close_to_tray: boolean;
   /** 核心更新使用的 HTTP(S) 代理地址；未配置为 null。 */
   proxy_url: string | null;
+  /** 首次启动环境检测是否已完成；旧配置文件缺失该字段时视为未完成。 */
+  env_check_done?: boolean;
 }
 
 export async function setDesktopProxyUrl(proxyUrl: string | null) {
@@ -128,6 +137,10 @@ export interface DesktopEngineInfo {
   sm_architecture: string | null;
   llama_server_version: string | null;
   exe_path: string;
+  runtime_devices?: string[];
+  runtime_backend?: string | null;
+  host_backend?: string | null;
+  gpu_name?: string | null;
 }
 
 export interface DesktopFileDropEvent {
@@ -641,6 +654,12 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     embeddingLength: raw.embedding_length ?? undefined,
     headCount: raw.head_count ?? undefined,
     headCountKv: raw.head_count_kv ?? undefined,
+    kvHeadsSum: raw.kv_heads_sum ?? undefined,
+    kvHeadsSumFull: raw.kv_heads_sum_full ?? undefined,
+    kvHeadsSumSwa: raw.kv_heads_sum_swa ?? undefined,
+    slidingWindow: raw.sliding_window ?? undefined,
+    keyLengthSwa: raw.key_length_swa ?? undefined,
+    valueLengthSwa: raw.value_length_swa ?? undefined,
     keyLength: raw.key_length ?? undefined,
     valueLength: raw.value_length ?? undefined,
     ggufVersion: raw.gguf_version || undefined,
@@ -714,6 +733,38 @@ export async function saveDesktopRuntimeSettings(settings: {
 export async function setCloseToTray(enabled: boolean) {
   if (!isDesktopRuntime()) return enabled;
   return invoke<boolean>('set_close_to_tray', { enabled });
+}
+
+// ============================================================
+// 首次启动环境检测（镜像后端 commands/env_check.rs）
+// ============================================================
+
+export interface DesktopEnvCheckItem {
+  id: string;
+  /** ok = 通过；warning = 可选组件缺失；error = 必需组件未就绪。 */
+  level: 'ok' | 'warning' | 'error';
+  title: string;
+  detail: string;
+  install_hint: string | null;
+  install_url: string | null;
+  /** kernel-update = 跳转「核心更新」页。 */
+  in_app_action: string | null;
+}
+
+export async function runDesktopEnvCheck() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<DesktopEnvCheckItem[]>('run_env_check');
+}
+
+export async function getEnvCheckDone() {
+  if (!isDesktopRuntime()) return true;
+  return invoke<boolean>('get_env_check_done');
+}
+
+/** 关闭检测弹窗时调用：标记已完成，之后启动不再自动弹出。 */
+export async function markEnvCheckDone() {
+  if (!isDesktopRuntime()) return;
+  await invoke('mark_env_check_done');
 }
 
 export async function getExternalApiKeyStatus() {
@@ -1116,7 +1167,7 @@ function buildServerConfig(
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,
-    device: cpuOnly ? null : 'CUDA0',
+    device: cpuOnly ? 'none' : null,
     main_gpu: cpuOnly ? null : 0,
     retry_cpu_fallback: !cpuOnly,
     no_cuda: cpuOnly,

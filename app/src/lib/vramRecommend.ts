@@ -47,7 +47,9 @@ function scanMaxGpuLayers(
     const prediction = predictVramUsage(
       model,
       { ...config, gpuLayers: ngl } as ModelLoadConfig,
-      1.0, // 推荐时不叠加校准系数，避免校准偏差连锁放大；保守预算已留 10% 余量
+      // 推荐扫描用裸口径（scratchRatio=1，不叠加校准与安全系数），
+      // 避免校准偏差在逐层扫描中连锁放大；保守预算已留 10% 余量
+      { scratchRatio: 1 },
     );
     if (prediction.totalGb <= budgetGb) {
       best = ngl;
@@ -96,7 +98,7 @@ export function recommendForHardware(
     const prediction = predictVramUsage(
       model,
       { ...baseConfig, gpuLayers, ctxLength: ctx } as ModelLoadConfig,
-      1.0,
+      { scratchRatio: 1 },
     );
     if (prediction.totalGb <= budgetGb) {
       ctxLength = ctx;
@@ -108,7 +110,7 @@ export function recommendForHardware(
   const finalPrediction = predictVramUsage(
     model,
     { ...baseConfig, gpuLayers, ctxLength } as ModelLoadConfig,
-    1.0,
+    { scratchRatio: 1 },
   );
 
   return {

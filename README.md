@@ -2,7 +2,7 @@
 
 Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动器。它围绕 llama.cpp 的 `llama-server` 提供从「内核管理 → 模型管理 → 对话 → 对外 API」的完整本地链路：扫描本地 GGUF 模型、参数化加载推理服务、流式对话、多模态输入，并把推理能力以 OpenAI / Anthropic 兼容接口开放给局域网。
 
-当前版本：**0.3.0**（[更新日志](CHANGELOG.md) / [下载最新版](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest)）
+当前版本：**0.3.1**（[更新日志](CHANGELOG.md) / [下载最新版](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest)）
 
 ## 功能总览
 
@@ -12,14 +12,15 @@ Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动�
 - 每模型独立参数记忆与快速启动
 
 ### 核心更新（llama.cpp 内核）
-- 应用内直接下载 ggml-org/llama.cpp 官方发布包，自动匹配本机后端（CUDA / Vulkan / CPU）与 GPU 型号、CUDA 版本
+- 应用内直接下载 ggml-org/llama.cpp 官方发布包，自动匹配本机后端：NVIDIA 用 CUDA，AMD / Intel 用 Vulkan，其余回退 CPU
 - 版本化安装目录（`kernels/<版本>_<时间>/`），本机始终保留「最新 + 上一份」两个版本
 - 全程 SHA256 校验 + 安装前后 `--version` 双重验证，失败自动丢弃、旧内核不受影响
 - 支持 GitHub 镜像加速 / 直连下载，可配置 HTTP(S) 代理，下载可随时取消
 
 ### 模型加载与调参
 - 完整暴露 llama.cpp 启动参数：GPU 卸载（ngl）、上下文（ctx）、batch、KV 缓存量化、Flash Attention、RoPE、MoE CPU 卸载等
-- 显存预测（按模型独立校准系数）、基于实测显存的推荐参数、真实启动的自动调参（逐档搜索 ngl / ctx / KV / ncmoe）
+- 启动前按内核 `--list-devices` 选择 `CUDA0` / `Vulkan0`，不再写死 CUDA 设备
+- 显存预测（按模型独立校准系数）、基于实测显存的推荐参数、真实启动的自动调参（逐档搜索 ngl / ctx / KV / ncmoe）；AMD / Intel 通过 DXGI/PDH 读取显存与利用率
 - 运行记录：按模型持久化启动参数与实测表现（速度、显存增量、预测偏差），供调参对比
 
 ### 对话

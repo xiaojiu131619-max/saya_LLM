@@ -2,6 +2,17 @@ import type { ChatSession, ChatMessageContentPart, Message, MessageStats } from 
 
 export const CHAT_HISTORY_MODEL_ID = 'chat-workspace';
 
+/**
+ * 会话是否属于指定模型：runtimeModelId 是发起对话时的实际模型快照；
+ * modelId 多为 'chat-workspace' 桶 id（无模型语义），仅在恰好等于模型 id 时参与匹配。
+ * ctx 的分母（容量）随模型不同，跨模型取 stats 会把别的模型的 ctx% 串到当前模型上。
+ */
+export function sessionBelongsToModel(session: ChatSession, modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  return session.runtimeModelId === modelId
+    || (session.modelId === modelId && modelId !== CHAT_HISTORY_MODEL_ID);
+}
+
 export const MAX_ATTACHMENT_BYTES = 1024 * 1024;
 export const MAX_MEDIA_BYTES = 80 * 1024 * 1024;
 

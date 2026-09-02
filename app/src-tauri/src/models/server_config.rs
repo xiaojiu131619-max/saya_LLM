@@ -120,7 +120,7 @@ impl Default for ServerConfig {
             ncmoe: 0,
             tools: None,
             reasoning_budget: 0,
-            device: Some(String::from("CUDA0")),
+            device: None,
             main_gpu: Some(0),
             retry_cpu_fallback: false,
             no_cuda: false,

@@ -43,6 +43,15 @@ pub struct GgufMetadata {
     // Attention head metadata — needed for an accurate KV-cache size estimate.
     pub head_count: Option<u64>,
     pub head_count_kv: Option<u64>,
+    /// 逐层 head_count_kv 数组的求和（混合架构专用）；标量形式时为 None。
+    pub kv_heads_sum: Option<u64>,
+    /// SWA 分列求和（仅逐层数组 + 滑窗模式齐备时有值）：pattern=0 全注意力 / pattern≠0 SWA。
+    pub kv_heads_sum_full: Option<u64>,
+    pub kv_heads_sum_swa: Option<u64>,
+    /// 滑动窗口大小与 SWA 层的 K/V 维度（gemma 系），供 KV 公式按窗口估算。
+    pub sliding_window: Option<u64>,
+    pub key_length_swa: Option<u64>,
+    pub value_length_swa: Option<u64>,
     pub key_length: Option<u64>,
     pub value_length: Option<u64>,
     pub rope_freq_base: Option<f64>,
@@ -272,6 +281,16 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
     let mut tensor_type_counts: Vec<(u32, u64)> = Vec::new();
     let mut hc: Option<u64> = None;
     let mut hckv: Option<u64> = None;
+    // 混合架构（nemotron_h_moe / lfm2 / gemma4 等）把 head_count_kv 写成逐层数组：
+    // 非 0 = 该层 KV 头数，0 = Mamba 等无 KV 层。逐层读全量后求和（read_val 只
+    // 物化前 10 个元素，不能用它算），供 KV 显存估算直接使用。
+    let mut kv_heads_layers: Option<Vec<u64>> = None;
+    // gemma 系逐层滑动窗口模式（1 = SWA 层、0 = 全注意力层），用于把 KV 头
+    // 按「全 ctx / 滑窗」两类分开求和——SWA 层的 KV 只按窗口大小分配。
+    let mut swa_pattern_layers: Option<Vec<u64>> = None;
+    let mut swa_window: Option<u64> = None;
+    let mut klen_swa: Option<u64> = None;
+    let mut vlen_swa: Option<u64> = None;
     let mut klen: Option<u64> = None;
     let mut vlen: Option<u64> = None;
     let mut rope_freq_base: Option<f64> = None;
@@ -322,8 +341,12 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
             || key.ends_with(".expert_used_count")
             || key.ends_with(".attention.head_count")
             || key.ends_with(".attention.head_count_kv")
+            || key.ends_with(".attention.sliding_window_pattern")
+            || key.ends_with(".attention.sliding_window")
             || key.ends_with(".attention.key_length")
+            || key.ends_with(".attention.key_length_swa")
             || key.ends_with(".attention.value_length")
+            || key.ends_with(".attention.value_length_swa")
             || key.ends_with(".nextn_predict_layers")
             || key.ends_with(".rope.freq_base")
             || key.ends_with(".rope.dimension_count")
@@ -346,6 +369,51 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
 
         if !keep {
             skip(&buf, &mut p, ty)?;
+            continue;
+        }
+
+        // 逐层数组键不走 read_val——它只物化前 10 个元素，逐层求和/分类必须读
+        // 全量。直接从缓冲区逐元素读出后 continue，也避免把大数组整体物化。
+        if ty == 9
+            && (key.ends_with(".attention.head_count_kv")
+                || key.ends_with(".attention.sliding_window_pattern"))
+        {
+            let et = r32(&buf, &mut p)?;
+            let cnt = r64(&buf, &mut p)?;
+            if cnt > MAX_ARRAY {
+                bail!("array {}", cnt);
+            }
+            // 仅接受数值元素（滑窗模式实际是 bool 数组，et=7）；其余类型按元素
+            // 跳过并放弃该键。
+            let numeric = matches!(et, 0 | 1 | 2 | 3 | 4 | 5 | 7 | 10 | 11);
+            let mut vals: Vec<u64> = Vec::with_capacity(cnt.min(1024) as usize);
+            for _ in 0..cnt {
+                if !numeric {
+                    skip(&buf, &mut p, et)?;
+                    continue;
+                }
+                let n: i64 = match et {
+                    0 | 7 => r8(&buf, &mut p)? as i64,
+                    1 => r8(&buf, &mut p)? as i8 as i64,
+                    2 => u16::from_le_bytes(rbytes(&buf, &mut p, 2)?.try_into().unwrap()) as i64,
+                    3 => i16::from_le_bytes(rbytes(&buf, &mut p, 2)?.try_into().unwrap()) as i64,
+                    4 => r32(&buf, &mut p)? as i64,
+                    5 => r32(&buf, &mut p)? as i32 as i64,
+                    10 => r64(&buf, &mut p)? as i64,
+                    11 => i64::from_le_bytes(rbytes(&buf, &mut p, 8)?.try_into().unwrap()),
+                    _ => unreachable!(),
+                };
+                vals.push(n.max(0) as u64);
+            }
+            // 数组内容已从缓冲区消费完毕，无论元素类型都直接进入下一个键。
+            if numeric {
+                entries.push((key.clone(), format!("array[{}]", cnt)));
+                if key.ends_with(".attention.head_count_kv") {
+                    kv_heads_layers = Some(vals);
+                } else {
+                    swa_pattern_layers = Some(vals);
+                }
+            }
             continue;
         }
 
@@ -416,7 +484,14 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
                 } else if key.ends_with(".attention.head_count") {
                     hc = v.as_u64();
                 } else if key.ends_with(".attention.head_count_kv") {
+                    // 逐层数组已在 read_val 之前截获处理；这里只剩标量形式。
                     hckv = v.as_u64();
+                } else if key.ends_with(".attention.sliding_window") {
+                    swa_window = v.as_u64();
+                } else if key.ends_with(".attention.key_length_swa") {
+                    klen_swa = v.as_u64();
+                } else if key.ends_with(".attention.value_length_swa") {
+                    vlen_swa = v.as_u64();
                 } else if key.ends_with(".attention.key_length") {
                     klen = v.as_u64();
                 } else if key.ends_with(".attention.value_length") {
@@ -485,6 +560,26 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         has_main_model_tensors,
     );
 
+    // 逐层 KV 头聚合：总求和；有滑窗模式且层数对齐时，再按
+    // 全注意力（pattern=0）/ SWA（pattern≠0）分列，供 KV 公式按滑窗估算。
+    let kv_heads_sum = kv_heads_layers.as_ref().map(|layers| layers.iter().sum());
+    let mut kv_heads_sum_full: Option<u64> = None;
+    let mut kv_heads_sum_swa: Option<u64> = None;
+    if let (Some(heads), Some(pattern)) = (&kv_heads_layers, &swa_pattern_layers) {
+        if heads.len() == pattern.len() {
+            let (mut full, mut swa) = (0u64, 0u64);
+            for (h, p) in heads.iter().zip(pattern.iter()) {
+                if *p == 0 {
+                    full += h;
+                } else {
+                    swa += h;
+                }
+            }
+            kv_heads_sum_full = Some(full);
+            kv_heads_sum_swa = Some(swa);
+        }
+    }
+
     Ok(GgufMetadata {
         gguf_version,
         tensor_count,
@@ -513,6 +608,12 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         tensor_type_summary,
         head_count: hc,
         head_count_kv: hckv,
+        kv_heads_sum,
+        kv_heads_sum_full,
+        kv_heads_sum_swa,
+        sliding_window: swa_window,
+        key_length_swa: klen_swa,
+        value_length_swa: vlen_swa,
         key_length: klen,
         value_length: vlen,
         rope_freq_base,

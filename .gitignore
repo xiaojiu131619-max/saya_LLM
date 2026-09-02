@@ -25,6 +25,8 @@ $RECYCLE.BIN/
 *.rej
 *.swp
 *.swo
+/tmp/
+app/tmp/
 
 # Logs that occasionally land outside app/
 *.log

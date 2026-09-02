@@ -389,24 +389,24 @@ function CapabilityBadges({ model, dense = false, onlyActive = false, twoLine = 
     : 'h-6 px-2 text-[11px] gap-1';
   const iconSize = dense ? 'h-2.5 w-2.5' : 'h-3 w-3';
   const activeDefs = CAPABILITY_DEFS.filter((def) => states[def.key] === 'on' || states[def.key] === 'partial');
-  const visibleDefs = onlyActive ? activeDefs : CAPABILITY_DEFS;
+  // 磁贴（twoLine）与单列都只展示激活的能力：灰色"未检测到"占位格在总览卡片里没有
+  // 信息量，全量 9 个格子还会把标签文字挤压成竖排折行。
+  const visibleDefs = onlyActive || twoLine ? activeDefs : CAPABILITY_DEFS;
 
-  // 多列两行展示全部激活标签；单列仍在过多时折叠为 "+N"
-  const MAX_SHOWN = dense ? 3 : 4;
-  const shouldFold = onlyActive && !twoLine && visibleDefs.length > MAX_SHOWN;
+  // 超出上限时折叠为 "+N"：单列一行最多 4 个，磁贴宽度约 215px、每行 3-4 个。
+  const MAX_SHOWN = dense ? 3 : twoLine ? 6 : 4;
+  const shouldFold = visibleDefs.length > MAX_SHOWN;
   const displayedDefs = shouldFold ? visibleDefs.slice(0, MAX_SHOWN - 1) : visibleDefs;
   const hiddenCount = shouldFold ? visibleDefs.length - (MAX_SHOWN - 1) : 0;
   const hiddenLabels = shouldFold ? visibleDefs.slice(MAX_SHOWN - 1).map((d) => d.label).join('、') : '';
 
-  // 单列/onlyActive 模式下没有命中的能力时，直接不渲染（避免空占位文字挤压排版）。
-  if (onlyActive && visibleDefs.length === 0) {
-    return dense ? null : (
-      <span className="text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">无能力徽章</span>
-    );
+  // 只展示激活标签（单列 / 磁贴）时没有命中的能力，直接不渲染（避免空占位挤压排版）。
+  if ((onlyActive || twoLine) && visibleDefs.length === 0) {
+    return null;
   }
 
   return (
-    <div className={twoLine ? 'grid w-full grid-cols-5 gap-1 content-start' : 'flex flex-shrink-0 flex-wrap items-center gap-1'}>
+    <div className="flex flex-shrink-0 flex-wrap items-center gap-1">
       {displayedDefs.map((def) => {
         const Icon = def.icon;
         const state = states[def.key];

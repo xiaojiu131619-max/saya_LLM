@@ -38,7 +38,6 @@ import {
   classifyAttachment,
   compactModelName,
   createChatSession,
-  ctxUsagePercent,
   dayLabel,
   downloadFile,
   estimateTextTokens,
@@ -47,7 +46,6 @@ import {
   fileExtension,
   fileNameFromPath,
   formatFileSize,
-  latestStatsForSessions,
   type AttachmentKind,
   type MediaAttachment,
   type PendingAttachment,
@@ -186,12 +184,6 @@ export default function ChatPage() {
   const activeModelSnapshot = activeModel
     ? { runtimeModelId: activeModel.id, modelName: activeModel.name, modelColor: activeModel.themeColorSolid }
     : undefined;
-  // 侧边栏状态卡：优先取当前活动会话最新一条消息 stats 算 ctx%，其次取所有会话最新。
-  const chatHistorySessions = state.chatSessions[CHAT_HISTORY_MODEL_ID];
-  const loadedStats = activeSession?.messages?.length
-    ? latestStatsForSessions([activeSession])
-    : latestStatsForSessions(chatHistorySessions);
-  const ctxPercent = ctxUsagePercent(loadedStats);
   const vramPercent = systemStats.vramTotal > 0
     ? Math.min(100, Math.max(0, (systemStats.vramUsed / systemStats.vramTotal) * 100))
     : undefined;
@@ -206,6 +198,14 @@ export default function ChatPage() {
   }, [modelMessages]);
   // 水位基准：当前加载模型的上下文容量（-c）。
   const ctxCapacity = activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0;
+  // 侧边栏状态卡 ctx：与对话气泡同口径——当前会话的本地累计水位（粗估），
+  // 容量取当前加载模型的 -c。日志口径归 API 页，两处不要混。
+  const sessionCtxUsed = sessionCtxTotals.length > 0
+    ? sessionCtxTotals[sessionCtxTotals.length - 1]
+    : 0;
+  const ctxPercent = ctxCapacity > 0 && sessionCtxUsed > 0
+    ? Math.min(100, Math.max(0, (sessionCtxUsed / ctxCapacity) * 100))
+    : undefined;
   const streamingMessage = modelMessages.find((message) => message.isStreaming);
   // 当前会话是否在生成——决定本会话的输入区状态。
   const isGenerating = Boolean(streamingMessage);
@@ -1371,7 +1371,9 @@ export default function ChatPage() {
                   </div>
                 )}
 
-                <div className="min-h-[82px] overflow-hidden rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.14] dark:bg-[var(--surface)] dark:focus-within:border-white/25">
+                {/* 注意：这里不能加 overflow-hidden——思考强度菜单从卡片内向上弹出，
+                    裁剪会把菜单剪到只剩一项（其余项不可见且无法点击）。 */}
+                <div className="min-h-[82px] rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.14] dark:bg-[var(--surface)] dark:focus-within:border-white/25">
                   <textarea
                     ref={textareaRef}
                     value={inputText}

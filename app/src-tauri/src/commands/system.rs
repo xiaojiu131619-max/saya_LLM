@@ -291,6 +291,14 @@ pub struct EngineInfo {
     pub sm_architecture: Option<String>,
     pub llama_server_version: Option<String>,
     pub exe_path: String,
+    #[serde(default)]
+    pub runtime_devices: Vec<String>,
+    #[serde(default)]
+    pub runtime_backend: Option<String>,
+    #[serde(default)]
+    pub host_backend: Option<String>,
+    #[serde(default)]
+    pub gpu_name: Option<String>,
 }
 
 /// 解析引擎可执行文件路径。
@@ -359,11 +367,37 @@ pub fn check_engine_info(exe_path: String) -> EngineInfo {
         sm_architecture: None,
         llama_server_version: None,
         exe_path: resolved.clone(),
+        runtime_devices: Vec::new(),
+        runtime_backend: None,
+        host_backend: None,
+        gpu_name: None,
     };
 
     if !binary_exists {
         return info;
     }
+
+    let (host_backend, gpu_name) = auto_updater::detect_host_gpu_backend();
+    info.host_backend = Some(host_backend);
+    info.gpu_name = gpu_name;
+    info.runtime_devices = process_manager::list_runtime_devices(&resolved);
+    info.runtime_backend = if info
+        .runtime_devices
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("cuda"))
+    {
+        Some("CUDA".to_string())
+    } else if info
+        .runtime_devices
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("vulkan"))
+    {
+        Some("Vulkan".to_string())
+    } else if info.runtime_devices.is_empty() {
+        None
+    } else {
+        Some(info.runtime_devices[0].clone())
+    };
 
     let output = Command::new(&resolved)
         .arg("--version")

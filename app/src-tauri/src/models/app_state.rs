@@ -87,6 +87,9 @@ pub struct AppConfig {
     /// HTTP(S) 代理地址（如 http://127.0.0.1:7890）。
     /// 核心更新与 GitHub API 的请求默认不走系统代理，需在此显式配置。
     pub proxy_url: Option<String>,
+    /// 首次启动环境检测是否已完成（无论是否全部通过）。
+    /// false 时前端会运行一次环境检测并对未通过项弹出安装提示。
+    pub env_check_done: bool,
 }
 
 impl Default for AppConfig {
@@ -108,6 +111,7 @@ impl Default for AppConfig {
             tune_history: Vec::new(),
             close_to_tray: true,
             proxy_url: None,
+            env_check_done: false,
         }
     }
 }

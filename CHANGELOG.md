@@ -6,6 +6,98 @@
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.3.1] - 2026-09-02
+
+本轮补上 AMD / Intel Vulkan 加速与显存监测，并修一批显存预测、对话 ctx 口径和 Gemma4 MTP 启动问题。NVIDIA 仍走 CUDA，未改加载/推理默认参数。
+
+### 新增
+
+**AMD / Intel Vulkan 设备支持**
+
+- 启动 llama-server 前查询 `--list-devices`，按本机内核实际设备选择 `CUDA0` 或 `Vulkan0`，不再写死 `--device CUDA0`
+- Vulkan 包在 AMD / Intel 上可正常卸载到 GPU；NVIDIA 继续优先 CUDA。`--main-gpu` 只在 CUDA 设备上传递
+- 环境检测与「核心更新」同时显示本机后端和运行时设备：NVIDIA 匹配 CUDA 包，AMD / Intel 匹配 Vulkan 包；装错包会提示换包
+- Windows 无 NVML 时用 DXGI + PDH 读取独显显存与利用率，AMD 上不再显示「未连接」
+- 首次启动环境检测：内核、VC++ 运行库、显卡与驱动、ffmpeg / ffprobe、数据目录可写性；未通过项给出中文安装引导
+
+### 修复
+
+**Vulkan 内核被当成 CUDA 失败并静默回退 CPU**
+
+- 根因：非 CPU 模式默认传 `--device CUDA0`。Vulkan 包只有 `Vulkan0`，llama.cpp 报 `invalid device: CUDA0` 后 CPU 回退把 ngl 打成 0
+- `process_manager.rs` —— 按实际设备选卡；识别 Vulkan / 无效设备错误，不再一律当 CUDA 失败
+- `desktop.ts` —— GPU 模式不再写死 `CUDA0`，CPU 模式才传 `none`
+
+**AMD 显卡不显示显存、推荐参数偏保守、运行时显存占不满**
+
+- 根因：`GpuMonitor` 只接了 NVIDIA NVML。AMD / Intel 上整条监测链路为空；同时「40GB+ 稳妥推荐」会在硬件推荐之前把 `ngl` 推成 0
+- `gpu_monitor.rs` —— NVML 不可用时回退 DXGI（总显存）+ PDH 已用显存 / 利用率。按适配器 LUID 对齐，丢掉 DXGI 枚举出的同名幽灵适配器，默认选已用显存更高的那张
+- `ModelLoadPage.tsx` —— 读到实测显存时优先「基于实测显存的推荐」；体积启发式（超大分片 / 40GB+ 稳妥、ngl=0）只在没有显存数据时作为回退
+
+**显存预测校准后系统性偏低、越校越小**
+
+- 根因有三：①整体校准比值用了「含 6% 余量的总预测」做分母，应用时却只加 2% 余量，校准后必然略低于实测；②EMA 按「从新到旧」折叠，最旧样本反而权重最高，历史偏低记录把预测越拉越小；③整体校准把 KV 一并缩放，ctx 变大时准确的 KV 也被旧权重误差压小
+- `app/src/lib/vramCalibration.ts` —— 比值改为实测 / 不含余量的小计；EMA 改为从旧到新，让最新一次加载权重最高
+- `app/src/lib/vramEstimate.ts` —— 整体校准只缩放 GPU 权重，KV 与计算开销按解析式保留；校准后安全余量回到 6%（与无校准时一致）；整体比率下限 0.3 → 0.5，宁多勿少
+- `app/src/pages/ModelLoadPage.tsx` —— 「实测校准」徽章说明改为「权重 ×N，KV 按解析式」
+
+**侧边栏状态卡 ctx 与对话气泡同口径**
+
+- `app/src/pages/ChatPage.tsx` —— 侧边栏状态卡的 ctx% 从「会话消息的服务端单轮 stats」改为与对话气泡同口径的**本地会话累计水位**（`sessionCtxTotals` 末值 ÷ 当前加载模型 `-c`），两处数值一致；API 状态页保持日志口径独立，互不混用。此前侧边栏显示的是最近一轮请求的服务端统计，和气泡的会话累计对不上
+
+**对话侧边栏与 API 页的 ctx 数据跨模型串台**
+
+- 根因：全部会话都存在 `state.chatSessions['chat-workspace']` 一个桶里（会话靠 `runtimeModelId` 字段标记实际模型），而侧边栏、API 状态页、模型工作区服务状态卡的取数都是「取桶 → 取最新」，模型间切换后显示的是上一个聊天模型的 ctxUsed/ctxTotal——分母（上下文容量）也跟着错，两边数值看似互换
+- `app/src/features/chat/chatUtils.ts` —— 新增 `sessionBelongsToModel`：按会话 `runtimeModelId`（发起对话时的实际模型快照）匹配模型；`modelId` 字段是桶 id、无模型语义，仅在恰好等于模型 id 时参与匹配
+- `app/src/pages/ChatPage.tsx`（侧边栏状态卡）—— ctx% 只认当前加载模型的会话 stats，当前模型没有聊天记录就显示 `--`，不再回退到其他模型
+- `app/src/features/apiStatus/ApiStatusPage.tsx` —— 「ctx 使用」在日志解析不到时（当前模型还没生成过）兜底到该模型自己的会话 stats，不再拿任意模型最近一次聊天的数据充数
+- `app/src/features/model/ModelWorkspace.tsx` —— 服务状态卡的本地会话水位与输出速度同样按当前加载模型过滤
+
+**显存预测对混合架构模型虚高数倍、连续加载时实测失真**
+
+- `app/src-tauri/src/services/gguf_parser.rs` —— 解析 `head_count_kv` 逐层数组：混合注意力架构（`nemotron_h_moe` / `lfm2` / `gemma4` 等）把该键写成每层数组，非 0 = 该层 KV 头数、0 = Mamba 等无 KV 层。此前数组被读成 `None`，KV 估算退回 `head_count` 整层近似，Nemotron-3.5-Lightning-30B / Gemma4-26B 预测虚高至实测的 6~10 倍（30B 模型预测 60GB、实测 10GB）。现绕过 `read_val` 的「只物化前 10 个元素」限制、从缓冲区读全量数组，聚合为 `kv_heads_sum`；gemma 系再按滑窗模式分列出全注意力 / SWA 两类头数并透出 `sliding_window` / `key_length_swa`（SWA 层 KV 只按窗口分配，全 ctx 计算会再虚高一个量级）。`app/src-tauri/src/models/model_info.rs` 透出上述字段，`app/src-tauri/src/services/model_scanner.rs` 升级 `SCANNER_VERSION` 20 使旧缓存全量失效重扫
+- `app/src/lib/vramEstimate.ts` —— KV 公式改为按「KV 头总数」计算（`kvHeadsSum` 优先、标量按层展开，数值与旧公式完全兼容）；gemma 系 SWA 分列齐备时改用「全注意力层 × 全 ctx + SWA 层 × 滑动窗口」双段估算；`key_length` / `value_length` 缺省时按 llama.cpp 口径退回 `embedding_length / head_count`，修复 LFM2.5 系缺键导致 KV 完全不计入、预测偏低 25%；整体兜底比率下限 0.5 → 0.3，容纳「大模型被 `-fit` 自动卸载压进显卡、实测贴着容量上限」的场景
+- `app/src/lib/vramCalibration.ts` —— 校准样本可信下限改为「解析项一半」与「文件体积三成 + 0.5GB」取低者：既拦启动失败残值，也不再误杀解析项虚高 / `-fit` 压顶的合法低实测样本（此前 Nemotron 全部样本被旧守卫拒绝、永远无法校准）
+- `app/src/pages/ModelLoadPage.tsx` —— 读取显存基线前先停掉仍在运行的 server 并等显存回落：连续加载 / 换模型时旧实例占用会串进差值，实测被压成 0.1~2GB 的脏数据；入库前用同一可信下限复核，异常差值 `vram_gb` 置空并附注，保留记录但不参与校准。经全部 10 个有记录模型复算，校准后预测偏差从最高 +597% 收敛到 ±9% 以内
+
+**思考强度菜单只显示一项**
+
+- `app/src/pages/ChatPage.tsx` —— 移除对话输入卡片的 `overflow-hidden`：思考强度菜单（关闭/自动/思考/深思）从卡片内向上弹出，被卡片裁剪后只露出最底部一项（当前选中项），其余选项不可见也无法点击，表现为「只有深思且无法切换」；卡片内容（透明输入框 + 按钮行）无需要裁剪的溢出，去掉后菜单完整显示，交互正常
+
+**Gemma4 QAT 模型加载与对话链路**
+
+- `app/src-tauri/src/services/process_manager.rs` —— 规避 llama.cpp b10687 已知 bug（ggml-org/llama.cpp#24343）：`--spec-type draft-mtp`（Gemma4 MTP）下内核 memory fitting 阶段初始化草稿上下文报 `Gemma4Assistant requires ctx_other to be set` 并退出，导致 Gemma4 QAT 等模型开启 MTP 推测解码时启动失败；现 draft-mtp 模式自动附加 `-fit off`（官方 workaround）
+- 同文件 —— 修复启用 server 工具后对话请求全部 `Failed to fetch`：内核会把默认 CORS 收紧为仅允许 `http://localhost`，而应用 WebView origin 是 `http://tauri.localhost`；现显式传 `--cors-origins *` 恢复 Origin 回显。实测 b10687 的 `--cors-origins` 逗号分隔列表会被整体当单值回显、多次传参仅最后一个生效，均不可用
+- `app/src/pages/KernelUpdatePage.tsx` —— 内核存在但 `--version` 解析不出版本号（如自编译构建）时，徽章显示「已安装 · 版本未知」而非误报「未安装内核」
+
+### 变更
+
+**显存预测改为实测数据驱动校准**
+
+- `app/src/lib/vramCalibration.ts` 重写 —— 校准数据源从 localStorage 系数改为「运行记录」（AppData/model_records.json）：每条带实测显存的启动记录用模型表头还原当时的分项预测，反推偏差；换机 / 重置浏览器状态后校准不再丢失，启动模型即自动积累样本
+- 同文件 —— 两级校准：①分项校准（优先）只修正「计算暂存 + 运行时」经验项，权重与 KV 按解析式原样保留，改 `ctx` / `ngl` 不再被旧样本误差按比例污染；②整体兜底——解析项本身虚高（如 MoE 权重公式与实际结构不符）导致分项还原为负时，退化为总实测/总预测比缩放。样本按参数指纹筛选（`ngl` / `kv` / Flash Attention / `ncmoe` 一致且 ctx 同数量级，≥2 条才启用），启动失败的残值记录（实测低于解析项一半）自动剔除
+- `app/src/lib/vramEstimate.ts` —— `predictVramUsage` 接受 `{ scratchRatio | overallRatio }` 校准输入，暴露 `analyticalGb` / `empiricalGb` 分项；无实测样本时保持原有整体 6% 安全余量行为
+- `app/src/pages/ModelLoadPage.tsx` —— 校准改为 `useMemo` 从运行记录派生（启动写档后自动更新）；「实测校准 ×N」徽章区分分项 / 整体两种口径（悬停可看说明），「计算 / 运行」分项与校准后总数保持同口径
+- 说明：旧版记录若缺 `ncmoe` 字段（MoE 权重无法准确还原）不参与校准；启动一次模型后新记录即带全字段并开始生效
+
+### 修复
+
+**模型管理磁贴排版**
+
+- `app/src/components/ModelCard.tsx::CapabilityBadges` —— 多列磁贴的能力标签由「全量 9 格 `grid-cols-5` 矩阵」改为只展示激活的能力、flex 自然横排（超 6 个折叠为 +N）。此前磁贴宽约 215px、每格仅约 37px，「视觉」「UD量化」等标签文字被挤压成竖排折行，磁贴失去可读性
+- 单列模式展示逻辑不变
+
+### 验证
+
+- AMD Radeon RX 7700 XT + Vulkan 内核 `b10752`：`--device Vulkan0`，35B MoE 实测约 23–26 tok/s，独显占用约 10.8 GB
+- NVIDIA 路线未改：本机无 NVIDIA 时仍按 CUDA 包匹配逻辑选择设备
+
+---
+
 ## [0.3.0] - 2026-08-28
 
 本轮以「核心更新体验重做、API 中心精简、数据口径统一、模型管理磁贴化」为主线，未改动任何模型加载/推理默认参数（`ctx`/`ngl`/KV/batch/parallel/max token/reasoning 等）。

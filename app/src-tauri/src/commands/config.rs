@@ -69,7 +69,7 @@ fn load_external_api_secret() -> Result<Option<String>, String> {
     Ok(fallback)
 }
 
-fn get_app_data_root() -> PathBuf {
+pub(crate) fn get_app_data_root() -> PathBuf {
     let dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("AgentLLM");
@@ -364,4 +364,18 @@ pub fn set_close_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<bo
     persist_config(&new_config)?;
     *config = new_config;
     Ok(enabled)
+}
+
+/// 标记首次启动环境检测已完成：用户关闭检测弹窗或全部通过后由前端调用。
+/// 置位后后续启动不再自动弹窗；出厂重置会恢复默认值并重新引导检测。
+#[tauri::command]
+pub fn mark_env_check_done(state: State<'_, AppState>) -> Result<(), String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    let mut new_config = (*config).clone();
+    if !new_config.env_check_done {
+        new_config.env_check_done = true;
+        persist_config(&new_config)?;
+        *config = new_config;
+    }
+    Ok(())
 }

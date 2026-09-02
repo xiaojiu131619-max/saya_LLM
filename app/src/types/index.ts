@@ -126,6 +126,15 @@ export interface ModelInfo {
   embeddingLength?: number;
   headCount?: number;
   headCountKv?: number;
+  /** 混合架构逐层 head_count_kv 数组的求和（0 层 = 无 KV 的 Mamba 层）；标量形式时缺省。 */
+  kvHeadsSum?: number;
+  /** gemma 系 SWA 分列求和：全注意力层（pattern=0）/ SWA 层（pattern≠0）。 */
+  kvHeadsSumFull?: number;
+  kvHeadsSumSwa?: number;
+  /** 滑动窗口大小与 SWA 层 K/V 维度：SWA 层 KV 只按窗口分配。 */
+  slidingWindow?: number;
+  keyLengthSwa?: number;
+  valueLengthSwa?: number;
   keyLength?: number;
   valueLength?: number;
   ggufVersion?: number;

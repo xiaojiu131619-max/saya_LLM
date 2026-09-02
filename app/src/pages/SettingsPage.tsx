@@ -23,6 +23,7 @@ import ToggleSwitch from '@/components/ToggleSwitch';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
 import PageHeader from '@/components/PageHeader';
+import EnvCheckDialog from '@/features/workspace/EnvCheckDialog';
 import type { ModelInfo, ThemeMode } from '@/types';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 import { resolveApiName } from '@/lib/modelIdentity';
@@ -108,6 +109,8 @@ export default function SettingsPage() {
   // 数据管理：当前要弹出确认对话框的清除类型；null 表示对话框关闭。
   const [pendingDataAction, setPendingDataAction] = useState<DataActionKind | null>(null);
   const [dataMessage, setDataMessage] = useState<string | null>(null);
+  // 环境检测：手动打开检测弹窗。
+  const [envCheckOpen, setEnvCheckOpen] = useState(false);
 
   const refreshLocalModels = async () => {
     if (!isDesktopRuntime()) {
@@ -481,6 +484,18 @@ export default function SettingsPage() {
 
           <SettingSection title="服务控制" icon={Power} delay={0.1}>
             <SettingRow
+              label="环境检测"
+              description="检查 llama.cpp 内核、VC++ 运行库、显卡驱动、ffmpeg 与数据目录"
+            >
+              <button
+                onClick={() => setEnvCheckOpen(true)}
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
+              >
+                运行检测 <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </SettingRow>
+            <div className="border-t border-[var(--border-subtle)]" />
+            <SettingRow
               label="llama-server"
               description={serviceMessage ?? (state.serverRunning ? `运行中，端口 ${state.serverPort}` : '未运行')}
             >
@@ -703,6 +718,8 @@ export default function SettingsPage() {
         onConfirm={runPendingDataAction}
         onCancel={() => setPendingDataAction(null)}
       />
+
+      <EnvCheckDialog manualOpen={envCheckOpen} onClose={() => setEnvCheckOpen(false)} />
     </div>
   );
 }

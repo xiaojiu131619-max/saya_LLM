@@ -1,10 +1,10 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2, ImagePlus } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { getServerApiKey, getDesktopSystemStats, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
 import type { AutoTuneConfig, AutoTuneProgress, AutoTuneResult, TuneRecord } from '@/lib/desktop';
 import { saveTuneResult, startAutoTune } from '@/lib/desktop';
-import { getVramCalibrationRatio, getVramCalibrationSamples, recordVramCalibration } from '@/lib/vramCalibration';
+import { computeVramCalibration } from '@/lib/vramCalibration';
 import { predictVramUsage, type VramPrediction } from '@/lib/vramEstimate';
 import { saveModelRunRecord, getModelRunRecords, type ModelRunRecord } from '@/lib/desktop';
 import { recommendForHardware } from '@/lib/vramRecommend';
@@ -113,62 +113,8 @@ function buildRecommendedLoadPreset(model: ModelInfo, stats?: SystemStats | null
   const layerCount = Math.max(0, model.blockCount ?? 0);
   const isSplitModel = Boolean(model.splitCount && model.splitCount > 1);
 
-  if (isSplitModel && sizeGb > 100) {
-    return {
-      title: '超大分片模型推荐',
-      description: `已识别 ${model.splitCount} 个分片（约 ${formatGb(sizeGb)}）。先单 slot、短上下文验证，再逐步调高。`,
-      tone: 'warning',
-      config: {
-        ctxLength: 512,
-        gpuLayers: 0,
-        batchSize: 512,
-        physicalBatchSize: 512,
-        parallel: 1,
-        fastAttention: true,
-        kvCache: true,
-        kvUnified: true,
-        mmap: true,
-        mlock: false,
-        noWarmup: true,
-      },
-      items: [
-        { label: '上下文长度', value: '512 token' },
-        { label: 'GPU 卸载', value: '0 层' },
-        { label: 'parallel', value: '1' },
-        { label: '启动预热', value: '跳过' },
-      ],
-    };
-  }
-
-  if (sizeGb >= 40) {
-    return {
-      title: '大模型稳妥推荐',
-      description: `模型约 ${formatGb(sizeGb)}。先用短上下文验证加载，再逐步调高。`,
-      tone: 'warning',
-      config: {
-        ctxLength: 4096,
-        gpuLayers: 0,
-        batchSize: 512,
-        physicalBatchSize: 512,
-        parallel: 1,
-        fastAttention: true,
-        kvCache: true,
-        kvUnified: true,
-        mmap: true,
-        mlock: false,
-        noWarmup: true,
-      },
-      items: [
-        { label: '上下文长度', value: '4K token' },
-        { label: 'GPU 卸载', value: '0 层' },
-        { label: 'parallel', value: '1' },
-        { label: '启动预热', value: '跳过' },
-      ],
-    };
-  }
-
-  const ctxLength = clamp(model.ctxLength || RECOMMENDED_CTX_LENGTH, 512, RECOMMENDED_CTX_LENGTH);
-  const gpuLayers = recommendedGpuLayers(model.blockCount);
+  // 能读到实测显存时，按显卡余量反推 ngl/ctx；读不到才退回「按文件体积保守」的 CPU 预设。
+  // 原先 40GB+ 体积启发式会盖掉硬件推荐，AMD 上 NVML 失败时更容易被推成 ngl=0，显存占不满。
   const hardwareRecommendation = recommendForHardware(model, stats);
   if (hardwareRecommendation) {
     return {
@@ -196,6 +142,63 @@ function buildRecommendedLoadPreset(model: ModelInfo, stats?: SystemStats | null
       ],
     };
   }
+
+  if (isSplitModel && sizeGb > 100) {
+    return {
+      title: '超大分片模型推荐',
+      description: `已识别 ${model.splitCount} 个分片（约 ${formatGb(sizeGb)}）。未读到显存数据，先单 slot、短上下文验证，再逐步调高。`,
+      tone: 'warning',
+      config: {
+        ctxLength: 512,
+        gpuLayers: 0,
+        batchSize: 512,
+        physicalBatchSize: 512,
+        parallel: 1,
+        fastAttention: true,
+        kvCache: true,
+        kvUnified: true,
+        mmap: true,
+        mlock: false,
+        noWarmup: true,
+      },
+      items: [
+        { label: '上下文长度', value: '512 token' },
+        { label: 'GPU 卸载', value: '0 层' },
+        { label: 'parallel', value: '1' },
+        { label: '启动预热', value: '跳过' },
+      ],
+    };
+  }
+
+  if (sizeGb >= 40) {
+    return {
+      title: '大模型稳妥推荐',
+      description: `模型约 ${formatGb(sizeGb)}。未读到显存数据，先用短上下文验证加载，再逐步调高。`,
+      tone: 'warning',
+      config: {
+        ctxLength: 4096,
+        gpuLayers: 0,
+        batchSize: 512,
+        physicalBatchSize: 512,
+        parallel: 1,
+        fastAttention: true,
+        kvCache: true,
+        kvUnified: true,
+        mmap: true,
+        mlock: false,
+        noWarmup: true,
+      },
+      items: [
+        { label: '上下文长度', value: '4K token' },
+        { label: 'GPU 卸载', value: '0 层' },
+        { label: 'parallel', value: '1' },
+        { label: '启动预热', value: '跳过' },
+      ],
+    };
+  }
+
+  const ctxLength = clamp(model.ctxLength || RECOMMENDED_CTX_LENGTH, 512, RECOMMENDED_CTX_LENGTH);
+  const gpuLayers = recommendedGpuLayers(model.blockCount);
   return {
     title: '常规模型推荐',
     description: '默认推荐：优先 GPU、保持 mmap，并发由 llama-server 自动管理。',
@@ -236,15 +239,23 @@ export default function ModelLoadPage() {
   const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResult | null>(null);
   const [autoTuneApplied, setAutoTuneApplied] = useState(false);
   const [logoMessage, setLogoMessage] = useState<string | null>(null);
-  // 每个模型单独的显存校准系数与运行记录（启动参数 + 跑分实测）。
+  // 显存校准从该模型的运行记录派生：每条带实测显存的启动记录都参与修正
+  // 「计算暂存 + 运行时」经验项（详见 vramCalibration.ts）。启动成功写入
+  // 新记录后 refreshRunRecords 会自动带出最新校准。
   const modelId = model?.id;
-  const calibrationRatio = getVramCalibrationRatio(modelId);
-  const calibrationSamples = getVramCalibrationSamples(modelId);
   const [runRecords, setRunRecords] = useState<ModelRunRecord[]>([]);
   const refreshRunRecords = useCallback(() => {
     if (!modelId) return;
     void getModelRunRecords(modelId).then((records) => setRunRecords(records)).catch(() => undefined);
   }, [modelId]);
+  const calibration = useMemo(
+    () => (model ? computeVramCalibration(model, runRecords, model.loadConfig) : null),
+    [model, runRecords],
+  );
+  const calibrationRatio = calibration?.scratchRatio ?? calibration?.overallRatio ?? 1;
+  const calibrationSamples = calibration?.samples ?? 0;
+  // 分项校准只作用于「计算 + 运行」经验项；整体兜底校准缩放总预测，分项 pills 不缩放。
+  const calibrationIsScratch = calibration?.scratchRatio != null;
 
   // 自动调参进度事件监听（组件生命周期内常驻）。
   useEffect(() => {
@@ -314,8 +325,12 @@ export default function ModelLoadPage() {
 
       try {
         // 显存校准基线：加载前实测 used，就绪后再读一次，差值即本模型真实占用。
+        // 基线必须在旧实例卸载之后读取——先显式停掉仍在运行的 server 并等显存
+        // 回落，否则上一次加载的占用会串进差值，实测被压成几 GB 的脏数据。
         let vramBaseline: number | null = null;
         if (isDesktopRuntime()) {
+          await stopDesktopServer().catch(() => undefined);
+          await new Promise((resolve) => setTimeout(resolve, 1200));
           vramBaseline = (await getDesktopSystemStats(state.systemStats).catch(() => null))?.vramUsed ?? null;
         }
         const ready = new Promise<void>((resolve, reject) => {
@@ -340,10 +355,16 @@ export default function ModelLoadPage() {
         if (isDesktopRuntime() && vramBaseline != null) {
           const after = await getDesktopSystemStats(state.systemStats).catch(() => null);
           const actualGb = after?.vramUsed != null ? after.vramUsed - vramBaseline : null;
-          const predictedGb = predictVramUsage(model, model.loadConfig, 1.0).totalGb;
+          // 裸预测（不带校准）入档：校准由运行记录派生，档案里必须保存未修正的口径。
+          const prediction = predictVramUsage(model, model.loadConfig, { scratchRatio: 1 });
           if (actualGb != null && actualGb > 0) {
-            // 按模型记录校准样本，并保存一条带实测数据的启动记录。
-            recordVramCalibration(predictedGb, actualGb, model.id);
+            // 入库可信下限，与校准守卫同一口径（解析项一半 vs 文件体积三成取低者）：
+            // 差值低于下限几乎必然是旧实例未卸载的串台读数，vram_gb 置空以免污染校准，
+            // 记录本身保留供排障。
+            const fileGb = Math.max(0, model.fileSizeBytes) / 1024 ** 3;
+            const plausibleFloor = Math.min(prediction.analyticalGb * 0.5, fileGb * 0.3 + 0.5);
+            const plausible = actualGb >= plausibleFloor;
+            // 保存一条带实测数据的启动记录；写入后刷新记录，校准随即更新。
             await saveModelRunRecord({
               model_id: model.id,
               model_name: model.name,
@@ -355,8 +376,9 @@ export default function ModelLoadPage() {
               ncmoe: model.loadConfig.moeCpuLayers > 0 ? model.loadConfig.moeCpuLayers : null,
               flash_attn: model.loadConfig.fastAttention,
               speculative: model.loadConfig.speculativeDecoding,
-              vram_gb: actualGb,
-              vram_predicted_gb: predictedGb,
+              vram_gb: plausible ? actualGb : null,
+              vram_predicted_gb: prediction.totalGb,
+              note: plausible ? undefined : `实测显存 ${actualGb.toFixed(2)} GB 低于可信下限，疑似差值串台，已忽略`,
             }).catch(() => undefined);
             refreshRunRecords();
           }
@@ -503,7 +525,12 @@ export default function ModelLoadPage() {
     { value: 65536, label: '64K' },
     { value: 102400, label: '100K' },
   ].filter((tick) => tick.value <= ctxMax);
-  const vramPrediction = predictVramUsage(model, config);
+  // 预测带校准（有实测样本时修正经验项）；vramRecommend 内部固定用裸口径。
+  const vramPrediction = predictVramUsage(
+    model,
+    config,
+    calibration && calibration.samples > 0 ? calibration : undefined,
+  );
   const recommendedPreset = buildRecommendedLoadPreset(model, state.systemStats);
   const applyRecommendedConfig = () => {
     dispatch({
@@ -537,6 +564,7 @@ export default function ModelLoadPage() {
             prediction={vramPrediction}
             calibrationRatio={calibrationRatio}
             calibrationSamples={calibrationSamples}
+            calibrationIsScratch={calibrationIsScratch}
             isLoading={isLoading}
             loadMessage={loadError ?? loadProgress}
             loadPercent={loadError ? 0 : loadProgressPercent}
@@ -1083,6 +1111,14 @@ function RunRecordsCard({ records }: { records: ModelRunRecord[] }) {
                     {deviation != null && Number.isFinite(deviation) ? `（预测偏差 ${deviation > 0 ? '+' : ''}${deviation.toFixed(0)}%）` : ''}
                   </span>
                 )}
+                {record.note && (
+                  <span
+                    className="max-w-[280px] truncate text-[var(--state-warning)] dark:text-[var(--state-warning)]"
+                    title={record.note}
+                  >
+                    {record.note}
+                  </span>
+                )}
                 <span className="ml-auto text-[var(--text-tertiary)]">
                   {new Date(record.timestamp * 1000).toLocaleString('zh-CN', { hour12: false })}
                 </span>
@@ -1314,11 +1350,12 @@ function LogoLibraryDialog({ selected, onSelect, onClear, onClose }: {
   );
 }
 
-function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSamples, isLoading, loadMessage, loadPercent, isError, onChangeLogo, onReset, onLoad, onStop, onAutoTune, autoTuneRunning }: {
+function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSamples, calibrationIsScratch, isLoading, loadMessage, loadPercent, isError, onChangeLogo, onReset, onLoad, onStop, onAutoTune, autoTuneRunning }: {
   model: ModelInfo;
   prediction: VramPrediction;
   calibrationRatio: number;
   calibrationSamples: number;
+  calibrationIsScratch: boolean;
   isLoading: boolean;
   loadMessage: string | null;
   loadPercent: number;
@@ -1333,6 +1370,8 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
   const safePercent = clamp(loadPercent, 0, 100);
   const offloadPercent = Math.round(prediction.offloadRatio * 100);
   const expertPercent = Math.round(prediction.expertGpuRatio * 100);
+  // 分项 pills 与校准后的总预测保持同口径：分项校准只作用在「计算 + 运行」经验项上。
+  const calibratedRatio = calibrationSamples > 0 && calibrationIsScratch ? calibrationRatio : 1;
   const progressText = loadMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
 
   return (
@@ -1375,8 +1414,13 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
               <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                 <span>预计 GPU 显存</span>
                 {calibrationSamples > 0 && (
-                  <span className="rounded-sm bg-[var(--accent-subtle)] px-1 text-[9px] font-medium text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]" title={`已按 ${calibrationSamples} 次加载实测校准`}>
-                    已校准 ×{calibrationRatio.toFixed(2)}
+                  <span
+                    className="rounded-sm bg-[var(--accent-subtle)] px-1 text-[9px] font-medium text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]"
+                    title={calibrationIsScratch
+                      ? `已按 ${calibrationSamples} 次加载实测校准计算开销（暂存+运行时 ×${calibrationRatio.toFixed(2)}）`
+                      : `已按 ${calibrationSamples} 次加载实测校准 GPU 权重（权重 ×${calibrationRatio.toFixed(2)}，KV 与计算开销按解析式保留）`}
+                  >
+                    实测校准 ×{calibrationRatio.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -1387,8 +1431,8 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
           <div className="model-load-summary-pills grid grid-cols-3 gap-1.5 sm:grid-cols-6 xl:flex xl:items-center">
             <PredictionPill label="权重" value={formatGb(prediction.weightsGpuGb)} />
             <PredictionPill label="KV" value={prediction.kvGb === null ? '缺表头' : formatGb(prediction.kvGb)} />
-            <PredictionPill label="计算" value={formatGb(prediction.computeGb)} />
-            <PredictionPill label="运行" value={formatGb(prediction.runtimeGb + prediction.safetyGb)} />
+            <PredictionPill label="计算" value={formatGb(prediction.computeGb * calibratedRatio)} />
+            <PredictionPill label="运行" value={formatGb(prediction.runtimeGb * calibratedRatio + prediction.safetyGb)} />
             <PredictionPill label="层" value={`${offloadPercent}%`} />
             <PredictionPill label="专家" value={model.modelType === 'moe' ? `${expertPercent}%` : '稠密'} />
           </div>

@@ -47,7 +47,7 @@ fn cache_path(file_path: &Path) -> PathBuf {
 
 // v18：MTP 架构白名单对齐部署内核二进制标记（补 GLM4/GLM-DSA/DeepSeek32/DeepSeek4/
 // MiMo2/Nemotron-H-MoE/Qwen3Next/HY-V3，保留 cohere2moe/step35），递增版本使旧扫描缓存失效。
-const SCANNER_VERSION: u32 = 18;
+const SCANNER_VERSION: u32 = 21;
 
 fn infer_video_support(
     name: &str,
@@ -824,6 +824,12 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         embedding_length,
         head_count: gguf.as_ref().and_then(|g| g.head_count),
         head_count_kv: gguf.as_ref().and_then(|g| g.head_count_kv),
+        kv_heads_sum: gguf.as_ref().and_then(|g| g.kv_heads_sum),
+        kv_heads_sum_full: gguf.as_ref().and_then(|g| g.kv_heads_sum_full),
+        kv_heads_sum_swa: gguf.as_ref().and_then(|g| g.kv_heads_sum_swa),
+        sliding_window: gguf.as_ref().and_then(|g| g.sliding_window),
+        key_length_swa: gguf.as_ref().and_then(|g| g.key_length_swa),
+        value_length_swa: gguf.as_ref().and_then(|g| g.value_length_swa),
         key_length: gguf.as_ref().and_then(|g| g.key_length),
         value_length: gguf.as_ref().and_then(|g| g.value_length),
         gguf_version: gguf.as_ref().map(|g| g.gguf_version).unwrap_or(0),

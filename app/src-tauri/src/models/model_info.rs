@@ -35,6 +35,22 @@ pub struct ModelInfo {
     pub embedding_length: Option<u64>,
     pub head_count: Option<u64>,
     pub head_count_kv: Option<u64>,
+    /// 混合架构逐层 head_count_kv 数组的求和（0 = 无 KV 的 Mamba 层）；
+    /// 标量形式时为 None。旧缓存由 serde(default) 兜底为 None。
+    #[serde(default)]
+    pub kv_heads_sum: Option<u64>,
+    /// gemma 系 SWA 分列求和：全注意力层（pattern=0）/ SWA 层（pattern≠0）。
+    #[serde(default)]
+    pub kv_heads_sum_full: Option<u64>,
+    #[serde(default)]
+    pub kv_heads_sum_swa: Option<u64>,
+    /// 滑动窗口大小与 SWA 层 K/V 维度：SWA 层 KV 只按窗口分配，估算须单独走。
+    #[serde(default)]
+    pub sliding_window: Option<u64>,
+    #[serde(default)]
+    pub key_length_swa: Option<u64>,
+    #[serde(default)]
+    pub value_length_swa: Option<u64>,
     pub key_length: Option<u64>,
     pub value_length: Option<u64>,
     #[serde(default)]

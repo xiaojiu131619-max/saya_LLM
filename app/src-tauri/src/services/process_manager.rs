@@ -306,6 +306,13 @@ fn append_server_tools(
     }
     if !selection.enabled.is_empty() {
         cmd.arg("--tools").arg(selection.enabled.join(","));
+        // 内核在启用 server tools 时会把默认 CORS 收紧为仅允许 http://localhost
+        //（"for security reasons, this will limit --cors-origins to localhost"），
+        // 而本应用 WebView 的 origin 是 http://tauri.localhost，会被浏览器拦截，
+        // 对话请求直接 Failed to fetch。显式传回通配符即可恢复默认的 Origin 回显。
+        // 注意 b10687 实测：--cors-origins 的逗号分隔列表与多次传参都有缺陷
+        //（整串当单值回显 / 仅最后一个生效），只有 "*" 行为正确。
+        cmd.arg("--cors-origins").arg("*");
     }
 }
 
@@ -614,7 +621,7 @@ fn parse_progress(line: &str) -> u32 {
     if line.contains("model loaded") {
         return 92;
     }
-    if line.contains("CUDA0 model buffer size") {
+    if line.to_ascii_lowercase().contains("model buffer size") {
         return 85;
     }
 
@@ -778,6 +785,38 @@ fn detect_error(line: &str) -> Option<ServerError> {
                 "这是 llama.cpp 预热阶段失败，请先查看 [server] spawn 命令确认当前显式参数".into(),
                 "如果仍然失败，再手动降低 GPU 卸载层数或上下文长度后重试".into(),
                 "显存接近上限时，关闭 mlock 并改用更小的 KV 缓存类型".into(),
+            ],
+        });
+    }
+
+    if line_lower.contains("invalid device")
+        || (line_lower.contains("unknown device") && line_lower.contains("device"))
+    {
+        return Some(ServerError {
+            error_type: "device".into(),
+            title: "加速设备无效".into(),
+            details: line.into(),
+            suggestions: vec![
+                "当前内核没有该设备。NVIDIA 请用 CUDA 包，AMD / Intel 请用 Vulkan 包。".into(),
+                "请到「核心更新」下载与本机匹配的官方包后重试，不要在 Vulkan 内核上指定 CUDA0。".into(),
+            ],
+        });
+    }
+
+    if line_lower.contains("vulkan error")
+        || line_lower.contains("vk_error")
+        || (line_lower.contains("ggml-vulkan") && line_lower.contains("failed"))
+        || (line_lower.contains("vulkan")
+            && (line_lower.contains("failed to") || line_lower.contains("not found")))
+    {
+        return Some(ServerError {
+            error_type: "vulkan".into(),
+            title: "Vulkan 错误".into(),
+            details: line.into(),
+            suggestions: vec![
+                "确认已安装 AMD / Intel 官方显卡驱动，并且 Vulkan 可用。".into(),
+                "在「核心更新」下载 Vulkan 版 llama.cpp，不要使用 CUDA 包。".into(),
+                "可先降低 GPU 卸载层数或上下文长度后重试。".into(),
             ],
         });
     }
@@ -1406,7 +1445,10 @@ fn compatible_cpu_config(config: &ServerConfig) -> ServerConfig {
 fn should_retry_with_cpu(error: &ServerError, config: &ServerConfig) -> bool {
     config.retry_cpu_fallback
         && !config.no_cuda
-        && matches!(error.error_type.as_str(), "warmup" | "cuda" | "oom")
+        && matches!(
+            error.error_type.as_str(),
+            "warmup" | "cuda" | "vulkan" | "oom"
+        )
 }
 
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1570,29 +1612,107 @@ fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {    let 
     Ok(())
 }
 
+fn llama_command(exe: &str) -> Command {
+    let mut cmd = Command::new(exe);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    cmd
+}
+
+/// 解析 `llama-server --list-devices` 输出，例如 `Vulkan0: AMD Radeon RX 7700 XT`。
+pub(crate) fn parse_listed_devices(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("Available devices") {
+                return None;
+            }
+            let id = trimmed.split(':').next()?.trim();
+            if id.eq_ignore_ascii_case("none") {
+                return None;
+            }
+            let lower = id.to_ascii_lowercase();
+            (lower.starts_with("vulkan")
+                || lower.starts_with("cuda")
+                || lower.starts_with("metal")
+                || lower.starts_with("sycl")
+                || lower.starts_with("hip")
+                || lower.starts_with("musa")
+                || lower.starts_with("cann")
+                || lower.starts_with("opencl"))
+            .then(|| id.to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn list_runtime_devices(exe: &str) -> Vec<String> {
+    let output = llama_command(exe).arg("--list-devices").output().ok();
+    let Some(output) = output else {
+        return Vec::new();
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_listed_devices(&combined)
+}
+
+/// 按本机内核实际设备选择 offload 目标。
+/// Vulkan 包只有 `Vulkan0`，硬编码 `CUDA0` 会被 llama.cpp 直接拒绝（invalid device）。
+/// 列表为空时返回 None，启动命令不传 `--device`，交给内核自动选择。
+fn pick_offload_device(available: &[String], requested: Option<&str>) -> Option<String> {
+    let requested = requested
+        .map(str::trim)
+        .filter(|device| !device.is_empty() && !device.eq_ignore_ascii_case("none"));
+
+    if let Some(requested) = requested {
+        if available.is_empty()
+            || available
+                .iter()
+                .any(|device| device.eq_ignore_ascii_case(requested))
+        {
+            return Some(requested.to_string());
+        }
+        eprintln!(
+            "[server] 请求的设备 {} 不在本机内核列表 {:?} 中，改用实际设备",
+            requested, available
+        );
+    }
+
+    available
+        .iter()
+        .find(|device| device.to_ascii_lowercase().starts_with("cuda"))
+        .cloned()
+        .or_else(|| available.first().cloned())
+}
+
+fn resolve_offload_device(exe: &str, requested: Option<&str>) -> Option<String> {
+    pick_offload_device(&list_runtime_devices(exe), requested)
+}
+
 fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
     validate_mtp_config(exe, config)?;
     validate_drafter_config(exe, config)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
     let selected_device = if config.no_cuda {
-        "none".to_string()
+        Some("none".to_string())
     } else {
-        config
-            .device
-            .as_deref()
-            .map(str::trim)
-            .filter(|device| !device.is_empty())
-            .unwrap_or("CUDA0")
-            .to_string()
+        resolve_offload_device(exe, config.device.as_deref())
     };
-    let selected_main_gpu = if config.no_cuda {
+    let uses_cuda_device = selected_device
+        .as_deref()
+        .map(|device| device.to_ascii_lowercase().starts_with("cuda"))
+        .unwrap_or(false);
+    let selected_main_gpu = if config.no_cuda || !uses_cuda_device {
         None
     } else {
         config.main_gpu.or(Some(0))
     };
     eprintln!(
-        "[server] spawning with ngl={}, n_ctx={}, batch={}, host={}, port={}, device={}, main_gpu={:?}, no_cuda={}",
+        "[server] spawning with ngl={}, n_ctx={}, batch={}, host={}, port={}, device={:?}, main_gpu={:?}, no_cuda={}",
         effective_ngl,
         config.n_ctx,
         config.batch_size,
@@ -1659,8 +1779,8 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     if config.no_cuda {
         cmd.arg("--device").arg("none");
         cmd.arg("--no-op-offload");
-    } else {
-        cmd.arg("--device").arg(&selected_device);
+    } else if let Some(device) = selected_device.as_deref() {
+        cmd.arg("--device").arg(device);
         if let Some(main_gpu) = selected_main_gpu {
             cmd.arg("--main-gpu").arg(main_gpu.to_string());
         }
@@ -1742,8 +1862,8 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         .or_else(|| dflash_draft_path.map(|path| (path, "dflash")));
     if let Some((draft_path, _)) = drafter {
         cmd.arg("-md").arg(draft_path);
-        if !config.no_cuda {
-            cmd.arg("--spec-draft-device").arg(&selected_device);
+        if let Some(device) = selected_device.as_deref().filter(|device| *device != "none") {
+            cmd.arg("--spec-draft-device").arg(device);
             cmd.arg("-ngld").arg(effective_ngl.to_string());
         }
     }
@@ -1764,6 +1884,14 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     if let Some(spec_type) = spec_type {
         // Embedded MTP deliberately reaches this branch without `-md`.
         cmd.arg("--spec-type").arg(spec_type);
+        // llama.cpp 已知问题（ggml-org/llama.cpp#24343，截至 b10687 未修）：
+        // draft-mtp 模式下内核的 memory fitting 会先为草稿模型试建 context，
+        // 此时主模型的 ctx_other 尚未设置，导致初始化失败退出
+        // （报错 "Gemma4Assistant requires ctx_other to be set"）。
+        // 官方 workaround 是关闭 fitting；只对 draft-mtp 附加，不影响其他模式。
+        if spec_type == "draft-mtp" {
+            cmd.arg("-fit").arg("off");
+        }
     }
     // 草稿深度（--spec-draft-n-max）只在用户显式设置时传递，保持内核默认行为。
     if let Some(n_max) = config.spec_draft_n_max.filter(|value| *value > 0) {
@@ -2351,11 +2479,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_listed_devices_reads_vulkan() {
+        let output = "Available devices:\n  Vulkan0: AMD Radeon RX 7700 XT (12272 MiB, 11305 MiB free)\n";
+        assert_eq!(super::parse_listed_devices(output), vec!["Vulkan0"]);
+    }
+
+    #[test]
+    fn parse_listed_devices_reads_cuda() {
+        let output = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4090 (24576 MiB, 24000 MiB free)\n";
+        assert_eq!(super::parse_listed_devices(output), vec!["CUDA0"]);
+    }
+
+    #[test]
+    fn pick_offload_device_replaces_cuda_on_vulkan_runtime() {
+        assert_eq!(
+            super::pick_offload_device(&["Vulkan0".to_string()], Some("CUDA0")).as_deref(),
+            Some("Vulkan0")
+        );
+        assert_eq!(
+            super::pick_offload_device(&["CUDA0".to_string()], None).as_deref(),
+            Some("CUDA0")
+        );
+        assert_eq!(super::pick_offload_device(&[], None), None);
+    }
+
+    #[test]
     fn detect_error_identifies_cuda_failure() {
         let log = "CUDA error: an illegal memory access was encountered";
         let error = super::detect_error(log);
         assert!(error.is_some());
         assert_eq!(error.unwrap().error_type, "cuda");
+    }
+
+    #[test]
+    fn detect_error_identifies_invalid_device() {
+        let error = super::detect_error("error while handling argument \"--device\": invalid device: CUDA0");
+        assert_eq!(error.unwrap().error_type, "device");
+    }
+
+    #[test]
+    fn detect_error_identifies_vulkan_failure() {
+        let error = super::detect_error("ggml-vulkan: failed to create device");
+        assert_eq!(error.unwrap().error_type, "vulkan");
     }
 
     #[test]

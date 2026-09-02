@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Agent LLM",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "com.agentllm.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -45,9 +45,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../resources/llama-server.exe",
-      "../resources/*.dll"
-    ]
+    "resources": []
   }
 }

@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ChevronRight,
@@ -23,7 +23,7 @@ import {
   stopDesktopServer,
 } from '@/lib/desktop';
 import type { ChatSession, MessageStats, ModelInfo } from '@/types';
-import { CHAT_HISTORY_MODEL_ID, estimateSessionCtxTokens, latestRuntimeStatsFromServerLogs } from '@/features/chat/chatUtils';
+import { estimateSessionCtxTokens, latestRuntimeStatsFromServerLogs, sessionBelongsToModel } from '@/features/chat/chatUtils';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -74,13 +74,19 @@ export default function ModelWorkspace() {
   const loadedModel = state.models.find((model) => model.status === 'loaded')
     ?? state.models.find((model) => model.id === state.activeModelId);
   const loadedUsage = loadedModel ? state.usageByModel[loadedModel.id] : undefined;
-  const loadedStats = apiRuntimeStats ?? latestStatsForSessions(state.chatSessions[CHAT_HISTORY_MODEL_ID]);
+  // 会话按模型过滤：所有会话都存在 'chat-workspace' 桶里，直接取桶会把别的
+  // 模型的会话（及其 ctx 分母）串到当前模型的服务状态卡上。
+  const allSessions = useMemo(() => Object.values(state.chatSessions).flat(), [state.chatSessions]);
+  const loadedStats = apiRuntimeStats
+    ?? latestStatsForSessions(allSessions.filter((session) => sessionBelongsToModel(session, loadedModel?.id)));
   const tokensPerSec = loadedStats?.tokensPerSec
     ?? loadedModel?.avgTokensPerSec
     ?? averageTokensPerSec(loadedUsage);
   // 本地会话水位：当前加载模型的活跃会话的累计 token 估算（与对话气泡同口径）。
   const loadedModelId = loadedModel?.id;
-  const loadedModelSessions = loadedModelId ? state.chatSessions[loadedModelId] ?? state.chatSessions[CHAT_HISTORY_MODEL_ID] ?? [] : [];
+  const loadedModelSessions = loadedModelId
+    ? allSessions.filter((session) => sessionBelongsToModel(session, loadedModelId))
+    : [];
   const loadedActiveSessionId = loadedModelId ? state.activeChatSessionIds[loadedModelId] : undefined;
   const loadedActiveSession = (loadedActiveSessionId
     ? loadedModelSessions.find((session) => session.id === loadedActiveSessionId)

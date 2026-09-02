@@ -7,6 +7,7 @@ import {
   Cpu,
   Package,
   Globe,
+  Info,
   Loader2,
   Power,
   Square,
@@ -100,11 +101,14 @@ export default function KernelUpdatePage() {
   const latestRelease = releaseList[0] ?? null;
 
   // 版本对比：当前内核与最新 release 都已知时给出直观结论。
+  // 内核存在但 --version 解析不出 bXXXX 版本号（如自编译构建）时，
+  // 显示「版本未知」而不是误报「未安装内核」。
   const versionState = (() => {
-    const current = engineInfo?.binary_exists ? engineInfo.llama_server_version : null;
+    if (!engineInfo?.binary_exists) return 'missing' as const;
     const latest = latestRelease?.version ?? null;
     if (!latest) return 'unknown' as const;
-    if (!current) return 'missing' as const;
+    const current = engineInfo.llama_server_version;
+    if (!current) return 'unknown-version' as const;
     return current === latest ? 'up-to-date' as const : 'outdated' as const;
   })();
 
@@ -119,7 +123,14 @@ export default function KernelUpdatePage() {
     const info = await checkDesktopEngine();
     setEngineInfo(info);
     if (info?.binary_exists) {
-      setCurrentKernelMessage(info.llama_server_version ? `当前版本：${info.llama_server_version}` : '已检测到 llama.cpp 内核。');
+      const version = info.llama_server_version ? `当前版本：${info.llama_server_version}` : '已检测到 llama.cpp 内核';
+      const runtime = info.runtime_backend
+        ? ` · 运行时 ${info.runtime_backend}${info.runtime_devices?.length ? `（${info.runtime_devices.join(' / ')}）` : ''}`
+        : '';
+      const host = info.host_backend
+        ? ` · 本机 ${info.host_backend}${info.gpu_name ? ` / ${info.gpu_name}` : ''}`
+        : '';
+      setCurrentKernelMessage(`${version}${runtime}${host}`);
     } else {
       setCurrentKernelMessage('未安装 llama.cpp 内核，请在下方选择版本下载。');
     }
@@ -261,6 +272,12 @@ export default function KernelUpdatePage() {
             <AlertTriangle className="h-3 w-3" /> 未安装内核
           </span>
         );
+      case 'unknown-version':
+        return (
+          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-secondary-custom">
+            <Info className="h-3 w-3" /> 已安装 · 版本未知
+          </span>
+        );
       default:
         return null;
     }
@@ -326,6 +343,7 @@ export default function KernelUpdatePage() {
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-secondary-custom">
                 {listMessage ?? '读取 ggml-org/llama.cpp 最近发布列表'}
+                {latestRelease?.host_backend ? ` · 本机优先 ${latestRelease.host_backend}${latestRelease.gpu_name ? `（${latestRelease.gpu_name}）` : ''}` : ''}
               </p>
               <button
                 onClick={() => void handleRefreshReleases()}

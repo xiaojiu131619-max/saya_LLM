@@ -243,7 +243,7 @@ fn command_text(command: &mut Command) -> Option<String> {
     Some(combined)
 }
 
-fn detect_nvidia_gpu_names() -> Vec<String> {
+pub(crate) fn detect_nvidia_gpu_names() -> Vec<String> {
     let mut command = Command::new("nvidia-smi");
     command.args(["--query-gpu=name", "--format=csv,noheader"]);
     command_text(&mut command)
@@ -257,7 +257,7 @@ fn detect_nvidia_gpu_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn detect_video_controller_names() -> Vec<String> {
+pub(crate) fn detect_video_controller_names() -> Vec<String> {
     #[cfg(windows)]
     {
         let mut command = Command::new("powershell");
@@ -286,7 +286,7 @@ fn detect_video_controller_names() -> Vec<String> {
     }
 }
 
-fn is_real_display_adapter(name: &str) -> bool {
+pub(crate) fn is_real_display_adapter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     !lower.is_empty()
         && !lower.contains("microsoft basic")
@@ -295,7 +295,7 @@ fn is_real_display_adapter(name: &str) -> bool {
         && !lower.contains("parsec")
 }
 
-fn detect_host_gpu_backend() -> (String, Option<String>) {
+pub(crate) fn detect_host_gpu_backend() -> (String, Option<String>) {
     let nvidia_names = detect_nvidia_gpu_names();
     if let Some(name) = nvidia_names.first() {
         return ("CUDA".to_string(), Some(name.clone()));
@@ -309,9 +309,20 @@ fn detect_host_gpu_backend() -> (String, Option<String>) {
         return ("CUDA".to_string(), Some(name.clone()));
     }
 
+    if let Some(name) = controllers.iter().find(|name| {
+        let lower = name.to_ascii_lowercase();
+        is_real_display_adapter(name)
+            && (lower.contains("amd")
+                || lower.contains("radeon")
+                || lower.contains("intel")
+                || lower.contains("arc"))
+    }) {
+        return ("Vulkan".to_string(), Some(name.clone()));
+    }
+
     if let Some(name) = controllers
         .iter()
-        .find(|name| is_real_display_adapter(name) && !name.to_ascii_lowercase().contains("nvidia"))
+        .find(|name| is_real_display_adapter(name))
     {
         return ("Vulkan".to_string(), Some(name.clone()));
     }

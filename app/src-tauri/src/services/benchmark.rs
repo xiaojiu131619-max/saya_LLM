@@ -125,7 +125,7 @@ pub fn build_server_config(
         ncmoe,
         tools: None,
         reasoning_budget: 0,
-        device: Some("CUDA0".to_string()),
+        device: None,
         main_gpu: Some(0),
         retry_cpu_fallback: false,
         no_cuda: false,
