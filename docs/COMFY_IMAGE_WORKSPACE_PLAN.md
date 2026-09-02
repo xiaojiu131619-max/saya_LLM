@@ -1,7 +1,7 @@
 # Comfy API 生图工作区推进计划书
 
-> 状态：待执行  
-> 目标：在 Agent LLM 中重写一个基于 ComfyUI API 的生图界面。  
+> 状态：待执行（当前基线 v0.3.1 尚未实现 `image` ViewType、`ImageWorkspace` 或 ComfyUI 后端命令）
+> 目标：在 Agent LLM 中重写一个基于 ComfyUI API 的生图界面。
 > 原则：先做到稳定可用，再逐步兼容复杂工作流；工作流是底座，界面只是参数控制器。
 
 ## 1. 背景与目标
@@ -105,10 +105,7 @@ Comfy 工作流千差万别，不能只依赖自动识别。建议：
 
 ## 4. 参考界面布局
 
-已有参考稿：
-
-- `tmp/comfy-ui-reference.png`
-- `tmp/comfy-ui-reference.html`
+当前仓库没有已提交的参考稿文件。若后续补充视觉参考，统一放入 `docs/assets/` 并在此记录来源；在此之前以本节三栏工作台说明为准。
 
 建议采用三栏工作台：
 
@@ -132,19 +129,17 @@ Comfy 工作流千差万别，不能只依赖自动识别。建议：
 
 它不建议归入“设置中心”。生图属于高频主功能，应该和聊天、模型加载一样是一级工作区。
 
-建议后续视图结构：
+建议后续新增的一级视图如下；表中 `image` 是 Proposed，并非当前 `ViewType`：
 
 | ViewType | 说明 |
 | --- | --- |
 | `home` | 首页 / 模型入口 |
 | `modelLoad` | 模型加载工作区 |
 | `chat` | 聊天工作区 |
-| `image` | Comfy 生图工作区 |
-| `settings` | 设置 |
-| `tools` | 工具 |
-| `logs` | 运行日志 |
+| `image` | Proposed：Comfy 生图工作区 |
+| `settings` | 设置中心 |
 
-当前代码里 `WorkspaceShell` 已经出现过 `image` 判断痕迹，但 `ViewType` 中暂时没有 `image`。正式开发时需要统一类型和路由。
+当前代码没有 `image` 判断、`features/image/` 或 ComfyUI 后端。`tools`、`kernel`、`usage`、`logs` 当前是设置中心子页，`llamaLogs` 是模型工作区子页；正式开发时应在 `ViewType` 和 `WorkspaceShell` 中显式接入 `image`，不要把上述现有子页重复定义为新工作区。
 
 ## 6. 关键用户流程
 
@@ -196,7 +191,7 @@ Comfy 工作流千差万别，不能只依赖自动识别。建议：
 
 建议模块：
 
-- `src/features/image/services/comfyApi.ts`
+- Proposed：`app/src/features/image/services/comfyApi.ts`
 
 建议能力：
 
@@ -234,9 +229,9 @@ Comfy 工作流千差万别，不能只依赖自动识别。建议：
 
 建议新增工作流解析层：
 
-- `src/features/image/workflow/workflowParser.ts`
-- `src/features/image/workflow/workflowBinding.ts`
-- `src/features/image/workflow/workflowMutator.ts`
+- Proposed：`app/src/features/image/workflow/workflowParser.ts`
+- Proposed：`app/src/features/image/workflow/workflowBinding.ts`
+- Proposed：`app/src/features/image/workflow/workflowMutator.ts`
 
 ### 8.1 输入格式
 

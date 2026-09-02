@@ -6,7 +6,7 @@
 
 ### 1.1 操作系统
 
-仅在 Windows 10/11 上验证通过（`main.rs` 加了 `windows_subsystem = "windows"`，且 `process_manager.rs` 使用 `creation_flags(0x08000000)` 隐藏子进程窗口）。其他平台理论上能跑 Tauri 框架，但 llama.cpp 二进制是 Windows x64 + CUDA 13.3 的预编译产物，需要替换 `app/resources/` 内的 `llama-server.exe` 与 `*.dll`。
+仅在 Windows 10/11 上验证通过（`main.rs` 加了 `windows_subsystem = "windows"`，且 `process_manager.rs` 使用 `creation_flags(0x08000000)` 隐藏子进程窗口）。其他平台理论上能跑 Tauri 框架，但当前内核下载和 GPU 监测实现以 Windows 为主。llama.cpp 内核不随仓库或便携包提交，由「设置 → 核心更新」按本机后端下载：NVIDIA 使用 CUDA，AMD / Intel 使用 Vulkan，无可用 GPU 时使用 CPU。
 
 ### 1.2 必需软件
 
@@ -16,7 +16,7 @@
 | Rust | stable（MSRV 1.77.2） | Tauri 后端编译 |
 | Microsoft Edge WebView2 Runtime | 最新 | Tauri WebView 引擎 |
 | Microsoft C++ Build Tools | 含 `cl.exe` 与 Windows SDK | Rust 链接 |
-| （可选）NVIDIA 驱动 + CUDA 13.3 runtime | 与 `app/resources/ggml-cuda.dll` 配套 | GPU 推理 |
+| （可选）显卡驱动 | NVIDIA 走 CUDA，AMD / Intel 走 Vulkan；应用内环境检测会给出匹配建议 | GPU 推理 |
 | （可选）任意 GGUF 模型 | 任意家族 | 加载测试 |
 
 > Tauri CLI 不需要全局安装：`npm` 脚本里通过 `npx tauri ...` 走 `@tauri-apps/cli`。
@@ -83,7 +83,7 @@ D:\Projects\Agent_LLM\app\src-tauri\target\release\agent-llm.exe   # 主可执�
 D:\Projects\Agent_LLM\app\src-tauri\target\release\bundle\msi\*.msi  # 安装包（取决于 Tauri bundle target）
 ```
 
-`tauri.conf.json::bundle.targets = ["app"]` 当前只生成便携式 `.exe`，未打包 MSI。如需 MSI，把这一行改为 `["app", "msi"]` 后重跑 `desktop:build`。
+`tauri.conf.json::bundle.targets = ["app"]` 当前只生成应用目标，不生成 MSI。便携 ZIP 由 `npm run portable:zip` 单独生成，输出到 `app/dist-portable/Agent_LLM_Portable_v<版本>.zip`；脚本明确不会把 `llama-server.exe` 或 DLL 放入压缩包。如需 MSI，把 targets 改为 `["app", "msi"]` 后重跑 `desktop:build`。
 
 ## 3. 代码地图（从哪里读起）
 
@@ -100,6 +100,9 @@ D:\Projects\Agent_LLM\app\src-tauri\target\release\bundle\msi\*.msi  # 安装包
 | 调整流式对话解析 | `app/src/lib/desktop.ts::streamChatCompletion` |
 | 调整 GGUF 解析字段 | `app/src-tauri/src/services/gguf_parser.rs::parse_gguf_header`，同时增加 `SCANNER_VERSION` 让旧缓存失效 |
 | 调整硬件监控采样 | `app/src/hooks/useSystemStats.ts`（前端节奏） + `app/src-tauri/src/commands/system.rs`（后端实现） |
+| 调整 GPU 监测与适配器匹配 | `app/src-tauri/src/services/gpu_monitor.rs`（NVML / DXGI / PDH） + `app/src-tauri/src/commands/hardware.rs` |
+| 调整首次启动环境检测 | `app/src-tauri/src/commands/env_check.rs` + `app/src/features/workspace/EnvCheckDialog.tsx` |
+| 调整显存预测与实测校准 | `app/src/lib/vramEstimate.ts`、`app/src/lib/vramCalibration.ts`、`app/src/lib/vramRecommend.ts` + `app/src-tauri/src/models/app_state.rs::ModelRunRecord` |
 | 改默认推荐参数 | `app/src/lib/modelDefaults.ts` |
 
 ## 4. 开发工作流
@@ -195,11 +198,11 @@ cargo check
 | --- | --- | --- |
 | `npm run desktop` 报 `failed to bundle project` | 是否缺少 WebView2 | 安装 Edge WebView2 Runtime |
 | Tauri 窗口白屏 | 前端未构建或 `devUrl` 错误 | 确认 `tauri.conf.json::build.devUrl = "http://127.0.0.1:3000"` 与 Vite `server.port = 3000` 一致 |
-| `找不到 llama-server.exe` | `app/resources/` 缺失 | 重新拷贝 `llama-server.exe` 与 `*.dll` |
+| `找不到 llama-server.exe` | 尚未下载内核，或当前内核目录损坏 | 进入「设置 → 核心更新」，按 NVIDIA CUDA、AMD/Intel Vulkan 或 CPU 路线重新下载；检查 SHA256 和 `--version` 校验结果 |
 | 加载模型后页面无响应 | `on_ready` 未触发 | 确认 `/health` 返回 200；检查 `process_manager.rs` 是否被错误分支吞掉 |
 | OOM | `gpuLayers` 过大 | UI 调低 ngl 或降低 `n_ctx`；Rust 端有 `compatible_cpu_config` 兜底 |
-| `CUDA error` | 驱动版本不匹配 | `app/resources/ggml-cuda.dll` 是 CUDA 13.3；驱动需要 ≥ 580.x |
-| `cargo build` 在 `nvml-wrapper` 失败 | nvml.lib 不在 PATH | 安装 NVIDIA CUDA Toolkit 或把 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\lib\x64` 加到 `LIB` |
+| `CUDA error` 或 `invalid device: CUDA0` | 内核后端与本机显卡不匹配，或 NVIDIA 驱动不可用 | 用环境检测确认后端；NVIDIA 下载 CUDA 内核，AMD/Intel 下载 Vulkan 内核，不要在 Vulkan 内核上指定 `CUDA0` |
+| GPU 监测显示未连接 | NVML 不可用，或 Windows 性能计数器未返回适配器数据 | NVIDIA 检查驱动；AMD/Intel 检查显卡驱动和 Vulkan。Windows 下应用会尝试用 DXGI + PDH 回退读取独显显存与利用率 |
 | localStorage 撑爆 | 大量会话累积 | UI 提供「批量删除」入口；可以临时在 DevTools 清掉 `agent-llm-local-state-v1` |
 
 ### 5.4 重新生成 GGUF 解析缓存
@@ -292,7 +295,7 @@ Remove-Item -Recurse "$env:APPDATA\AgentLLM\cache"
 
 ### 7.1 Git 边界
 
-- 工作根目录是 `D:\Projects`（Git 仓库），不是 `D:\Projects\Agent_LLM`。
+- 当前 Git 仓库根目录是 `D:\Projects\Agent_LLM`。
 - 提交时**只**选择 `Agent_LLM/` 相关文件，避免污染其它项目。
 - `.gitignore` 在 `app/` 下，覆盖 `node_modules/`、`dist/`、`output/`、`src-tauri/target/`、`*.log`。
 
@@ -302,15 +305,15 @@ Remove-Item -Recurse "$env:APPDATA\AgentLLM\cache"
 - `app/dist/`、`app/output/`
 - `app/src-tauri/target/`
 - `app/vite.out.log`、`app/vite.err.log`
-- `cudart-llama-bin-win-cuda-13.3-x64/`（仓库根目录下的开发参考文件，体积较大，建议不进库；`llama-server.exe` 通过 `tauri.conf.json::bundle.resources` 打进安装包）
+- `cudart-llama-bin-win-cuda-13.3-x64/`（如本地存在，仅作为开发参考，不应提交；内核由应用内更新器下载到版本化 `resources/kernels/` 目录）
 - 用户在 `%APPDATA%\AgentLLM\` 下的配置、缓存、聊天记录
 
 ### 7.3 提交流程建议
 
 ```powershell
-cd D:\Projects
+cd D:\Projects\Agent_LLM
 git status
-git add Agent_LLM\app\src Agent_LLM\app\resources Agent_LLM\app\package.json ...
+git add Agent_LLM\README.md Agent_LLM\CHANGELOG.md Agent_LLM\docs ...
 git diff --cached --stat
 git commit -m "feat(model): 在 ModelCard 显示架构标签"
 ```
@@ -320,10 +323,11 @@ git commit -m "feat(model): 在 ModelCard 显示架构标签"
 ### 8.1 当前状态
 
 - 前端：未引入单元测试框架；行为靠手测。
-- Rust：`gguf_parser.rs` 末尾有一段 `#[ignore]` 的手写测试（`test_parse_qwen` / `test_parse_wukomg`），需要在 `D:\LLM\...` 路径上有真实模型才能跑：
+- Rust：`gguf_parser.rs`、`model_scanner.rs`、`process_manager.rs`、`gpu_monitor.rs`、`auto_updater.rs` 和 `commands/server.rs` 都包含内联单测；需要真实模型文件的解析测试使用 `#[ignore]`，通过环境变量指定目录：
 
   ```powershell
   cd D:\Projects\Agent_LLM\app\src-tauri
+  $env:AGENT_LLM_TEST_MODEL_DIR = "D:\Models\gguf"
   cargo test -- --ignored
   ```
 
@@ -346,7 +350,7 @@ git commit -m "feat(model): 在 ModelCard 显示架构标签"
 - **窗口能开，但所有按钮点了都说"请在桌面版中…"**：Tauri 注入失败；检查是否在真正的 Tauri 窗口内运行（不是普通浏览器）。
 - **`Cannot find module '@/...'`**：TS 路径别名；运行 `npx tsc -b` 让 `tsconfig.app.json::paths` 生效，并确认 IDE 使用工作区版本。
 - **端口被占用**：先停掉占用 8080 的进程，或者在「设置」里把 `default_port` 改成 8081/8082。
-- **下载 / 升级 llama.cpp 失败**：检查防火墙；更新流程（`auto_updater.rs`）走 GitHub Releases，目前仅支持检查，不自动安装。
+- **下载 / 升级 llama.cpp 失败**：检查防火墙、GitHub 镜像或代理设置；更新流程会按 CUDA/Vulkan/CPU 匹配发行包，执行 SHA256 和 `--version` 校验，支持取消下载并保留最近两个版本。失败时在「核心更新」查看日志后重试。
 
 ## 10. 常用命令速查
 
@@ -384,10 +388,9 @@ cargo test -- --ignored
 
 ## 11. 相关文档
 
-- `README.md`：极简启动。
+- `README.md`：根目录的启动、构建和使用说明。
 - `tech-spec.md`：早期前端原型设计意图。
-- `app/README.md`：项目自带 README，重启 / 构建 / 检查 / 注意。
-- `TECHNICAL_REPORT.md`：架构、数据流、模块清单。
+- `docs/TECHNICAL_REPORT.md`：架构、数据流、模块清单。
 
 ## 12. 联系与维护
 

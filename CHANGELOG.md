@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+### 文档修正
+
+- 修正 v0.3.1 的缓存版本记录：发布代码中的 `SCANNER_VERSION` 实际为 `21`，不是条目中写的 `20`
+- 修正 v0.3.1 验证说明：无 NVIDIA 时按 AMD/Intel Vulkan 或 CPU 后端匹配设备，不会继续按 CUDA 包选择
+- 修正 v0.2.0 后续待办状态：聊天虚拟化、Markdown memo、拖拽清理、UUID、错误截断、API Key 迁移清理，以及 API Key 日志脱敏、路径/可执行文件校验、Job Object、原生解压等已在后续代码中落地；当前安全事项应按现存命令重新审计
+- 修正已删除模块的引用：`ModelDownloadPanel` 已在 v0.3.0 删除，旧 lint 条目和模型下载断点续传不再适用于当前代码
+- 修正更新功能位置：`list_recent_releases` 位于 `app/src/lib/desktop.ts` 和 Rust updater 链路，不在 `chatUtils.ts`
+
 ---
 
 ## [0.3.1] - 2026-09-02

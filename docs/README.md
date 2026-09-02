@@ -8,4 +8,4 @@ npm install
 npm run desktop
 ```
 
-完整启动、构建和 GGUF 模型目录说明见 `app/README.md`。
+完整启动、构建和 GGUF 模型目录说明见根目录 `README.md`。

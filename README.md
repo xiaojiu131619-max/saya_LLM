@@ -43,12 +43,12 @@ Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动�
 
 ### 方式一：下载 Release（推荐）
 
-1. 从 [Releases](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest) 下载 `AgentLLM-x.y.z-windows-x64.zip`，解压后运行 `agent-llm.exe`
-2. 进入 **设置 → 核心更新**，选择一个 llama.cpp 版本下载（CUDA 包会自动附带匹配的运行时）
+1. 从 [Releases](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest) 下载 `Agent_LLM_Portable_v0.3.1.zip`，解压后运行 `agent-llm.exe`
+2. 进入 **设置 → 核心更新**，选择与你的硬件匹配的 llama.cpp 版本下载（NVIDIA 选 CUDA，AMD / Intel 选 Vulkan，无 GPU 时选 CPU）
 3. 进入 **设置 → 模型目录**，添加包含 `.gguf` 文件的本地目录
 4. 在模型页选择模型、加载，即可开始对话
 
-> 模型文件不在本项目中。推荐到 [魔搭 ModelScope](https://www.modelscope.cn/) 搜索 `GGUF` 量化版下载；应用内的「魔搭下载」按钮可直接跳转。
+> 便携包只包含应用、启动脚本和用于后续下载的空资源目录，不包含 `llama-server.exe` 或 DLL。模型文件也不在本项目中。推荐到 [魔搭 ModelScope](https://www.modelscope.cn/) 搜索 `GGUF` 量化版下载；应用内的「魔搭下载」按钮可直接跳转。
 
 ### 方式二：从源码构建
 
@@ -83,7 +83,7 @@ curl.exe http://<本机局域网IP>:<端口>/v1/chat/completions `
   --data-raw '{"model": "<模型调用名>", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
 ```
 
-- 监听 `127.0.0.1` 时无需鉴权；开放 `0.0.0.0` 后建议在 API 中心生成 API Key
+- 监听地址以 API 中心当前配置为准；仅本机监听时无需鉴权，开放局域网监听后建议在 API 中心生成 API Key
 - 每次请求需携带完整对话历史；`parallel > 1` 时上下文容量会按并发数均分
 
 ## 目录结构
