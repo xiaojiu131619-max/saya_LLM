@@ -306,6 +306,21 @@ pub fn migrate_plaintext_api_key(state: &AppState, plaintext_key: String) {
     }
 }
 
+/// 持久化 dsh 绑定信息（Phase 3 模型接入使用；与 set_proxy_url 同一写盘模式）。
+pub fn persist_dsh_binding(
+    state: &State<'_, AppState>,
+    bound_model: Option<String>,
+    bound_base_url: Option<String>,
+) -> Result<(), String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    let mut new_config = (*config).clone();
+    new_config.dsh.bound_model = bound_model;
+    new_config.dsh.bound_base_url = bound_base_url;
+    persist_config(&new_config)?;
+    *config = new_config;
+    Ok(())
+}
+
 /// 保存核心更新使用的 HTTP(S) 代理地址；传空字符串或 null 表示清除。
 /// 仅接受 http/https 代理（本机代理如 http://127.0.0.1:7890 是主要用途）。
 #[tauri::command]

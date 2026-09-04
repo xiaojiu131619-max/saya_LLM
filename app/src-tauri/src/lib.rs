@@ -107,6 +107,8 @@ pub fn run() {
             commands::dsh::dsh_stop,
             commands::dsh::dsh_get_logs,
             commands::dsh::dsh_clear_logs,
+            commands::dsh::dsh_bind_model,
+            commands::dsh::dsh_unbind_model,
             show_main_window,
         ])
         .setup(move |app| {

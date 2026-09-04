@@ -33,7 +33,9 @@ import {
   dshRevealDir,
   dshStart,
   dshStop,
+  dshUnbindModel,
   dshUninstall,
+  dshBindModel,
   openExternalUrl,
   type DshEnvCheckItem,
   type DshInstallStatus,
@@ -102,6 +104,7 @@ export default function AgentPage() {
   const [safetyOpen, setSafetyOpen] = useState(false);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [binding, setBinding] = useState(false);
   const [dshLogs, setDshLogs] = useState<string[]>([]);
   const [dshLive, setDshLive] = useState(true);
   const [logCopied, setLogCopied] = useState(false);
@@ -109,6 +112,8 @@ export default function AgentPage() {
   const installing = stage !== 'idle';
   const running = status?.runtime.running ?? false;
   const webUrl = status?.runtime.web_url ?? null;
+  // 「接入当前模型」要求 llama-server 在线：环境检测里的 dsh_model_api 通过即视为就绪。
+  const modelApiReady = checks.some((item) => item.id === 'dsh_model_api' && item.level === 'ok');
 
   const refreshStatusAndChecks = async () => {
     if (!isDesktopRuntime()) return;
@@ -273,6 +278,46 @@ export default function AgentPage() {
     } finally {
       setStopping(false);
       await refreshStatusOnly();
+    }
+  };
+
+  const handleBind = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBinding(true);
+    setActionMessage(null);
+    setProgressMessage('正在接入当前加载的模型...');
+    try {
+      const result = await dshBindModel();
+      if (result) {
+        setActionMessage(`已接入模型 ${result.model_id}（${result.provider}），已设为 dsh 默认模型。`);
+      }
+      await refreshStatusAndChecks();
+    } catch (error) {
+      setActionMessage(`接入失败：${String(error)}`);
+    } finally {
+      setBinding(false);
+      setProgressMessage(null);
+      busyRef.current = false;
+    }
+  };
+
+  const handleUnbind = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBinding(true);
+    setActionMessage(null);
+    setProgressMessage('正在解除接入...');
+    try {
+      await dshUnbindModel();
+      setActionMessage('已解除接入：dsh 配置已回滚（备份保留在 settings.yaml.bak）。');
+      await refreshStatusAndChecks();
+    } catch (error) {
+      setActionMessage(`解除失败：${String(error)}`);
+    } finally {
+      setBinding(false);
+      setProgressMessage(null);
+      busyRef.current = false;
     }
   };
 
@@ -615,13 +660,63 @@ export default function AgentPage() {
             </div>
           </section>
 
-          {/* Phase 3 占位：本地模型接入 */}
-          <section className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface)] p-4">
-            <h2 className="mb-1.5 text-sm font-semibold text-primary-custom">本地模型接入</h2>
-            <p className="text-xs leading-6 text-secondary-custom">
-              「把当前加载的本地模型一键接入 dsh」将在 v0.4 下一阶段提供。当前可在 dsh
-              Web UI 的「设置 → 模型」中手动添加 OpenAI 兼容提供方，指向 llama-server 的 /v1 端点。
-            </p>
+          {/* 本地模型接入（F5，Phase 3） */}
+          <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-primary-custom">本地模型接入</h2>
+              {status?.bound_model ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]">
+                  <Check className="h-3 w-3" /> 已接入 {status.bound_model}
+                </span>
+              ) : (
+                <span className="rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-secondary-custom">
+                  未接入
+                </span>
+              )}
+            </div>
+            {status?.bound_model ? (
+              <div className="space-y-1.5 text-xs">
+                <p className="text-secondary-custom">
+                  默认提供方 <span className="mono-font text-primary-custom">agent-llm-local</span>
+                  {' → '}
+                  <span className="mono-font text-primary-custom">{status.bound_base_url ?? ''}</span>
+                  ，dsh 新会话将默认使用模型 <span className="text-primary-custom">{status.bound_model}</span>。
+                </p>
+                <p className="text-secondary-custom">在浏览器打开 dsh 界面即可直接用本地模型跑智能体任务。</p>
+              </div>
+            ) : (
+              <p className="text-xs leading-6 text-secondary-custom">
+                把当前加载的本地模型写为 dsh 的默认提供方（agent-llm-local），接入前会先用一次真实对话校验链路。
+                请先在「模型」页加载模型；若 dsh 正在运行会自动重启以生效。
+              </p>
+            )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {status?.bound_model ? (
+                <button
+                  onClick={handleUnbind}
+                  disabled={binding || starting || stopping || installing || !isDesktopRuntime()}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--state-danger-border)] px-3 py-1.5 text-xs font-medium text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-bg)] disabled:opacity-40"
+                >
+                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                  解除接入
+                </button>
+              ) : (
+                <button
+                  onClick={handleBind}
+                  disabled={binding || starting || stopping || installing || !modelApiReady || !isDesktopRuntime()}
+                  title={!modelApiReady ? '请先在「模型」页加载模型' : '把当前加载的模型接入 dsh'}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                >
+                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
+                  接入当前加载的模型
+                </button>
+              )}
+            </div>
+            {binding && !progressMessage && (
+              <p className="mt-3 flex items-center gap-1.5 text-xs text-secondary-custom">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" /> 正在处理接入请求...
+              </p>
+            )}
           </section>
         </div>
       </div>

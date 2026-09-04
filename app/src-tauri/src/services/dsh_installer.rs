@@ -926,6 +926,8 @@ pub fn dsh_status() -> DshStatus {
         packages_dir: dsh_packages_dir().to_string_lossy().to_string(),
         web_url: format!("http://127.0.0.1:{}", crate::models::dsh_types::DSH_DEFAULT_PORT),
         runtime: crate::services::dsh_manager::runtime_status(),
+        bound_model: None,
+        bound_base_url: None,
     }
 }
 
@@ -948,13 +950,17 @@ fn pwsh7_available() -> bool {
 /// Agent 页的 dsh 环境检测（F2，含 Phase 0 补充的 dsh_shell 项）。
 /// 与首启检测（run_env_check）相互独立，仅覆盖 dsh 链路；
 /// 每项检测前后通过 on_progress 上报（前端进度可见，同时落入 dsh 日志）。
-pub fn run_dsh_env_check(dsh_port: u16, on_progress: &dyn Fn(String)) -> Vec<EnvCheckItem> {
+pub fn run_dsh_env_check(
+    dsh_port: u16,
+    llama_port: u16,
+    on_progress: &dyn Fn(String),
+) -> Vec<EnvCheckItem> {
     let steps: Vec<(&str, Box<dyn Fn() -> EnvCheckItem>)> = vec![
         ("Node.js 运行时", Box::new(check_dsh_node) as Box<dyn Fn() -> EnvCheckItem>),
         ("dsh 智能体框架", Box::new(check_dsh_package)),
         ("dsh 数据目录", Box::new(check_dsh_home)),
         ("dsh Web 端口", Box::new(move || check_dsh_port(dsh_port))),
-        ("本地模型 API", Box::new(check_dsh_model_api)),
+        ("本地模型 API", Box::new(move || check_dsh_model_api(llama_port))),
         ("命令执行 Shell", Box::new(check_dsh_shell)),
     ];
     let mut items = Vec::with_capacity(steps.len());
@@ -1082,7 +1088,7 @@ fn check_dsh_port(dsh_port: u16) -> EnvCheckItem {
     .with_hint("若不是 dsh 占用，请在设置中修改 dsh 端口后重试。", None, None)
 }
 
-fn check_dsh_model_api() -> EnvCheckItem {
+fn check_dsh_model_api(llama_port: u16) -> EnvCheckItem {
     const TITLE: &str = "本地模型 API";
     let ping = crate::services::process_manager::ping_server();
     if ping.reachable && ping.models_ok {
@@ -1096,6 +1102,19 @@ fn check_dsh_model_api() -> EnvCheckItem {
             "ok",
             TITLE,
             format!("llama-server 可达（{}）{}。", ping.base_url.unwrap_or_default(), models),
+        );
+    }
+    // 应用进程不知道的实例（外部启动 / 上次会话遗留）：直连配置端口兜底探测。
+    if let Ok(models) = crate::services::dsh_config::probe_models_at(llama_port) {
+        return EnvCheckItem::new(
+            "dsh_model_api",
+            "ok",
+            TITLE,
+            format!(
+                "检测到本地模型服务（127.0.0.1:{}，非本应用启动），可用模型：{}。",
+                llama_port,
+                models.join("、")
+            ),
         );
     }
     if !crate::services::process_manager::is_server_running() {

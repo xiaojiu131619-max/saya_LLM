@@ -1,5 +1,6 @@
 pub mod auto_updater;
 pub mod benchmark;
+pub mod dsh_config;
 pub mod dsh_installer;
 pub mod dsh_manager;
 pub mod gguf_parser;

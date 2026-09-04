@@ -1835,6 +1835,10 @@ export interface DshInstallStatus {
   packages_dir: string;
   web_url: string;
   runtime: DshRuntimeStatus;
+  /** 已绑定的本地模型 id（settings.yaml 实读）。 */
+  bound_model: string | null;
+  /** 已绑定的 llama-server 端点（含 /v1）。 */
+  bound_base_url: string | null;
 }
 
 export async function dshEnvCheck() {
@@ -1890,4 +1894,22 @@ export async function dshGetLogs() {
 export async function dshClearLogs() {
   if (!isDesktopRuntime()) return;
   await invoke('dsh_clear_logs');
+}
+
+export interface DshBindResult {
+  model_id: string;
+  base_url: string;
+  provider: string;
+}
+
+/** 把当前加载的本地模型一键接入 dsh（写入 provider 并设为默认模型）。 */
+export async function dshBindModel() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<DshBindResult>('dsh_bind_model');
+}
+
+/** 解除接入（移除本应用的提供方与默认模型设置）。 */
+export async function dshUnbindModel() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_unbind_model');
 }

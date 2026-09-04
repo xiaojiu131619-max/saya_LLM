@@ -103,6 +103,10 @@ pub struct DshStatus {
     pub web_url: String,
     /// 进程运行状态。
     pub runtime: DshRuntimeStatus,
+    /// 已绑定的本地模型 model id（settings.yaml 实读，Phase 3）。
+    pub bound_model: Option<String>,
+    /// 已绑定的 llama-server 端点（含 /v1）。
+    pub bound_base_url: Option<String>,
 }
 
 /// versions.json 的一条安装记录（dsh 包或 Node 便携版）。
