@@ -5,7 +5,7 @@
 > 目标版本：**0.4.0**
 > 上游项目：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT，开发者预览）
 > 关联文档：[ROADMAP_0.3.0_1.0.0.md](ROADMAP_0.3.0_1.0.0.md)（0.4.0 是其「1.0.0 Agent 深度强化」目标的落地前置）
-> 状态：规划稿（待评审）
+> 状态：**Phase 0 已完成（2026-09-04）**，第 9 章 7 项已全部定稿，见 [DSH_SPIKE_RECORD.md](DSH_SPIKE_RECORD.md)；Phase 1 实施中
 
 ---
 
@@ -373,15 +373,17 @@ dsh 子进程 stdout/stderr
 
 ---
 
-## 9. 待确认问题清单（评审 + Phase 0 落实）
+## 9. 待确认问题清单（已于 2026-09-04 Phase 0 实测定稿，证据见 [DSH_SPIKE_RECORD.md](DSH_SPIKE_RECORD.md)）
 
-1. Node.js 版本下限以 **spike 实测**为准（npm 包未声明 engines；仓库开发基线为 `^22.19 || >=24`）——托管默认装 24 LTS 还是 22 LTS？
-2. 无鉴权 llama-server 下，dsh 自定义提供方是否需要占位 `apiKeyEnv`/凭据？——由 Phase 0 实测确认。
-3. `settings.yaml` 被 dsh 外部修改后是否热加载，还是必须重启？——决定写入时是否强制「停止→写→启动」。
-4. 模型绑定粒度为「当前加载模型」还是「模型 + 显式端口/alias」均可？——计划默认支持两者，UI 以当前加载模型为主。
-5. dsh 界面形态选 A（外部浏览器打开 3080，v0.4 默认）还是 B（应用内 WebView 内嵌 3080，体验更接近「内置」但属套壳）？——本计划按 A 排期，B 列为 P2；若选 B，需在 v0.4 增加 WebView 标签页工作量（约 +2–3 d）。
-6. dsh 安装包与 Node 的更新节奏：跟随 npm latest（rc）还是锁定已测版本？——默认锁定已测版本 + 显式更新。
-7. 是否需要「开机自启 dsh / 随 Agent LLM 启动 dsh」？（默认不做，避免静默拉起外部服务）
+1. ✅ **Node 下限 `^22.19 || >=24`**（实测 22.23.2 与 24.15.0 均端到端通过；npm 包 engines 为 null）；托管默认装 **22 LTS** 便携版，系统 Node 合规时复用。
+2. ✅ **无鉴权无需 apiKeyEnv/凭据**：provider 段 `headers.authorization: Bearer unused` 占位即可跑通；llama-server 配置 API key 时才注入真实 key。
+3. ✅ **不依赖热加载**：settings.yaml 虽有 chokidar watcher，但外部写入后 web 进程无可观测重载反应，且 dsh 自身会经同链回写覆盖；统一采用「**停止 → 写 → 启动**」。
+4. ✅ **绑定粒度以「当前加载模型」为主**：绑定即把 llama-server 端点写为 provider 并以顶层 `agent-default-model` 设为默认模型；显式端口/alias 的高级绑定 v0.4 不做 UI。
+5. ✅ **形态 A：外部浏览器打开 3080**；B（WebView 内嵌）维持 P2。
+6. ✅ **锁定已测版本 `@deepseek-ai/dsh@0.1.1-rc.2`** + UI 显式更新，不做无声自动升级。
+7. ✅ **不做任何自启**；仅用户显式开启。
+
+> 补充定稿（spike 新增）：健康探测 = `GET /` 返回 200；启动日志锚点 = `dsh web: <url>`；启动 CWD = 用户工作区（可配置）；依赖体积约 271 MB / 2.96 万文件（安装进度与重试必备）；F5 校验升级为「/v1/models + 真实小补全」；环境检测增加 `dsh_shell`（info，pwsh 7 可选、5.1 回退可用）。
 
 ---
 
