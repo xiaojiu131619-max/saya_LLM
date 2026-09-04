@@ -1,5 +1,6 @@
 pub mod benchmark;
 pub mod config;
+pub mod dsh;
 pub mod env_check;
 pub mod hardware;
 pub mod model;

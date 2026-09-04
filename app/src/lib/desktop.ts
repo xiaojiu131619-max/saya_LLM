@@ -1794,3 +1794,73 @@ function finalizeCompletionMetrics(
 
   return metrics;
 }
+
+// ---------------------------------------------------------------------------
+// dsh（DeepSeek Harness）智能体接入（v0.4，Agent 页）
+// ---------------------------------------------------------------------------
+
+/** Agent 页环境检测项（与首启检测同构，复用后端 EnvCheckItem）。 */
+export interface DshEnvCheckItem {
+  id: string;
+  level: 'ok' | 'warning' | 'error';
+  title: string;
+  detail: string;
+  install_hint: string | null;
+  install_url: string | null;
+  in_app_action: string | null;
+}
+
+export interface DshNodeInfo {
+  source: 'system' | 'managed' | 'none';
+  version: string | null;
+  path: string | null;
+}
+
+export interface DshPackageInfo {
+  installed: boolean;
+  version: string | null;
+  bin_path: string | null;
+}
+
+export interface DshInstallStatus {
+  node: DshNodeInfo;
+  package: DshPackageInfo;
+  home_dir: string;
+  packages_dir: string;
+  web_url: string;
+}
+
+export async function dshEnvCheck() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<DshEnvCheckItem[]>('dsh_env_check');
+}
+
+export async function dshGetStatus() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<DshInstallStatus>('dsh_get_status');
+}
+
+export async function dshInstallNode() {
+  if (!isDesktopRuntime()) return '';
+  return invoke<string>('dsh_install_node');
+}
+
+export async function dshInstallPackage() {
+  if (!isDesktopRuntime()) return '';
+  return invoke<string>('dsh_install_package');
+}
+
+export async function dshUninstall() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_uninstall');
+}
+
+export async function dshCancelInstall() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_cancel_install');
+}
+
+export async function dshRevealDir(kind: 'home' | 'packages' | 'runtimes') {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_reveal_dir', { kind });
+}

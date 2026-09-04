@@ -33,7 +33,7 @@ pub struct EnvCheckItem {
 }
 
 impl EnvCheckItem {
-    fn new(id: &str, level: &str, title: &str, detail: String) -> Self {
+    pub fn new(id: &str, level: &str, title: &str, detail: String) -> Self {
         Self {
             id: id.to_string(),
             level: level.to_string(),
@@ -45,7 +45,7 @@ impl EnvCheckItem {
         }
     }
 
-    fn with_hint(mut self, hint: &str, url: Option<&str>, action: Option<&str>) -> Self {
+    pub fn with_hint(mut self, hint: &str, url: Option<&str>, action: Option<&str>) -> Self {
         self.install_hint = Some(hint.to_string());
         self.install_url = url.map(str::to_string);
         self.in_app_action = action.map(str::to_string);

@@ -18,7 +18,7 @@ type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus';
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
   if (view === 'apiStatus') return 'apiStatus';
-  if (view === 'settings' || view === 'tools' || view === 'kernel' || view === 'usage' || view === 'logs') return 'settings';
+  if (view === 'settings' || view === 'tools' || view === 'kernel' || view === 'agent' || view === 'usage' || view === 'logs') return 'settings';
   return 'model';
 }
 

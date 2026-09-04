@@ -95,6 +95,13 @@ pub fn run() {
             commands::updater::cancel_kernel_update,
             commands::updater::list_installed_kernels,
             commands::updater::get_update_history,
+            commands::dsh::dsh_env_check,
+            commands::dsh::dsh_get_status,
+            commands::dsh::dsh_install_node,
+            commands::dsh::dsh_install_package,
+            commands::dsh::dsh_uninstall,
+            commands::dsh::dsh_cancel_install,
+            commands::dsh::dsh_reveal_dir,
             show_main_window,
         ])
         .setup(move |app| {

@@ -90,6 +90,8 @@ pub struct AppConfig {
     /// 首次启动环境检测是否已完成（无论是否全部通过）。
     /// false 时前端会运行一次环境检测并对未通过项弹出安装提示。
     pub env_check_done: bool,
+    /// dsh（DeepSeek Harness）接入配置（v0.4 新增，serde default 平滑迁移）。
+    pub dsh: crate::models::dsh_types::DshConfig,
 }
 
 impl Default for AppConfig {
@@ -112,6 +114,7 @@ impl Default for AppConfig {
             close_to_tray: true,
             proxy_url: None,
             env_check_done: false,
+            dsh: crate::models::dsh_types::DshConfig::default(),
         }
     }
 }

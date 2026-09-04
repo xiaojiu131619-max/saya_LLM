@@ -1,5 +1,6 @@
 pub mod auto_updater;
 pub mod benchmark;
+pub mod dsh_installer;
 pub mod gguf_parser;
 pub mod gpu_monitor;
 pub mod memory_monitor;

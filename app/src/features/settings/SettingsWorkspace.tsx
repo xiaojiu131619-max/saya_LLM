@@ -1,23 +1,25 @@
 ﻿import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, Download, Settings, Wrench } from 'lucide-react';
+import { ArrowLeft, BarChart3, Bot, Download, Settings, Wrench } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
 import SettingsPage from '@/pages/SettingsPage';
 import ToolsPage from '@/pages/ToolsPage';
 import KernelUpdatePage from '@/pages/KernelUpdatePage';
+import AgentPage from '@/pages/AgentPage';
 import UsagePage from '@/pages/UsagePage';
 
 const settingsTabs: Array<{ id: ViewType; label: string; icon: ComponentType<{ className?: string }> }> = [
   { id: 'settings', label: '设置', icon: Settings },
   { id: 'kernel', label: '核心更新', icon: Download },
+  { id: 'agent', label: 'Agent（智能体）', icon: Bot },
   { id: 'usage', label: '使用统计', icon: BarChart3 },
   { id: 'tools', label: '工具', icon: Wrench },
 ];
 
 export default function SettingsWorkspace() {
   const { state, dispatch } = useApp();
-  const activeView = ['tools', 'kernel', 'usage'].includes(state.currentView)
+  const activeView = ['tools', 'kernel', 'agent', 'usage'].includes(state.currentView)
     ? state.currentView
     : 'settings';
   const returnToModel = () => {
@@ -37,6 +39,8 @@ export default function SettingsWorkspace() {
         return <ToolsPage />;
       case 'kernel':
         return <KernelUpdatePage />;
+      case 'agent':
+        return <AgentPage />;
       case 'usage':
         return <UsagePage />;
       default:
