@@ -17,10 +17,11 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// 真正退出：先停止 llama-server，再退出进程。
+/// 真正退出：先停止 llama-server 与 dsh 旁路进程，再退出进程。
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
+    services::dsh_manager::stop_dsh_on_exit();
     app.exit(0);
 }
 
@@ -102,6 +103,10 @@ pub fn run() {
             commands::dsh::dsh_uninstall,
             commands::dsh::dsh_cancel_install,
             commands::dsh::dsh_reveal_dir,
+            commands::dsh::dsh_start,
+            commands::dsh::dsh_stop,
+            commands::dsh::dsh_get_logs,
+            commands::dsh::dsh_clear_logs,
             show_main_window,
         ])
         .setup(move |app| {

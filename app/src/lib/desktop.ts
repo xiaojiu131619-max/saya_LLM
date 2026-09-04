@@ -1822,12 +1822,19 @@ export interface DshPackageInfo {
   bin_path: string | null;
 }
 
+export interface DshRuntimeStatus {
+  running: boolean;
+  web_url: string | null;
+  pid: number | null;
+}
+
 export interface DshInstallStatus {
   node: DshNodeInfo;
   package: DshPackageInfo;
   home_dir: string;
   packages_dir: string;
   web_url: string;
+  runtime: DshRuntimeStatus;
 }
 
 export async function dshEnvCheck() {
@@ -1863,4 +1870,24 @@ export async function dshCancelInstall() {
 export async function dshRevealDir(kind: 'home' | 'packages' | 'runtimes') {
   if (!isDesktopRuntime()) return;
   await invoke('dsh_reveal_dir', { kind });
+}
+
+export async function dshStart() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_start');
+}
+
+export async function dshStop() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_stop');
+}
+
+export async function dshGetLogs() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<string[]>('dsh_get_logs');
+}
+
+export async function dshClearLogs() {
+  if (!isDesktopRuntime()) return;
+  await invoke('dsh_clear_logs');
 }

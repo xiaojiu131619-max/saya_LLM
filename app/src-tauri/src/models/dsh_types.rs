@@ -77,6 +77,17 @@ pub struct DshPackageInfo {
     pub bin_path: Option<String>,
 }
 
+/// dsh 运行状态（Phase 2，进程启停链路）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DshRuntimeStatus {
+    /// dsh 子进程是否在运行。
+    pub running: bool,
+    /// 实际 Web UI 地址（运行中才有意义，来自启动日志解析）。
+    pub web_url: Option<String>,
+    /// dsh 主进程 PID。
+    pub pid: Option<u32>,
+}
+
 /// dsh 综合状态（dsh_get_status 返回）。
 #[derive(Debug, Clone, Serialize)]
 pub struct DshStatus {
@@ -86,8 +97,10 @@ pub struct DshStatus {
     pub home_dir: String,
     /// dsh 包安装目录。
     pub packages_dir: String,
-    /// 预期的 Web UI 地址（http://127.0.0.1:<port>）。
+    /// 按配置构造的 Web UI 地址（http://127.0.0.1:<port>）。
     pub web_url: String,
+    /// 进程运行状态。
+    pub runtime: DshRuntimeStatus,
 }
 
 /// versions.json 的一条安装记录（dsh 包或 Node 便携版）。
@@ -108,11 +121,14 @@ pub fn read_versions(file: &PathBuf) -> Vec<DshInstalledVersion> {
     }
 }
 
-/// 追加/更新一条安装记录并写回 versions.json。
+/// 追加/更新一条安装记录并写回 versions.json（自动创建父目录）。
 pub fn write_version(file: &PathBuf, entry: DshInstalledVersion) -> Result<(), String> {
     let mut list = read_versions(file);
     list.retain(|item| item.kind != entry.kind);
     list.push(entry);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let text = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
     std::fs::write(file, text).map_err(|e| e.to_string())
 }
