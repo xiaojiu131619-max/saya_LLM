@@ -115,3 +115,29 @@ llm-pi-ai:
 > 另：曾出现一个前置会话遗留的孤儿 node 进程期间，任何新 npm 实例都无法工作（疑似 npm 缓存/网络栈被占死）；进程清零后恢复。应用的「无输出即终止」护栏恰好防止孤儿进程再次累积。
 
 环境注意：本机 `proxy_url` 原为 `http://127.0.0.1:10910`（代理软件关闭时安装/下载会失败并给出中文报错）。冒烟时已临时置空走直连，原值备份在 config.json 的 `_proxy_backup` 字段，代理恢复后可在设置中改回。
+
+## 8. 安装提速：pnpm 快路径（2026-09-04 晚，GUI 实测通过）
+
+npm 23 分钟的根因是 arborist 依赖树求解（单线程 CPU）+ 串行行为；换 pnpm 后同机同版本 **40.8 秒完成**（提速 ~20-30 倍）。已实装为三级工具链回退：
+
+```text
+corepack pnpm@10.17.1（锁定版本，经托管 Node 运行）
+  └─ 失败 → 托管 npm（silly 级流式日志 + 600s 静默护栏 + 30min 总超时）
+              └─ 托管 npm 无响应 → 系统 npm（运行时仍为托管 Node）
+```
+
+实测要点：
+
+| 项 | 结论 |
+|----|------|
+| corepack 调用 | 托管 Node 便携版的无扩展名 `corepack` shim 是 Unix 脚本，Windows 必须经 `node_modules/corepack/dist/corepack.js` 入口；首次运行按 `pnpm@<版本>` 自动下载 pnpm（约几 MB，走同一 registry 与代理） |
+| 构建脚本 | **pnpm v10 默认拦截依赖的 install/postinstall 脚本**（npm 会执行）。node-pty/koffi 等原生模块若不跑脚本会缺终端/PTY 能力。对策：安装前预写 packages 目录的 `package.json`，声明 `pnpm.onlyBuiltDependencies` 白名单（与锁定 dsh 版本的依赖集对应，升级 dsh 时同步维护）。实测白名单生效：node-pty postinstall 正确复制 conpty.dll、koffi/protobufjs 均执行 |
+| 目录布局 | pnpm junction 结构下 `node_modules/@deepseek-ai/dsh/lib/bin.js` 直读正常（`--version` 通过），应用启动路径无需改动；store 收在 `%APPDATA%\AgentLLM\dsh\pnpm-store`（270MB，随数据管理整体可清） |
+| 韧性 | append-only 报告器持续输出进度行；实测一次 ECONNRESET 自动重试成功 |
+
+**新电脑（干净环境）可用性**：✅ 适用，无额外前提——
+1. 无系统 Node 时先自动托管安装 Node 便携版（35MB），pnpm/corepack 随 Node 分发，不依赖全局任何工具；
+2. pnpm 首跑自动下载锁定版本（走同 registry，支持 `proxy_url` 代理注入）；
+3. 全部产物（Node 运行时、pnpm store、dsh 包、DSH_HOME）都收在 `%APPDATA%\AgentLLM` 下，整体可卸载；
+4. 任一环节失败自动降级到 npm 链路（已实测），新机器不会因 pnpm 路径问题装不上，只是慢一些；
+5. pnpm 首次冷装无 store 复用，预计 3-6 分钟（并行下载），仍显著快于 npm。

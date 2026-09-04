@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const DSH_PINNED_VERSION: &str = "0.1.1-rc.2";
 /// 托管 Node.js 固定版本（Phase 0 结论：托管默认装 22 LTS 便携版）。
 pub const NODE_PINNED_VERSION: &str = "22.23.2";
+/// 安装 dsh 包用的 pnpm 固定版本（经托管 Node 自带 corepack 运行，实测 454 包约 1 分钟）。
+pub const PNPM_PINNED_VERSION: &str = "10.17.1";
 /// dsh Web UI 默认端口。
 pub const DSH_DEFAULT_PORT: u16 = 3080;
 

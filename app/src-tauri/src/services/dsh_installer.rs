@@ -577,9 +577,182 @@ fn system_npm_cli(system_node_path: &str) -> Option<PathBuf> {
     cli.exists().then_some(cli)
 }
 
-/// 用托管 Node 的 npm 把固定版本 `@deepseek-ai/dsh` 装进 dsh/packages/。
+/// 托管 Node 自带 corepack 的入口（Windows 无扩展名 shim 是 Unix 脚本，须走 dist 入口）。
+fn managed_corepack_js(node_version: &str) -> PathBuf {
+    managed_node_dir(node_version)
+        .join("node_modules")
+        .join("corepack")
+        .join("dist")
+        .join("corepack.js")
+}
+
+/// pnpm 内容寻址存储目录（收在应用数据目录内，随数据管理可整体清理）。
+pub fn pnpm_store_dir() -> PathBuf {
+    dsh_root_dir().join("pnpm-store")
+}
+
+/// 预写 packages 目录的 package.json：
+/// 1) 声明 `pnpm.onlyBuiltDependencies` 白名单——pnpm v10 默认拦截依赖的构建脚本，
+///    而 npm 会执行；node-pty / koffi 等原生模块不编译会导致 dsh 终端/PTY 功能缺失
+///    （白名单与锁定的 dsh 版本依赖集对应，更新 dsh 版本时同步维护）；
+/// 2) 让 pnpm add 在确定性的清单上工作。
+fn prepare_packages_manifest() -> Result<(), String> {
+    let dir = dsh_packages_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建 dsh 包目录：{}", e))?;
+    let manifest = dir.join("package.json");
+    if manifest.exists() {
+        return Ok(());
+    }
+    let content = serde_json::json!({
+        "name": "agent-llm-dsh-packages",
+        "private": true,
+        "pnpm": {
+            "onlyBuiltDependencies": [
+                "@deepseek-ai/dsh-subprocess-local",
+                "@google/genai",
+                "koffi",
+                "node-pty",
+                "protobufjs"
+            ]
+        }
+    });
+    let text = serde_json::to_string_pretty(&content).map_err(|e| e.to_string())?;
+    std::fs::write(&manifest, text).map_err(|e| format!("无法写入 package.json：{}", e))
+}
+
+/// 单次 pnpm 安装执行（corepack 运行锁定版本的 pnpm；append-only 报告器持续流式输出）。
+fn run_pnpm_install(
+    node_exe: &Path,
+    corepack_js: &Path,
+    pnpm_version: &str,
+    packages_dir: &Path,
+    store_dir: &Path,
+    package_version: &str,
+    proxy_url: Option<&str>,
+    on_progress: &dyn Fn(String),
+) -> Result<(), String> {
+    let mut command = quiet_command(node_exe);
+    command
+        .arg(corepack_js)
+        .arg(format!("pnpm@{}", pnpm_version))
+        .arg("add")
+        .arg("--dir")
+        .arg(packages_dir)
+        .arg("--store-dir")
+        .arg(store_dir)
+        .args(["--reporter", "append-only"])
+        .arg(format!("@deepseek-ai/dsh@{}", package_version))
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(proxy) = proxy_url.filter(|url| !url.trim().is_empty()) {
+        command
+            .env("HTTP_PROXY", proxy)
+            .env("HTTPS_PROXY", proxy)
+            .env("http_proxy", proxy)
+            .env("https_proxy", proxy)
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost");
+    }
+
+    dsh_manager::add_dsh_log(&format!(
+        "[pnpm] corepack pnpm@{} add --dir {} @deepseek-ai/dsh@{}（存储 {}）",
+        pnpm_version,
+        packages_dir.display(),
+        package_version,
+        store_dir.display()
+    ));
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("无法启动 pnpm 安装进程：{}", e))?;
+
+    let (tx, rx) = channel::<String>();
+    if let Some(out) = child.stdout.take() {
+        let tx_out = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if tx_out.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    if let Some(err) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    const SILENCE_TIMEOUT: Duration = Duration::from_secs(600);
+    const OVERALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+    let started = Instant::now();
+    let mut last_output = Instant::now();
+    let mut last_heartbeat = 0u64;
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(16);
+    loop {
+        if ensure_not_cancelled().is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            dsh_manager::add_dsh_log("[pnpm] 安装已被用户取消。");
+            return Err("安装已被用户取消。".to_string());
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                last_output = Instant::now();
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    dsh_manager::add_dsh_log(&format!("[pnpm] {}", trimmed));
+                    if tail.len() >= 12 {
+                        tail.pop_front();
+                    }
+                    tail.push_back(trimmed.to_string());
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if child.try_wait().map(|status| status.is_some()).unwrap_or(false) {
+                    break;
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= OVERALL_TIMEOUT || last_output.elapsed() >= SILENCE_TIMEOUT {
+            let reason = if elapsed >= OVERALL_TIMEOUT {
+                format!("pnpm 安装总时长超过 {} 分钟", OVERALL_TIMEOUT.as_secs() / 60)
+            } else {
+                format!("pnpm 超过 {} 秒无任何输出（疑似挂死）", SILENCE_TIMEOUT.as_secs())
+            };
+            let _ = child.kill();
+            let _ = child.wait();
+            dsh_manager::add_dsh_log(&format!("[pnpm] 已终止：{}", reason));
+            return Err(format!("pnpm 无响应：{}", reason));
+        }
+        let elapsed_secs = elapsed.as_secs();
+        if elapsed_secs >= last_heartbeat + 15 {
+            last_heartbeat = elapsed_secs;
+            on_progress(format!("pnpm 正在解析并下载依赖（已运行 {} 秒）...", elapsed_secs));
+        }
+    }
+    let status = child.wait().map_err(|e| format!("等待 pnpm 退出失败：{}", e))?;
+    if !status.success() {
+        let tail_text: String = tail.into_iter().take(8).collect::<Vec<_>>().join("\n");
+        return Err(format!(
+            "pnpm 安装失败（退出码 {:?}）：{}",
+            status.code(),
+            tail_text
+        ));
+    }
+    Ok(())
+}
+
+/// 安装固定版本 `@deepseek-ai/dsh` 到 dsh/packages/。
 /// 幂等：同版本已安装且 bin.js 存在时跳过。
-/// 托管 npm 挂死时自动回退系统 npm（同一托管 Node 运行时执行，保证版本一致）。
+/// 工具链三级回退：托管 corepack 跑锁定版 pnpm（实测约 1 分钟）→
+/// 托管 npm → 系统 npm（运行时始终为托管 Node，保证版本一致）。
 #[allow(clippy::too_many_arguments)]
 pub fn install_dsh_package(
     node_version: &str,
@@ -595,12 +768,6 @@ pub fn install_dsh_package(
             node_version
         ));
     }
-    let npm_cli = managed_npm_cli(node_version);
-    if !npm_cli.exists() {
-        return Err(
-            "托管 Node 目录缺少 npm（node_modules/npm），请重新安装 Node 运行时。".to_string(),
-        );
-    }
 
     if dsh_bin_js().exists() {
         if let Some(installed) = installed_package_version() {
@@ -612,46 +779,81 @@ pub fn install_dsh_package(
     }
 
     let packages_dir = dsh_packages_dir();
-    std::fs::create_dir_all(&packages_dir)
-        .map_err(|e| format!("无法创建 dsh 包目录：{}", e))?;
+    prepare_packages_manifest()?;
 
     on_progress(format!(
-        "开始安装 @deepseek-ai/dsh v{}（依赖约 270 MB，需要几分钟；详细输出见 dsh 日志）...",
+        "开始安装 @deepseek-ai/dsh v{}（约 270 MB；正常 1-3 分钟，详细输出见 dsh 日志）...",
         package_version
     ));
 
-    let managed_result =
-        run_npm_install(&node_exe, &npm_cli, &packages_dir, package_version, proxy_url, on_progress);
-    if let Err(error) = managed_result {
-        let is_unresponsive = error.contains("npm 无响应");
-        let system_node = detect_system_node();
-        let fallback_cli = system_node
-            .path
-            .as_deref()
-            .and_then(system_npm_cli);
-        if is_unresponsive {
-            if let (Some(system_node_path), Some(system_cli)) = (&system_node.path, fallback_cli) {
-                dsh_manager::add_dsh_log(
-                    "[npm] 托管 npm 无响应，自动回退：改用系统 Node 的 npm 继续安装（运行时仍为托管 Node）。",
-                );
-                on_progress("托管 npm 无响应，已自动改用系统 npm 继续安装...".to_string());
-                run_npm_install(
-                    Path::new(system_node_path),
-                    &system_cli,
-                    &packages_dir,
-                    package_version,
-                    proxy_url,
-                    on_progress,
-                )?;
-            } else {
-                return Err(format!(
-                    "{}。本机也未找到系统 Node 的 npm，无法自动回退：请检查杀毒软件对 {} 的拦截，或安装系统 Node.js LTS 后重试。",
-                    error,
-                    npm_cli.display()
-                ));
+    // 1) 快路径：corepack + 锁定版 pnpm。
+    let corepack_js = managed_corepack_js(node_version);
+    if corepack_js.exists() {
+        if let Err(error) = run_pnpm_install(
+            &node_exe,
+            &corepack_js,
+            crate::models::dsh_types::PNPM_PINNED_VERSION,
+            &packages_dir,
+            &pnpm_store_dir(),
+            package_version,
+            proxy_url,
+            on_progress,
+        ) {
+            if error.contains("取消") {
+                return Err(error);
             }
-        } else {
-            return Err(error);
+            dsh_manager::add_dsh_log(&format!("[pnpm] 失败，自动回退 npm：{}", error));
+            on_progress("pnpm 安装未成功，自动改用 npm 继续安装...".to_string());
+        }
+    } else {
+        dsh_manager::add_dsh_log("[pnpm] 托管 Node 缺少 corepack，直接使用 npm 安装。");
+    }
+
+    // 2) pnpm 未产出可用目录时，回退 npm 链路（托管 npm → 系统 npm）。
+    if !dsh_bin_js().exists() {
+        let npm_cli = managed_npm_cli(node_version);
+        if !npm_cli.exists() {
+            return Err(
+                "托管 Node 目录缺少 npm（node_modules/npm），请重新安装 Node 运行时。".to_string(),
+            );
+        }
+        let managed_result = run_npm_install(
+            &node_exe,
+            &npm_cli,
+            &packages_dir,
+            package_version,
+            proxy_url,
+            on_progress,
+        );
+        if let Err(error) = managed_result {
+            let is_unresponsive = error.contains("npm 无响应");
+            let system_node = detect_system_node();
+            let fallback_cli = system_node.path.as_deref().and_then(system_npm_cli);
+            if is_unresponsive {
+                if let (Some(system_node_path), Some(system_cli)) = (&system_node.path, fallback_cli)
+                {
+                    dsh_manager::add_dsh_log(
+                        "[npm] 托管 npm 无响应，自动回退：改用系统 Node 的 npm 继续安装（运行时仍为托管 Node）。",
+                    );
+                    on_progress("托管 npm 无响应，已自动改用系统 npm 继续安装...".to_string());
+                    run_npm_install(
+                        Path::new(system_node_path),
+                        &system_cli,
+                        &packages_dir,
+                        package_version,
+                        proxy_url,
+                        on_progress,
+                    )?;
+                } else {
+                    return Err(format!(
+                        "{}。本机也未找到系统 Node 的 npm，无法自动回退：请检查杀毒软件对 {} 的拦截，或安装系统 Node.js LTS 后重试。",
+                        error,
+                        npm_cli.display()
+                    ));
+                }
+            } else {
+                return Err(error);
+            }
         }
     }
     ensure_not_cancelled()?;

@@ -247,6 +247,9 @@ pub fn start_dsh(
         return Err("dsh 已在运行，请先关闭后再开启。".to_string());
     }
 
+    // 先清扫上次会话可能遗留的孤儿 dsh（应用强杀/崩溃场景），避免端口与新进程冲突。
+    stop_stale_dsh_processes();
+
     let node_dir = options
         .node_path
         .parent()
@@ -472,6 +475,43 @@ pub fn stop_dsh() -> Result<(), String> {
 pub fn stop_dsh_on_exit() {
     if let Err(error) = stop_dsh() {
         eprintln!("[dsh] 退出清理失败: {}", error);
+    }
+}
+
+/// 清扫上次会话遗留的 dsh 孤儿进程（应用被强杀/崩溃时 Job Object 可能未生效，
+/// 实测发生过）。按命令行包含本应用 packages 目录的 bin.js 路径精确匹配，
+/// 不会影响任何其他 node 程序。在 start_dsh 前调用。
+pub fn stop_stale_dsh_processes() {
+    let anchor = crate::services::dsh_installer::dsh_bin_js();
+    let anchor_text = anchor.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let mut system = sysinfo::System::new_all();
+    system.refresh_processes();
+    let mut stopped = 0usize;
+    for process in system.processes().values() {
+        if !process.name().eq_ignore_ascii_case("node.exe") {
+            continue;
+        }
+        let cmd = process
+            .cmd()
+            .iter()
+            .map(|part| part.replace('/', "\\"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if cmd.contains(&anchor_text) {
+            eprintln!(
+                "[dsh] stopping stale dsh pid={:?} cmd={}",
+                process.pid(),
+                cmd
+            );
+            if process.kill() {
+                stopped += 1;
+            }
+        }
+    }
+    if stopped > 0 {
+        eprintln!("[dsh] stopped {} stale dsh process(es)", stopped);
+        std::thread::sleep(std::time::Duration::from_millis(400));
     }
 }
 
