@@ -132,6 +132,9 @@ export default function ChatPage() {
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const shouldStickToBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  // 最近一次程序滚动（scrollToIndex/跳底）的时间戳：滚动事件回调里用它区分
+  // 「我们自己滚的」和「用户滚的」，避免测量修正把用户刚解除的吸附又打开。
+  const programmaticScrollAtRef = useRef(0);
 
   const activeModel = state.models.find((m) => m.id === state.activeModelId);
   const activeVideoSupport = modelVideoSupport(activeModel);
@@ -270,8 +273,19 @@ export default function ChatPage() {
     if (!shouldStickToBottomRef.current) return;
     const count = virtualizer.options.count;
     if (count === 0) return;
+    programmaticScrollAtRef.current = Date.now();
     virtualizer.scrollToIndex(count - 1, { align: 'end', behavior });
   }, [virtualizer]);
+
+  // 思考框展开/收起 = 用户明确要停留阅读，立即脱离自动滚动；
+  // 否则流式输出会在下一次内容变化时把视口重新拽到最底部，导致无法折叠。
+  useEffect(() => {
+    const release = () => {
+      shouldStickToBottomRef.current = false;
+    };
+    window.addEventListener('agent-llm:thought-toggle', release);
+    return () => window.removeEventListener('agent-llm:thought-toggle', release);
+  }, []);
 
   // 自动滚动节流：100ms 内最多滚一次，但必须保证「最后一次变化」也会滚动（尾随触发）。
   // 早先的实现用一个布尔闭锁 + cleanup 里 clearTimeout，流式输出时依赖每几毫秒变一次，
@@ -361,10 +375,15 @@ export default function ChatPage() {
     const viewport = messagesViewportRef.current;
     if (!viewport) return;
     const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-    if (distanceToBottom <= AUTO_SCROLL_MAGNET_PX) {
-      shouldStickToBottomRef.current = true;
-    } else if (viewport.scrollTop < lastScrollTopRef.current - SCROLL_RELEASE_DELTA_PX) {
+    if (viewport.scrollTop < lastScrollTopRef.current - SCROLL_RELEASE_DELTA_PX) {
+      // 用户向上滚：立刻脱离自动滚动，滚轮/触摸/键盘的释放监听与此处互为兜底。
       shouldStickToBottomRef.current = false;
+    } else if (distanceToBottom <= AUTO_SCROLL_MAGNET_PX) {
+      // 只有用户自己（或明确的跳底按钮）滚回底部附近才重新吸附；
+      // 程序滚动后的 160ms 内不重新吸附，防止测量修正悄悄把用户拉回底部。
+      if (Date.now() - programmaticScrollAtRef.current > 160 || shouldStickToBottomRef.current) {
+        shouldStickToBottomRef.current = true;
+      }
     }
     lastScrollTopRef.current = viewport.scrollTop;
     setShowJumpToBottom(distanceToBottom > AUTO_SCROLL_MAGNET_PX);
@@ -372,6 +391,7 @@ export default function ChatPage() {
 
   const jumpToBottom = useCallback(() => {
     shouldStickToBottomRef.current = true;
+    programmaticScrollAtRef.current = Date.now();
     virtualizer.scrollToIndex(modelMessages.length - 1, { align: 'end', behavior: 'smooth' });
     setShowJumpToBottom(false);
   }, [modelMessages.length, virtualizer]);
@@ -691,7 +711,7 @@ export default function ChatPage() {
         type: 'UPDATE_MESSAGE',
         payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content },
       });
-      scrollToBottom('auto');
+      // 滚动统一由内容变化的 useLayoutEffect（100ms 节流）接管，避免每个 token 都 scrollToIndex。
     };
     try {
       const metrics = await streamChatCompletion({
@@ -717,7 +737,6 @@ export default function ChatPage() {
                 type: 'UPDATE_MESSAGE',
                 payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
               });
-              scrollToBottom('auto');
             },
           });
 
@@ -863,7 +882,7 @@ export default function ChatPage() {
         type: 'UPDATE_MESSAGE',
         payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, content },
       });
-      scrollToBottom('auto');
+      // 滚动统一由内容变化的 useLayoutEffect（100ms 节流）接管，避免每个 token 都 scrollToIndex。
     };
     try {
       const metrics = await streamChatCompletion({
@@ -889,7 +908,6 @@ export default function ChatPage() {
                 type: 'UPDATE_MESSAGE',
                 payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
               });
-              scrollToBottom('auto');
             },
           });
 
@@ -1459,7 +1477,7 @@ export default function ChatPage() {
                         isAnyGenerating
                           ? 'bg-red-500/10 text-red-600 hover:bg-red-500/15 dark:text-red-400'
                           : (inputText.trim() || pendingAttachments.length > 0) && canChat
-                            ? 'bg-[var(--app-bg)] text-white hover:bg-black dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)]'
+                            ? 'bg-[var(--text-primary)] text-white hover:bg-black/85 dark:bg-[var(--accent)] dark:text-white dark:hover:bg-[var(--accent-hover)]'
                             : 'bg-[var(--border)] text-[var(--text-tertiary)] dark:bg-white/[0.08] dark:text-[var(--text-tertiary)]'
                       }`}
                       title={isAnyGenerating ? '停止生成' : '发送'}

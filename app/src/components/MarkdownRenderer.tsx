@@ -205,7 +205,12 @@ export function ThoughtBlock({ content }: { content: string }) {
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => {
+          setExpanded((value) => !value);
+          // 广播给聊天页：用户正在操作思考框，立即脱离自动滚动，
+          // 否则流式输出会把视口重新拽到最底部，导致无法停留阅读和折叠。
+          window.dispatchEvent(new CustomEvent('agent-llm:thought-toggle'));
+        }}
         className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.06]"
       >
         <span className="flex min-w-0 items-center gap-2">

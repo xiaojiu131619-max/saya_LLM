@@ -2,7 +2,6 @@
 import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, Terminal, WifiOff, XCircle, Zap } from 'lucide-react';
 import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
-import ExternalApiSection from '@/features/apiStatus/ExternalApiSection';
 import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions, sessionBelongsToModel } from '@/features/chat/chatUtils';
 import { createApiModel } from '@/lib/apiModel';
 import PageHeader from '@/components/PageHeader';
@@ -167,7 +166,7 @@ export default function ApiStatusPage() {
           <PageHeader
             icon={Activity}
             title="API 状态"
-            description="每 2 秒检测本地 OpenAI / Anthropic 兼容接口，展示模型、地址、响应速度和 API key 状态。"
+            description="每 2 秒检测本地 OpenAI / Anthropic 兼容接口，展示模型、地址、响应速度和 API key 状态。对外 API 的开关与密钥在「软件设置」中配置。"
             className="mb-6"
             actions={(
               <button
@@ -294,10 +293,6 @@ export default function ApiStatusPage() {
               )}
             </section>
           </div>
-
-          <section className="mt-2 border-b border-[var(--border-subtle)] py-5">
-            <ExternalApiSection embedded />
-          </section>
         </div>
       </div>
     </div>

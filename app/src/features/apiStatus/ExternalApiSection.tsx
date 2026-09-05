@@ -86,9 +86,8 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
   };
 
   const handleApiEnabledChange = (enabled: boolean) => {
-    const host = enabled && (!state.apiConfig.host || state.apiConfig.host === '127.0.0.1')
-      ? '0.0.0.0'
-      : state.apiConfig.host || '0.0.0.0';
+    // 监听地址不再单独配置：开启对外自动监听 0.0.0.0（局域网可访问），关闭则回落 127.0.0.1（仅本机）。
+    const host = enabled ? '0.0.0.0' : '127.0.0.1';
     updateApiConfig({ enabled, host }, true);
   };
 
@@ -200,7 +199,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
               <div className="divide-y divide-[var(--border-subtle)]">
               <ApiSettingRow
                 label="释放 OpenAI / Anthropic 兼容 API"
-                description={state.apiConfig.enabled ? `下一次加载模型时监听 ${state.apiConfig.host || '0.0.0.0'}:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
+                description={state.apiConfig.enabled ? `开启后局域网设备可访问，下一次加载模型时监听 0.0.0.0:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
               >
                 <ToggleSwitch
                   checked={state.apiConfig.enabled}
@@ -221,19 +220,6 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                   onBlur={() => void persistRuntimeSettings()}
                   className="mono-font h-9 w-28 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
                 />
-              </ApiSettingRow>
-              <ApiSettingRow
-                label="监听地址"
-                description="0.0.0.0 表示允许局域网访问；127.0.0.1 表示仅本机访问"
-              >
-                <select
-                  value={state.apiConfig.host}
-                  onChange={(event) => updateApiConfig({ host: event.target.value }, true)}
-                  className="h-9 w-36 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
-                >
-                  <option value="0.0.0.0">0.0.0.0</option>
-                  <option value="127.0.0.1">127.0.0.1</option>
-                </select>
               </ApiSettingRow>
               <ApiSettingRow
                 label="API Key"

@@ -12,19 +12,20 @@ import {
   Power,
   Square,
   HardDrive,
+  Stethoscope,
+  ChevronRight,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import PageHeader from '@/components/PageHeader';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
+import EnvCheckDialog from '@/features/workspace/EnvCheckDialog';
 import {
   cancelKernelUpdate,
   checkDesktopEngine,
-  getDesktopConfig,
   isDesktopRuntime,
   listenDesktopEvent,
   listInstalledKernels,
   listRecentLlamaReleases,
-  setDesktopProxyUrl,
   stopDesktopServer,
   updateLlamaKernel,
   type DesktopEngineInfo,
@@ -92,9 +93,8 @@ export default function KernelUpdatePage() {
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const [listMessage, setListMessage] = useState<string | null>(null);
   const [kernelDownloadSource, setKernelDownloadSource] = useState<KernelDownloadSource>(loadKernelDownloadSource);
-  // 下载代理（如本机梯子的 http://127.0.0.1:7890）。空 = 直连。
-  const [proxyInput, setProxyInput] = useState('');
-  const [proxyMessage, setProxyMessage] = useState<string | null>(null);
+  // 环境检测：手动打开检测弹窗（从「服务控制」并入核心更新）。
+  const [envCheckOpen, setEnvCheckOpen] = useState(false);
 
   const updating = updatingVersion !== null;
   const progressPercent = parseProgressPercent(engineMessage);
@@ -209,33 +209,11 @@ export default function KernelUpdatePage() {
     }
   };
 
-  const handleSaveProxy = async () => {
-    const value = proxyInput.trim();
-    try {
-      await setDesktopProxyUrl(value || null);
-      setProxyMessage(value
-        ? '代理已保存，立即对检查更新与下载生效。'
-        : '代理已清除，恢复直连下载。');
-    } catch (error) {
-      setProxyMessage(`代理保存失败：${String(error)}`);
-    }
-  };
-
-  const handleLoadProxy = async () => {
-    try {
-      const config = await getDesktopConfig();
-      setProxyInput(config?.proxy_url ?? '');
-    } catch {
-      // 读取失败时保持空输入，不影响其他功能。
-    }
-  };
-
   // 进入页面自动检查：当前内核 + 发布列表 + 本机已安装核心一次到位。
   useEffect(() => {
     if (autoCheckedRef.current || typeof window === 'undefined') return;
     autoCheckedRef.current = true;
 
-    void handleLoadProxy();
     void (async () => {
       if (!isDesktopRuntime()) return;
       setCurrentKernelMessage('正在自动检查当前 llama.cpp 内核...');
@@ -308,6 +286,20 @@ export default function KernelUpdatePage() {
               </button>
             </div>
           )}
+
+          <SettingSection title="环境检测" icon={Stethoscope} delay={0.04}>
+            <SettingRow
+              label="运行环境检测"
+              description="检查 llama.cpp 内核、VC++ 运行库、显卡驱动、ffmpeg 与数据目录"
+            >
+              <button
+                onClick={() => setEnvCheckOpen(true)}
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
+              >
+                运行检测 <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </SettingRow>
+          </SettingSection>
 
           <SettingSection title="内核状态" icon={Cpu} delay={0}>
             <SettingRow
@@ -442,31 +434,6 @@ export default function KernelUpdatePage() {
             </SettingRow>
             <div className="border-t border-[var(--border-subtle)]" />
             <SettingRow
-              label="下载代理"
-              description="核心下载不走系统代理；挂了梯子但下载仍慢时，填入本机代理端口（如 http://127.0.0.1:7890）。留空为直连。"
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  value={proxyInput}
-                  onChange={(event) => setProxyInput(event.target.value)}
-                  placeholder="http://127.0.0.1:7890"
-                  className="mono-font h-9 w-56 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-3 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-black/20"
-                  aria-label="下载代理地址"
-                />
-                <button
-                  onClick={() => void handleSaveProxy()}
-                  disabled={updating}
-                  className="flex h-9 flex-shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                >
-                  保存
-                </button>
-              </div>
-            </SettingRow>
-            {proxyMessage && (
-              <p className="break-words text-xs text-secondary-custom">{proxyMessage}</p>
-            )}
-            <div className="border-t border-[var(--border-subtle)]" />
-            <SettingRow
               label="版本保留策略"
               description="每次更新新建独立目录存放新核心；本机始终保留最近两个版本（最新的 + 更新前一个），更早的自动清理。"
             >
@@ -507,6 +474,8 @@ export default function KernelUpdatePage() {
           )}
         </div>
       </div>
+
+      <EnvCheckDialog manualOpen={envCheckOpen} onClose={() => setEnvCheckOpen(false)} />
     </div>
   );
 }

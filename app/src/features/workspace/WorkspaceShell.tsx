@@ -11,15 +11,14 @@ import EnvCheckDialog from './EnvCheckDialog';
 const ChatPage = lazy(() => import('@/pages/ChatPage'));
 const SettingsWorkspace = lazy(() => import('@/features/settings/SettingsWorkspace'));
 const ModelWorkspace = lazy(() => import('@/features/model/ModelWorkspace'));
-const ApiStatusWorkspace = lazy(() => import('@/features/apiStatus/ApiStatusWorkspace'));
 
-type WorkspaceMode = 'model' | 'chat' | 'settings' | 'apiStatus';
+type WorkspaceMode = 'model' | 'chat' | 'settings';
 
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
-  if (view === 'apiStatus') return 'apiStatus';
-  if (view === 'settings' || view === 'tools' || view === 'kernel' || view === 'agent' || view === 'usage' || view === 'logs') return 'settings';
-  return 'model';
+  // apiStatus 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
+  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs') return 'model';
+  return 'settings';
 }
 
 export default function WorkspaceShell() {
@@ -32,8 +31,6 @@ export default function WorkspaceShell() {
         return <ChatPage />;
       case 'settings':
         return <SettingsWorkspace />;
-      case 'apiStatus':
-        return <ApiStatusWorkspace />;
       default:
         return <ModelWorkspace />;
     }

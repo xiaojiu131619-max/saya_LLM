@@ -64,7 +64,7 @@ export default function ThemeToggleButton({ theme, onClick, className = '' }: Th
       onClick={handleClick}
       className={`group relative flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-md border transition-[transform,colors] duration-200 hover:-translate-y-px active:scale-95 ${
         dark
-          ? 'border-[var(--text-primary)] bg-[var(--app-bg)] text-[var(--surface-muted)]'
+          ? 'border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)]'
           : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)]'
       } ${className}`}
       title={label}
@@ -79,7 +79,7 @@ export default function ThemeToggleButton({ theme, onClick, className = '' }: Th
       />
       <span className="absolute inset-0 m-auto flex h-4 w-4 items-center justify-center">
         <Moon
-          className={`absolute h-4 w-4 text-[var(--surface-muted)] transition-all duration-200 ${
+          className={`absolute h-4 w-4 text-[var(--text-secondary)] transition-all duration-200 ${
             dark ? 'rotate-0 scale-100 opacity-100' : 'rotate-45 scale-50 opacity-0'
           }`}
         />

@@ -13,6 +13,7 @@ import {
 import ThemeToggleButton from '@/components/ThemeToggleButton';
 import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
+import ApiStatusPage from '@/features/apiStatus/ApiStatusPage';
 import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
@@ -70,6 +71,8 @@ export default function ModelWorkspace() {
   const [apiRuntimeStats, setApiRuntimeStats] = useState<MessageStats | undefined>();
   const detailOpen = state.currentView === 'modelLoad';
   const llamaLogsOpen = state.currentView === 'llamaLogs';
+  // API 状态与 llama 日志同级：保留左侧边栏，在右侧内容区展示。
+  const apiStatusOpen = state.currentView === 'apiStatus';
   const selectedModel = state.models.find((model) => model.id === state.selectedModelId);
   const loadedModel = state.models.find((model) => model.status === 'loaded')
     ?? state.models.find((model) => model.id === state.activeModelId);
@@ -193,7 +196,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              !detailOpen && !llamaLogsOpen && !apiStatusOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -221,6 +224,7 @@ export default function ModelWorkspace() {
             vramUsage={formatGbPair(systemStats.vramUsed, systemStats.vramTotal)}
             ramUsage={formatGbPair((systemStats.ramUsage / 100) * systemStats.ramTotal, systemStats.ramTotal)}
             linkState={linkState}
+            active={apiStatusOpen}
             onOpenDetails={() => dispatch({ type: 'SET_VIEW', payload: 'apiStatus' })}
           />
           <LlamaLogsCard
@@ -252,10 +256,10 @@ export default function ModelWorkspace() {
             <button
               onClick={openSettings}
               className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]/40"
-              title="打开设置"
+              title="打开软件设置"
             >
               <Settings className="h-4 w-4 flex-shrink-0" />
-              <span className="truncate">设置</span>
+              <span className="truncate">软件设置</span>
             </button>
           </div>
         </div>
@@ -284,10 +288,10 @@ export default function ModelWorkspace() {
         )}
 
         <div
-          key={llamaLogsOpen ? 'llama-logs' : detailOpen ? 'model-detail' : 'model-list'}
+          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : detailOpen ? 'model-detail' : 'model-list'}
           className="anim-fade-rise min-h-0 flex-1 overflow-hidden"
         >
-          {llamaLogsOpen ? <LlamaLogsPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
+          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
         </div>
       </section>
     </div>
@@ -346,7 +350,7 @@ function LlamaLogsCard({ running, active, onOpen }: { running: boolean; active: 
   );
 }
 
-function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, onOpenDetails }: {
+function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, active, onOpenDetails }: {
   running: boolean;
   port: number;
   tokensPerSec: string;
@@ -355,6 +359,7 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
   vramUsage: string;
   ramUsage: string;
   linkState: string;
+  active?: boolean;
   onOpenDetails: () => void;
 }) {
   const LinkIcon = running ? Wifi : WifiOff;
@@ -363,12 +368,14 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
     <button
       type="button"
       onClick={onOpenDetails}
-      className="block w-full border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40"
+      className={`block w-full border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40 ${
+        active ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
+      }`}
       title="查看 API 状态详情"
     >
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
-          <Server className="h-3.5 w-3.5 flex-shrink-0" />
+          <Server className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)]' : ''}`} />
           <span>服务状态</span>
         </div>
         <div className="flex items-center gap-1">

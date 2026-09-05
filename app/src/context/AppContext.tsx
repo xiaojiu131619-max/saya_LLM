@@ -190,7 +190,8 @@ const initialState: AppState = {
   backendAvailable: false, serverRunning: false, serverPort: storedUi.serverPort ?? 8080,
   apiConfig: {
     enabled: storedApiConfig.enabled ?? false,
-    host: storedApiConfig.host ?? '0.0.0.0',
+    // 监听地址不再单独配置：关闭对外时保持仅本机回环。
+    host: '127.0.0.1',
     hasApiKey: false,
   },
   modelDirs: [], appStatus: '启动桌面版并选择本地 GGUF 模型目录后才会显示真实数据。',
@@ -345,8 +346,13 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, currentView: action.payload };
     case 'SET_THEME':
       return { ...state, theme: action.payload };
-    case 'TOGGLE_THEME':
-      return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
+    case 'TOGGLE_THEME': {
+      // 手动切换的同时把主题模式落为显式的浅色/深色。
+      // 若仍停留在 system 模式，跟随系统的 effect 会立刻按系统偏好覆盖这次切换，
+      // 表现为「跟随系统时点按钮无效」。
+      const next: ThemeType = state.theme === 'dark' ? 'light' : 'dark';
+      return { ...state, theme: next, themeMode: next };
+    }
     case 'SET_THEME_MODE': {
       // 切到跟随系统时立刻按当前系统偏好同步一次生效主题，避免 UI 停留在旧值。
       let nextTheme = state.theme;
@@ -870,9 +876,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
             type: 'SET_API_CONFIG',
             payload: {
               enabled: config.api_enabled ?? false,
-              host: config.api_enabled
-                ? config.api_host || '0.0.0.0'
-                : (config.api_host && config.api_host !== '127.0.0.1' ? config.api_host : storedApiConfig.host ?? '0.0.0.0'),
+              // 监听地址跟随对外开关：开启自动适配局域网（0.0.0.0），关闭保持仅本机。
+              host: config.api_enabled ? '0.0.0.0' : '127.0.0.1',
               hasApiKey: resolvedHasApiKey,
               apiKey: resolvedSessionApiKey,
             },

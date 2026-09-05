@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme';
 export type ThemeType = 'dark' | 'light';
 // 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
 export type ThemeMode = 'system' | ThemeType;
