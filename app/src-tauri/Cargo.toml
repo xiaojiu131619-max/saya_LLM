@@ -1,6 +1,6 @@
 [package]
 name = "agent-llm"
-version = "0.3.1"
+version = "0.4.0"
 description = "Agent LLM - local GGUF launcher with llama.cpp runner and hardware monitoring"
 authors = ["sky"]
 license = "MIT"

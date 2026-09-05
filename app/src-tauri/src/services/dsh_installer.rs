@@ -1185,3 +1185,36 @@ pub fn compose_dsh_command_parts(
     ];
     Ok((node_path, args))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_version_parse() {
+        assert_eq!(parse_node_version("v22.19.0"), Some((22, 19)));
+        assert_eq!(parse_node_version("24.15.0"), Some((24, 15)));
+        assert_eq!(parse_node_version("v20.11.1"), Some((20, 11)));
+        assert_eq!(parse_node_version("garbage"), None);
+    }
+
+    #[test]
+    fn node_version_compliance_follows_spike_conclusion() {
+        // Phase 0 定稿：^22.19 || >=24。
+        assert!(node_version_compliant("v22.19.0"));
+        assert!(node_version_compliant("v22.23.2"));
+        assert!(node_version_compliant("v24.15.0"));
+        assert!(node_version_compliant("v26.0.0"));
+        assert!(!node_version_compliant("v22.18.0"));
+        assert!(!node_version_compliant("v20.18.0"));
+        assert!(!node_version_compliant("v23.9.0"));
+        assert!(!node_version_compliant("bogus"));
+    }
+
+    #[test]
+    fn managed_dir_layout_matches_documented_convention() {
+        let dir = managed_node_dir("22.23.2");
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name, "node-v22.23.2-win-x64");
+    }
+}

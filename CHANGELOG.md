@@ -6,6 +6,34 @@
 
 ---
 
+## [0.4.0] - 2026-09-04
+
+接入 DeepSeek Harness（dsh）：软件从「本地模型启动器」延伸为「本地智能体工作台」。设置中心新增「Agent（智能体）」页，覆盖环境检测、托管安装、启停、日志与本地模型一键接入。dsh 以旁路进程（sidecar）方式由应用托管，仅在用户显式开启后运行，退出应用自动回收。
+
+### 新增
+
+**Agent（智能体）页（设置中心新标签）**
+
+- 环境检测：Node.js 运行时、dsh 包、数据目录、Web 端口、本地模型 API、命令执行 Shell，逐项进度上报；llama-server 由外部启动时也能通过直连探测正确识别
+- 托管安装：Node.js 22 LTS 便携版（SHASUMS256 校验）与固定版 `@deepseek-ai/dsh`，全程流式进度与日志、可取消；默认走 pnpm（445 包实测 40.8 秒），失败自动回退 npm 链路；未声明 engines 的包按实测锁定 Node 下限 `^22.19 || >=24`
+- 进程管理：开启/关闭 dsh（Job Object 整树回收 + 退出钩子联动 + 启动前孤儿清扫），健康轮询 `GET /`，启动日志解析 Web UI 地址锚点 `dsh web: <url>`
+- 运行日志：dsh stdout/stderr 实时流（与 llama 日志分离），支持实时/暂停、复制、导出、清空
+- 本地模型一键接入：真实小补全校验（容忍推理模型 `reasoning_content`）→ 备份并写入 `$DSH_HOME/settings.yaml`（只维护 `agent-llm-local` 提供方与 `agent-default-model` 两键，用户其余配置原样保留）→ dsh 运行中自动重启生效；解除接入回滚干净
+- 数据管理：新增「清除 dsh 会话记录」「清理 dsh 安装仓库缓存（pnpm store）」两项，与既有确认弹窗体系一致
+
+### 变更
+
+- 配置 `config.json` 新增 `dsh` 段（端口、锁定版本、工作区、绑定信息；serde default 平滑迁移，老配置无需改动）
+- dsh 包安装工具链锁定：Node v22.23.2 便携版、pnpm@10.17.1（经托管 Node 自带 corepack）、`@deepseek-ai/dsh@0.1.1-rc.2`；升级需在界面显式操作
+- pnpm 构建脚本白名单（node-pty / koffi / protobufjs 等）随安装预写，保证终端/PTY 等原生能力与 npm 安装对齐
+
+### 安全
+
+- dsh 为上游开发者预览版：页面常驻安全提示（实验性、可执行模型生成的命令与代码）；默认仅绑定本机回环 llama-server，无用户确认不启动、不静默自启
+- 所有子进程均为参数列表调用（无 shell 拼接）；Node/dsh 下载做官方校验和验证；`settings.yaml` 写入前自动备份
+
+---
+
 ## [Unreleased]
 
 ### 文档修正

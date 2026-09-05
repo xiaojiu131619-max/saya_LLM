@@ -1913,3 +1913,9 @@ export async function dshUnbindModel() {
   if (!isDesktopRuntime()) return;
   await invoke('dsh_unbind_model');
 }
+
+/** dsh 数据清理：sessions = 会话记录；store = pnpm 安装仓库缓存。 */
+export async function dshCleanupData(kind: 'sessions' | 'store') {
+  if (!isDesktopRuntime()) return null;
+  return invoke<string>('dsh_cleanup_data', { kind });
+}

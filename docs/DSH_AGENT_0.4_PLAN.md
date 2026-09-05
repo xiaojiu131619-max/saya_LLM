@@ -5,7 +5,7 @@
 > 目标版本：**0.4.0**
 > 上游项目：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT，开发者预览）
 > 关联文档：[ROADMAP_0.3.0_1.0.0.md](ROADMAP_0.3.0_1.0.0.md)（0.4.0 是其「1.0.0 Agent 深度强化」目标的落地前置）
-> 状态：**Phase 0 已完成（2026-09-04）**，第 9 章 7 项已全部定稿，见 [DSH_SPIKE_RECORD.md](DSH_SPIKE_RECORD.md)；Phase 1 实施中
+> 状态：**已实现并发布（2026-09-04，v0.4.0）**。Phase 0-5 全部完成；实施结论与实测证据见 [DSH_SPIKE_RECORD.md](DSH_SPIKE_RECORD.md)（第 9 章定稿、pnpm 提速、干净环境说明均已回填）
 
 ---
 

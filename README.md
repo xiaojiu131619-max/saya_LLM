@@ -34,19 +34,26 @@ Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动�
 - 接口状态实时检测（`/health`、`/v1/models`、响应延迟），ctx 使用 / 输出速度 / 首字延迟 / 接口延迟实时指标
 - 从接口模型列表一键添加软件内模型，自动携带能力标签
 
+### Agent（智能体）
+- 接入 DeepSeek Harness（dsh，MIT 开发者预览）：把本地模型变成带工作区、命令执行、子代理与任务审批的智能体
+- 应用托管 dsh 旁路进程：环境检测、托管安装（Node.js + dsh 固定版本，pnpm 加速）、界面化开启/关闭、运行日志实时可见
+- 本地模型一键接入：把当前加载的 llama-server 模型写为 dsh 默认提供方（真实对话校验），浏览器打开 dsh Web UI 即可用本地模型跑智能体任务
+- 安全边界：仅在显式开启后运行，默认只连本机模型，退出应用自动回收进程树；dsh 为上游实验性版本，页面内置风险提示
+
 ### 其他
 - 使用统计：token 用量、日历热力图、模型占比（设置中心）
 - 深色 / 浅色 / 跟随系统主题，系统强调色同步，Win11 Mica / Win10 毛玻璃窗口材质
-- 数据管理：模型扫描缓存清理、配置重置、出厂重置
+- 数据管理：模型扫描缓存清理、dsh 会话记录与安装仓库缓存清理、配置重置、出厂重置
 
 ## 快速开始
 
 ### 方式一：下载 Release（推荐）
 
-1. 从 [Releases](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest) 下载 `Agent_LLM_Portable_v0.3.1.zip`，解压后运行 `agent-llm.exe`
+1. 从 [Releases](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest) 下载 `Agent_LLM_Portable_v0.4.0.zip`，解压后运行 `agent-llm.exe`
 2. 进入 **设置 → 核心更新**，选择与你的硬件匹配的 llama.cpp 版本下载（NVIDIA 选 CUDA，AMD / Intel 选 Vulkan，无 GPU 时选 CPU）
 3. 进入 **设置 → 模型目录**，添加包含 `.gguf` 文件的本地目录
 4. 在模型页选择模型、加载，即可开始对话
+5. （可选）进入 **设置 → Agent（智能体）**，安装 dsh 并把当前模型接入，即可在浏览器中使用本地智能体工作台
 
 > 便携包只包含应用、启动脚本和用于后续下载的空资源目录，不包含 `llama-server.exe` 或 DLL。模型文件也不在本项目中。推荐到 [魔搭 ModelScope](https://www.modelscope.cn/) 搜索 `GGUF` 量化版下载；应用内的「魔搭下载」按钮可直接跳转。
 

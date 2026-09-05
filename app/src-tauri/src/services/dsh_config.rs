@@ -9,7 +9,7 @@
 //! - 接入校验 = `/v1/models` 之外再做一次真实小补全：Qwen 系推理模型的回复在
 //!   `reasoning_content`、正式回答在 `content`，两者任一非空即认为链路可用。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_yaml::Value;
@@ -28,12 +28,11 @@ fn settings_path() -> PathBuf {
 }
 
 /// 读取 settings.yaml 为 YAML 值；文件不存在或为空时返回空映射。
-fn read_root() -> Result<Value, String> {
-    let path = settings_path();
+fn read_root_at(path: &Path) -> Result<Value, String> {
     if !path.exists() {
         return Ok(Value::Mapping(serde_yaml::Mapping::new()));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("无法读取 settings.yaml：{}", e))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("无法读取 settings.yaml：{}", e))?;
     if text.trim().is_empty() {
         return Ok(Value::Mapping(serde_yaml::Mapping::new()));
     }
@@ -50,17 +49,24 @@ fn read_root() -> Result<Value, String> {
 }
 
 /// 备份并写入 settings.yaml。
-fn write_root(root: &Value) -> Result<(), String> {
-    let path = settings_path();
+fn write_root_at(path: &Path, root: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("无法创建 dsh-home 目录：{}", e))?;
     }
     if path.exists() {
         let backup = path.with_extension("yaml.bak");
-        std::fs::copy(&path, &backup).map_err(|e| format!("无法备份 settings.yaml：{}", e))?;
+        std::fs::copy(path, &backup).map_err(|e| format!("无法备份 settings.yaml：{}", e))?;
     }
     let text = serde_yaml::to_string(root).map_err(|e| format!("无法序列化 settings.yaml：{}", e))?;
-    std::fs::write(&path, text).map_err(|e| format!("无法写入 settings.yaml：{}", e))
+    std::fs::write(path, text).map_err(|e| format!("无法写入 settings.yaml：{}", e))
+}
+
+fn read_root() -> Result<Value, String> {
+    read_root_at(&settings_path())
+}
+
+fn write_root(root: &Value) -> Result<(), String> {
+    write_root_at(&settings_path(), root)
 }
 
 /// 在嵌套映射中按路径设值（中间节点不存在则创建）。
@@ -88,7 +94,17 @@ pub fn write_provider(
     model_id: &str,
     api_key: Option<&str>,
 ) -> Result<(), String> {
-    let mut root = read_root()?;
+    write_provider_at(&settings_path(), base_url, model_id, api_key)
+}
+
+/// `write_provider` 的路径参数化版本（单测使用）。
+pub(crate) fn write_provider_at(
+    path: &Path,
+    base_url: &str,
+    model_id: &str,
+    api_key: Option<&str>,
+) -> Result<(), String> {
+    let mut root = read_root_at(path)?;
     let authorization = format!("Bearer {}", api_key.unwrap_or("unused"));
     let provider = serde_yaml::to_value(serde_json::json!({
         "displayName": PROVIDER_DISPLAY_NAME,
@@ -114,12 +130,17 @@ pub fn write_provider(
     }))
     .map_err(|e| format!("无法构造默认模型配置：{}", e))?;
     set_nested(&mut root, &["agent-default-model"], default_model);
-    write_root(&root)
+    write_root_at(path, &root)
 }
 
-/// 移除本应用的提供方与默认模型设置（只清理属于本应用的键）。
+/// 移除本应用的提供方与默认模型设置（其他配置原样保留）。
 pub fn remove_provider() -> Result<(), String> {
-    let mut root = read_root()?;
+    remove_provider_at(&settings_path())
+}
+
+/// `remove_provider` 的路径参数化版本（单测使用）。
+pub(crate) fn remove_provider_at(path: &Path) -> Result<(), String> {
+    let mut root = read_root_at(path)?;
     let our_provider = Value::String(PROVIDER_ID.to_string());
     if let Some(providers) = root
         .get_mut("llm-pi-ai")
@@ -138,7 +159,7 @@ pub fn remove_provider() -> Result<(), String> {
             mapping.remove(&Value::String("agent-default-model".to_string()));
         }
     }
-    write_root(&root)
+    write_root_at(path, &root)
 }
 
 /// 真实小补全校验：直接请求 llama-server 的 OpenAI 兼容端点，
@@ -226,7 +247,12 @@ pub fn probe_models_at(port: u16) -> Result<Vec<String>, String> {
 
 /// 读取当前绑定信息（供状态查询；未绑定时返回空）。
 pub fn read_binding() -> (Option<String>, Option<String>) {
-    let Ok(root) = read_root() else {
+    read_binding_at(&settings_path())
+}
+
+/// `read_binding` 的路径参数化版本（单测使用）。
+pub(crate) fn read_binding_at(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(root) = read_root_at(path) else {
         return (None, None);
     };
     let provider = root.get("agent-default-model").and_then(|value| {
@@ -251,4 +277,96 @@ pub fn read_binding() -> (Option<String>, Option<String>) {
         .and_then(|url| url.as_str())
         .map(str::to_string);
     (model, base_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_settings(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-dsh-config-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("settings.yaml")
+    }
+
+    const USER_KEYS_YAML: &str = "ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\nagent-presets:\n  default: minimal\n";
+
+    #[test]
+    fn write_read_roundtrip_and_user_keys_preserved() {
+        let path = temp_settings("roundtrip");
+        std::fs::write(&path, USER_KEYS_YAML).unwrap();
+
+        write_provider_at(&path, "http://127.0.0.1:8080", "demo-model", None).unwrap();
+        let (model, base_url) = read_binding_at(&path);
+        assert_eq!(model.as_deref(), Some("demo-model"));
+        assert_eq!(base_url.as_deref(), Some("http://127.0.0.1:8080/v1"));
+
+        // 用户自己的键在写入后必须原样保留。
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("welcomeNoticeVersion"));
+        assert!(text.contains("agent-presets"));
+
+        // 备份文件在首次写入时生成。
+        assert!(path.with_extension("yaml.bak").exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn remove_provider_keeps_user_keys_and_foreign_default() {
+        let path = temp_settings("remove");
+        std::fs::write(&path, USER_KEYS_YAML).unwrap();
+        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None).unwrap();
+
+        // 用户手动把默认模型改成别的提供方时，解除接入不得误删。
+        let mut root = read_root_at(&path).unwrap();
+        set_nested(
+            &mut root,
+            &["agent-default-model"],
+            serde_yaml::to_value(serde_json::json!({"provider": "other", "model": "x"})).unwrap(),
+        );
+        write_root_at(&path, &root).unwrap();
+
+        remove_provider_at(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("agent-llm-local"));
+        assert!(text.contains("other"), "用户手动设置的默认模型应保留");
+        assert!(text.contains("welcomeNoticeVersion"));
+
+        // 默认模型仍指向本应用时才一并移除。
+        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None).unwrap();
+        remove_provider_at(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("agent-default-model"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn binding_absent_when_default_points_elsewhere() {
+        let path = temp_settings("foreign");
+        std::fs::write(&path, USER_KEYS_YAML).unwrap();
+        let (model, base_url) = read_binding_at(&path);
+        assert_eq!(model, None);
+        assert_eq!(base_url, None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn set_nested_creates_intermediate_maps() {
+        let mut root = Value::Mapping(serde_yaml::Mapping::new());
+        set_nested(
+            &mut root,
+            &["a", "b", "c"],
+            Value::String("v".to_string()),
+        );
+        assert_eq!(
+            root["a"]["b"]["c"].as_str(),
+            Some("v")
+        );
+    }
 }

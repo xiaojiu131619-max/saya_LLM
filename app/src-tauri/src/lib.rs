@@ -109,6 +109,7 @@ pub fn run() {
             commands::dsh::dsh_clear_logs,
             commands::dsh::dsh_bind_model,
             commands::dsh::dsh_unbind_model,
+            commands::dsh::dsh_cleanup_data,
             show_main_window,
         ])
         .setup(move |app| {

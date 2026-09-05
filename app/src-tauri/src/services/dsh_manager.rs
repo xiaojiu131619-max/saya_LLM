@@ -211,10 +211,29 @@ pub fn is_dsh_running() -> bool {
 // 启动 / 停止
 // ---------------------------------------------------------------------------
 
-/// 从日志行解析 Web UI 地址（锚点：`dsh web: http://...`）。
+/// 从日志行解析 Web UI 地址（锚点：`dsh web: http://...`，取首个空白前的片段）。
 fn parse_web_url(line: &str) -> Option<String> {
     let idx = line.find("dsh web: http")?;
-    Some(line[idx + "dsh web: ".len()..].trim().to_string())
+    let remainder = line[idx + "dsh web: ".len()..].trim();
+    Some(remainder.split_whitespace().next()?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_url_parse_from_startup_log() {
+        assert_eq!(
+            parse_web_url("dsh web: http://127.0.0.1:3080"),
+            Some("http://127.0.0.1:3080".to_string())
+        );
+        assert_eq!(
+            parse_web_url("2026-09-04 info dsh web: http://127.0.0.1:3081  ready"),
+            Some("http://127.0.0.1:3081".to_string())
+        );
+        assert_eq!(parse_web_url("listening on port 3000"), None);
+    }
 }
 
 /// 健康探测：`GET /` 返回 200 即就绪（spike 实测；/health 等路径均为 404）。

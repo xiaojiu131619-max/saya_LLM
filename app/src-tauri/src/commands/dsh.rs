@@ -250,6 +250,35 @@ pub fn dsh_clear_logs() {
     dsh_manager::clear_dsh_logs();
 }
 
+/// dsh 数据清理（Phase 4 数据管理）：kind = "sessions"（会话记录）| "store"（pnpm 仓库缓存）。
+#[tauri::command]
+pub fn dsh_cleanup_data(kind: String) -> Result<String, String> {
+    match kind.as_str() {
+        "sessions" => {
+            if dsh_manager::is_dsh_running() {
+                return Err("dsh 正在运行：请先关闭 dsh 再清理会话记录。".to_string());
+            }
+            let sessions = dsh_installer::dsh_home_dir().join("sessions");
+            if !sessions.exists() {
+                return Ok("没有可清理的会话记录。".to_string());
+            }
+            std::fs::remove_dir_all(&sessions)
+                .map_err(|e| format!("无法清理会话记录：{}", e))?;
+            std::fs::create_dir_all(&sessions).map_err(|e| e.to_string())?;
+            Ok("会话记录已清理。".to_string())
+        }
+        "store" => {
+            let store = dsh_installer::pnpm_store_dir();
+            if !store.exists() {
+                return Ok("没有可清理的安装仓库缓存。".to_string());
+            }
+            std::fs::remove_dir_all(&store).map_err(|e| format!("无法清理仓库缓存：{}", e))?;
+            Ok("安装仓库缓存已清理（约 270 MB）；下次安装/重装 dsh 会重新下载。".to_string())
+        }
+        other => Err(format!("未知的清理类型：{}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3：本地模型接入（F5）
 // ---------------------------------------------------------------------------

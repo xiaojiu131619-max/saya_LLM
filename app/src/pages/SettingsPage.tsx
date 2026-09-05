@@ -39,6 +39,7 @@ import {
   resetDesktopAppConfig,
   revealDesktopPath,
   scanDesktopModels,
+  dshCleanupData,
   setCloseToTray,
   stopDesktopServer,
   toFrontendModel,
@@ -48,6 +49,8 @@ import {
 type DataActionKind =
   | 'clear-frontend-state'
   | 'clear-model-cache'
+  | 'clear-dsh-sessions'
+  | 'clear-dsh-store'
   | 'reset-app-config'
   | 'factory-reset';
 
@@ -297,6 +300,17 @@ export default function SettingsPage() {
       case 'clear-model-cache':
         await handleClearModelCache();
         break;
+      case 'clear-dsh-sessions':
+      case 'clear-dsh-store': {
+        const kind = pendingDataAction === 'clear-dsh-sessions' ? 'sessions' : 'store';
+        try {
+          const message = await dshCleanupData(kind);
+          setDataMessage(message ?? '清理完成。');
+        } catch (error) {
+          setDataMessage(`清理失败：${String(error)}`);
+        }
+        break;
+      }
       case 'reset-app-config':
         await handleResetAppConfig();
         break;
@@ -339,6 +353,26 @@ export default function SettingsPage() {
       ),
       footnote: '仅清空 AppData\\Roaming\\AgentLLM\\cache 目录中的扫描结果。',
       confirmLabel: '清除缓存',
+      tone: 'warning',
+    },
+    'clear-dsh-sessions': {
+      title: '清除 dsh 会话记录',
+      description: '删除智能体（dsh）的历史会话数据。dsh 的设置、模型接入与凭据不受影响。',
+      bullets: [
+        'dsh 的全部历史会话与轨迹（dsh-home\\sessions）',
+      ],
+      footnote: 'dsh 正在运行时无法清理；模型接入配置（settings.yaml）不会被删除。',
+      confirmLabel: '清除会话',
+      tone: 'warning',
+    },
+    'clear-dsh-store': {
+      title: '清理 dsh 安装仓库缓存',
+      description: '删除安装 dsh 时的 pnpm 下载缓存（约 270 MB），释放磁盘空间。',
+      bullets: [
+        'pnpm 内容寻址缓存（AppData\\Roaming\\AgentLLM\\dsh\\pnpm-store）',
+      ],
+      footnote: '已安装的 dsh 本体不受影响；下次「重装 dsh」时需要重新下载。',
+      confirmLabel: '清理缓存',
       tone: 'warning',
     },
     'reset-app-config': {
@@ -644,6 +678,34 @@ export default function SettingsPage() {
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   清除
+                </button>
+              </SettingRow>
+
+              <div className="border-t border-[var(--border-subtle)]" />
+              <SettingRow
+                label="清除 dsh 会话记录"
+                description="删除智能体（dsh）的历史会话数据；dsh 设置与模型接入不受影响。"
+              >
+                <button
+                  onClick={() => setPendingDataAction('clear-dsh-sessions')}
+                  className="flex items-center gap-1 text-sm text-[var(--state-danger)] hover:underline"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  清除
+                </button>
+              </SettingRow>
+
+              <div className="border-t border-[var(--border-subtle)]" />
+              <SettingRow
+                label="清理 dsh 安装仓库缓存"
+                description="删除安装 dsh 时的 pnpm 下载缓存（约 270 MB）；已安装的 dsh 本体不受影响。"
+              >
+                <button
+                  onClick={() => setPendingDataAction('clear-dsh-store')}
+                  className="flex items-center gap-1 text-sm text-[var(--state-danger)] hover:underline"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  清理
                 </button>
               </SettingRow>
 
