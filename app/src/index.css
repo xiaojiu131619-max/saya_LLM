@@ -378,6 +378,17 @@
     gap: 0.375rem;
   }
 
+  /* 顶栏横竖排按容器实际宽度切换（而非视口断点）：
+     名字/输入框 + 指标区(480px) + 按钮区三段并排放得下才横排。 */
+  @container (min-width: 1340px) {
+    .model-load-summary-row { flex-direction: row; align-items: center; }
+    .model-load-summary-actions { flex-shrink: 0; justify-content: flex-end; }
+    .model-load-summary-metrics { width: 480px; flex-shrink: 0; }
+  }
+  @container (min-width: 1460px) {
+    .model-load-summary-metrics { width: 560px; }
+  }
+
   @container (min-width: 760px) {
     .model-toolbar-grid {
       grid-template-columns: minmax(220px, 1fr) auto minmax(220px, auto);

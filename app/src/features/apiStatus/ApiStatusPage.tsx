@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, Terminal, WifiOff, XCircle, Zap } from 'lucide-react';
+import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, WifiOff, XCircle, Zap } from 'lucide-react';
 import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions, sessionBelongsToModel } from '@/features/chat/chatUtils';
@@ -162,7 +162,7 @@ export default function ApiStatusPage() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="mx-auto max-w-5xl">
+        <div className="mx-auto max-w-5xl min-[1600px]:max-w-[1360px]">
           <PageHeader
             icon={Activity}
             title="API 状态"
@@ -215,28 +215,13 @@ export default function ApiStatusPage() {
                 <Gauge className="h-4 w-4 text-[var(--accent)]" />
                 实时运行
               </h2>
-              <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">自动刷新：状态 2 秒，日志 1 秒</span>
+              <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">自动刷新：状态 2 秒</span>
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <LiveMetric icon={Gauge} label="ctx 使用" value={formatCtxUsage(latestStats)} note={ctxPercent !== undefined ? `${Math.round(ctxPercent)}%` : '等待生成统计'} />
               <LiveMetric icon={Zap} label="输出速度" value={formatLiveMetric(latestStats?.tokensPerSec, ' tok/s')} note="最近一次响应" />
               <LiveMetric icon={Clock3} label="首字延迟" value={formatLiveMetric(latestStats?.firstTokenDelay, 's', 2)} note="TTFT" />
               <LiveMetric icon={Activity} label="接口延迟" value={result?.latencyMs != null ? `${result.latencyMs} ms` : '暂无'} note={formatTime(lastCheckedAt)} />
-            </div>
-            <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-                <Terminal className="h-4 w-4 text-[var(--accent)]" />
-                最新运行日志
-              </div>
-              {serverLogs.length > 0 ? (
-                <div className="mono-font max-h-28 space-y-1 overflow-y-auto text-[11px] leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-                  {serverLogs.map((line, index) => (
-                    <div key={`${index}-${line}`} className="truncate">{line}</div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">暂无运行日志。</div>
-              )}
             </div>
           </section>
 

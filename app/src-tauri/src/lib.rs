@@ -90,6 +90,7 @@ pub fn run() {
             commands::env_check::get_env_check_done,
             commands::benchmark::start_benchmark,
             commands::benchmark::start_auto_tune,
+            commands::benchmark::cancel_auto_tune,
             commands::updater::check_for_update,
             commands::updater::list_recent_releases,
             commands::updater::download_and_update,

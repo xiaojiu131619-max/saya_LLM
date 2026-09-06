@@ -129,7 +129,7 @@ export default function LlamaLogsPage() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-6">
-        <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
+        <div className="mx-auto flex min-h-0 w-full max-w-5xl min-[1600px]:max-w-[1360px] flex-1 flex-col">
           <PageHeader
             icon={Terminal}
             title="llama-server 日志"

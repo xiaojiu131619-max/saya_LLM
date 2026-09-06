@@ -123,7 +123,7 @@ export default function HomePage() {
       onPointerLeave={handleSurfacePointerLeave}
     >
       <header className="flex-shrink-0 border-b border-[var(--border)] bg-[var(--app-bg)] px-4 py-4 sm:px-6">
-        <div className="mx-auto flex max-w-[1180px] min-w-0 items-center gap-3">
+        <div className="mx-auto flex max-w-[1180px] min-[1600px]:max-w-[1520px] min-w-0 items-center gap-3">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center text-[var(--accent)]">
             <Database className="h-5 w-5" />
           </div>
@@ -137,7 +137,7 @@ export default function HomePage() {
       </header>
 
       <div className="model-toolbar flex-shrink-0 border-b border-[var(--border)] bg-[var(--surface-hover)] px-4 py-3 sm:px-6">
-        <div className="model-toolbar-grid mx-auto max-w-[1180px]">
+        <div className="model-toolbar-grid mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px]">
           <div className="flex h-9 min-w-0 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
             <Search className="h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)]" />
             <input
@@ -176,7 +176,7 @@ export default function HomePage() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
-        <div className="model-list-container mx-auto max-w-[1180px]">
+        <div className="model-list-container mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px]">
           <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
             <span className="px-0.5 py-1">
               {state.models.length} 个模型

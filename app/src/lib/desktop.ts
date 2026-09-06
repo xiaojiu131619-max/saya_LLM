@@ -246,6 +246,13 @@ export async function startAutoTune(config: AutoTuneConfig) {
   await invoke('start_auto_tune', { config });
 }
 
+// 请求停止正在运行的自动调参：后端置位取消标记并停掉测量中的 llama-server，
+// 调参任务会在当前测量点结束后发出 autotune:cancelled 事件。
+export async function cancelAutoTune() {
+  if (!isDesktopRuntime()) return;
+  await invoke('cancel_auto_tune');
+}
+
 export async function saveTuneResult(entry: TuneHistoryEntry) {
   if (!isDesktopRuntime()) return;
   await invoke('save_tune_result', { entry });

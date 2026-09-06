@@ -259,7 +259,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
                     新 API Key
                   </div>
                   <div className="flex min-w-0 items-center gap-2">
-                    <code className="mono-font min-w-0 flex-1 truncate rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] px-3 py-2 text-xs text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-primary)]">
+                    <code className="mono-font min-w-0 flex-1 truncate rounded-lg border border-[var(--accent-subtle)] bg-[var(--app-bg)] px-3 py-2 text-xs text-[var(--text-primary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-primary)]" title={newApiKey}>
                       {newApiKey}
                     </code>
                     <button

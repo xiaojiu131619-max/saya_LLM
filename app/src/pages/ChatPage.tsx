@@ -1140,6 +1140,8 @@ export default function ChatPage() {
     ?? (activeSession && modelMessages.length > 0 ? '未记录模型' : activeModel?.name);
   const chatBubbleModelName = activeSessionModelName ?? '未记录模型';
   const compactSidebar = useMediaQuery('(max-width: 959px)');
+  // 超宽视口：消息列与输入框同步放宽到 max-w-4xl（896px）。
+  const wideViewport = useMediaQuery('(min-width: 1600px)');
   const sidebarCollapsed = state.sidebarCollapsed || compactSidebar;
   const sidebarWidth = sidebarCollapsed ? 64 : 288;
   const currentReasoningOption = REASONING_OPTIONS.find((item) => item.mode === state.chatConfig.reasoningMode) ?? REASONING_OPTIONS[1];
@@ -1195,6 +1197,7 @@ export default function ChatPage() {
           }
           dispatch({ type: 'SET_VIEW', payload: 'settings' });
         }}
+        onOpenAgent={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
         onOpenModelLoad={handleOpenModelLoad}
         onToggleTheme={() => dispatch({ type: 'TOGGLE_THEME' })}
         onToggleCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
@@ -1294,7 +1297,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               ) : (
-                <div style={{ position: 'relative', width: '100%', maxWidth: 768, margin: '0 auto', minWidth: 0 }}>
+                <div style={{ position: 'relative', width: '100%', maxWidth: wideViewport ? 896 : 768, margin: '0 auto', minWidth: 0 }}>
                   <div style={{ height: virtualizer.getTotalSize() }} />
                   {virtualizer.getVirtualItems().map((virtualRow) => {
                     const msg = modelMessages[virtualRow.index];
@@ -1350,7 +1353,7 @@ export default function ChatPage() {
             </div>
 
             <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-[var(--surface)] via-[var(--surface)]/95 to-transparent px-[clamp(12px,4vw,48px)] pb-4 pt-10 dark:from-[var(--app-bg)] dark:via-[var(--app-bg)]/95">
-              <div className="pointer-events-auto mx-auto w-full max-w-3xl min-w-0">
+              <div className="pointer-events-auto mx-auto w-full max-w-3xl min-[1600px]:max-w-4xl min-w-0">
                 {(pendingAttachments.length > 0 || attachmentError || attachmentNotice || stopMessage) && (
                   <div className="mb-2 space-y-2">
                     {pendingAttachments.length > 0 && (

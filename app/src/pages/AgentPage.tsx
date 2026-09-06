@@ -455,7 +455,7 @@ export default function AgentPage() {
                 </div>
                 <div className="flex justify-between gap-3 sm:block">
                   <dt className="text-secondary-custom">Web UI 地址</dt>
-                  <dd className="mono-font truncate text-primary-custom">
+                  <dd className="mono-font truncate text-primary-custom" title={running ? webUrl ?? status.web_url : status.web_url}>
                     {running ? webUrl ?? status.web_url : status.web_url}
                   </dd>
                 </div>
@@ -546,6 +546,65 @@ export default function AgentPage() {
             {!installing && actionMessage && (
               <p className="mt-3 flex items-center gap-1.5 text-xs text-secondary-custom">
                 <Info className="h-3.5 w-3.5 flex-shrink-0" /> {actionMessage}
+              </p>
+            )}
+          </section>
+
+          {/* 本地模型接入（F5，Phase 3）：排在环境检测上方，紧跟运行状态 */}
+          <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-primary-custom">本地模型接入</h2>
+              {status?.bound_model ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]">
+                  <Check className="h-3 w-3" /> 已接入 {status.bound_model}
+                </span>
+              ) : (
+                <span className="rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-secondary-custom">
+                  未接入
+                </span>
+              )}
+            </div>
+            {status?.bound_model ? (
+              <div className="space-y-1.5 text-xs">
+                <p className="text-secondary-custom">
+                  默认提供方 <span className="mono-font text-primary-custom">agent-llm-local</span>
+                  {' → '}
+                  <span className="mono-font text-primary-custom">{status.bound_base_url ?? ''}</span>
+                  ，dsh 新会话将默认使用模型 <span className="text-primary-custom">{status.bound_model}</span>。
+                </p>
+                <p className="text-secondary-custom">在浏览器打开 dsh 界面即可直接用本地模型跑智能体任务。</p>
+              </div>
+            ) : (
+              <p className="text-xs leading-6 text-secondary-custom">
+                把当前加载的本地模型写为 dsh 的默认提供方（agent-llm-local），接入前会先用一次真实对话校验链路。
+                请先在「模型」页加载模型；若 dsh 正在运行会自动重启以生效。
+              </p>
+            )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {status?.bound_model ? (
+                <button
+                  onClick={handleUnbind}
+                  disabled={binding || starting || stopping || installing || !isDesktopRuntime()}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--state-danger-border)] px-3 py-1.5 text-xs font-medium text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-bg)] disabled:opacity-40"
+                >
+                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                  解除接入
+                </button>
+              ) : (
+                <button
+                  onClick={handleBind}
+                  disabled={binding || starting || stopping || installing || !modelApiReady || !isDesktopRuntime()}
+                  title={!modelApiReady ? '请先在「模型」页加载模型' : '把当前加载的模型接入 dsh'}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                >
+                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
+                  接入当前加载的模型
+                </button>
+              )}
+            </div>
+            {binding && !progressMessage && (
+              <p className="mt-3 flex items-center gap-1.5 text-xs text-secondary-custom">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" /> 正在处理接入请求...
               </p>
             )}
           </section>
@@ -658,65 +717,6 @@ export default function AgentPage() {
                 })
               )}
             </div>
-          </section>
-
-          {/* 本地模型接入（F5，Phase 3） */}
-          <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold text-primary-custom">本地模型接入</h2>
-              {status?.bound_model ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]">
-                  <Check className="h-3 w-3" /> 已接入 {status.bound_model}
-                </span>
-              ) : (
-                <span className="rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-secondary-custom">
-                  未接入
-                </span>
-              )}
-            </div>
-            {status?.bound_model ? (
-              <div className="space-y-1.5 text-xs">
-                <p className="text-secondary-custom">
-                  默认提供方 <span className="mono-font text-primary-custom">agent-llm-local</span>
-                  {' → '}
-                  <span className="mono-font text-primary-custom">{status.bound_base_url ?? ''}</span>
-                  ，dsh 新会话将默认使用模型 <span className="text-primary-custom">{status.bound_model}</span>。
-                </p>
-                <p className="text-secondary-custom">在浏览器打开 dsh 界面即可直接用本地模型跑智能体任务。</p>
-              </div>
-            ) : (
-              <p className="text-xs leading-6 text-secondary-custom">
-                把当前加载的本地模型写为 dsh 的默认提供方（agent-llm-local），接入前会先用一次真实对话校验链路。
-                请先在「模型」页加载模型；若 dsh 正在运行会自动重启以生效。
-              </p>
-            )}
-            <div className="mt-3 flex flex-wrap gap-2">
-              {status?.bound_model ? (
-                <button
-                  onClick={handleUnbind}
-                  disabled={binding || starting || stopping || installing || !isDesktopRuntime()}
-                  className="flex items-center gap-1.5 rounded-md border border-[var(--state-danger-border)] px-3 py-1.5 text-xs font-medium text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-bg)] disabled:opacity-40"
-                >
-                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                  解除接入
-                </button>
-              ) : (
-                <button
-                  onClick={handleBind}
-                  disabled={binding || starting || stopping || installing || !modelApiReady || !isDesktopRuntime()}
-                  title={!modelApiReady ? '请先在「模型」页加载模型' : '把当前加载的模型接入 dsh'}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                >
-                  {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
-                  接入当前加载的模型
-                </button>
-              )}
-            </div>
-            {binding && !progressMessage && (
-              <p className="mt-3 flex items-center gap-1.5 text-xs text-secondary-custom">
-                <RefreshCw className="h-3.5 w-3.5 animate-spin" /> 正在处理接入请求...
-              </p>
-            )}
           </section>
         </div>
       </div>

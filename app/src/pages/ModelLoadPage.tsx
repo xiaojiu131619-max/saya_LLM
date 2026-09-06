@@ -1,18 +1,17 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2, ImagePlus } from 'lucide-react';
+import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { getServerApiKey, getDesktopSystemStats, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
 import type { AutoTuneConfig, AutoTuneProgress, AutoTuneResult, TuneRecord } from '@/lib/desktop';
-import { saveTuneResult, startAutoTune } from '@/lib/desktop';
+import { cancelAutoTune, saveTuneResult, startAutoTune } from '@/lib/desktop';
 import { computeVramCalibration } from '@/lib/vramCalibration';
 import { predictVramUsage, type VramPrediction } from '@/lib/vramEstimate';
 import { saveModelRunRecord, getModelRunRecords, type ModelRunRecord } from '@/lib/desktop';
-import { recommendForHardware } from '@/lib/vramRecommend';
-import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
+import type { ModelInfo, ModelLoadConfig } from '@/types';
 import type { LucideIcon } from 'lucide-react';
 import { DEFAULT_GPU_LAYERS_WHEN_UNKNOWN, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import ModelFamilyLogo from '@/components/ModelFamilyLogo';
-import { resolveApiName, suggestedApiName } from '@/lib/modelIdentity';
+import { suggestedApiName } from '@/lib/modelIdentity';
 import { MODEL_LOGO_LIBRARY, LOBEHUB_CUSTOM_PREFIX } from '@/lib/modelLogo';
 
 function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
@@ -96,135 +95,6 @@ function formatTag(tag: string) {
   return labels[tag] ?? tag;
 }
 
-type RecommendedLoadPreset = {
-  title: string;
-  description: string;
-  config: Partial<ModelLoadConfig>;
-  items: Array<{ label: string; value: string }>;
-  tone: 'normal' | 'warning';
-};
-
-function modelSizeGb(model: ModelInfo) {
-  return model.splitTotalSizeGb ?? model.fileSizeBytes / 1024 / 1024 / 1024;
-}
-
-function buildRecommendedLoadPreset(model: ModelInfo, stats?: SystemStats | null): RecommendedLoadPreset {
-  const sizeGb = modelSizeGb(model);
-  const layerCount = Math.max(0, model.blockCount ?? 0);
-  const isSplitModel = Boolean(model.splitCount && model.splitCount > 1);
-
-  // 能读到实测显存时，按显卡余量反推 ngl/ctx；读不到才退回「按文件体积保守」的 CPU 预设。
-  // 原先 40GB+ 体积启发式会盖掉硬件推荐，AMD 上 NVML 失败时更容易被推成 ngl=0，显存占不满。
-  const hardwareRecommendation = recommendForHardware(model, stats);
-  if (hardwareRecommendation) {
-    return {
-      title: '基于实测显存的推荐',
-      description: `按当前显存（${hardwareRecommendation.vramUsedGb.toFixed(1)} / ${hardwareRecommendation.vramTotalGb.toFixed(1)} GB）生成，预估占用 ${hardwareRecommendation.predictedTotalGb.toFixed(1)} GB。`,
-      tone: 'normal',
-      config: {
-        ctxLength: hardwareRecommendation.ctxLength,
-        gpuLayers: hardwareRecommendation.gpuLayers,
-        batchSize: 512,
-        physicalBatchSize: 512,
-        parallel: -1,
-        fastAttention: true,
-        kvCache: true,
-        kvUnified: true,
-        mmap: true,
-        mlock: false,
-        noWarmup: false,
-      },
-      items: [
-        { label: '上下文长度', value: formatCtx(hardwareRecommendation.ctxLength) },
-        { label: 'GPU 卸载', value: layerCount > 0 ? `${hardwareRecommendation.gpuLayers} / ${layerCount} 层` : '自动尽量使用 GPU' },
-        { label: '预估显存', value: `${hardwareRecommendation.predictedTotalGb.toFixed(1)} GB` },
-        { label: '启动预热', value: '启用' },
-      ],
-    };
-  }
-
-  if (isSplitModel && sizeGb > 100) {
-    return {
-      title: '超大分片模型推荐',
-      description: `已识别 ${model.splitCount} 个分片（约 ${formatGb(sizeGb)}）。未读到显存数据，先单 slot、短上下文验证，再逐步调高。`,
-      tone: 'warning',
-      config: {
-        ctxLength: 512,
-        gpuLayers: 0,
-        batchSize: 512,
-        physicalBatchSize: 512,
-        parallel: 1,
-        fastAttention: true,
-        kvCache: true,
-        kvUnified: true,
-        mmap: true,
-        mlock: false,
-        noWarmup: true,
-      },
-      items: [
-        { label: '上下文长度', value: '512 token' },
-        { label: 'GPU 卸载', value: '0 层' },
-        { label: 'parallel', value: '1' },
-        { label: '启动预热', value: '跳过' },
-      ],
-    };
-  }
-
-  if (sizeGb >= 40) {
-    return {
-      title: '大模型稳妥推荐',
-      description: `模型约 ${formatGb(sizeGb)}。未读到显存数据，先用短上下文验证加载，再逐步调高。`,
-      tone: 'warning',
-      config: {
-        ctxLength: 4096,
-        gpuLayers: 0,
-        batchSize: 512,
-        physicalBatchSize: 512,
-        parallel: 1,
-        fastAttention: true,
-        kvCache: true,
-        kvUnified: true,
-        mmap: true,
-        mlock: false,
-        noWarmup: true,
-      },
-      items: [
-        { label: '上下文长度', value: '4K token' },
-        { label: 'GPU 卸载', value: '0 层' },
-        { label: 'parallel', value: '1' },
-        { label: '启动预热', value: '跳过' },
-      ],
-    };
-  }
-
-  const ctxLength = clamp(model.ctxLength || RECOMMENDED_CTX_LENGTH, 512, RECOMMENDED_CTX_LENGTH);
-  const gpuLayers = recommendedGpuLayers(model.blockCount);
-  return {
-    title: '常规模型推荐',
-    description: '默认推荐：优先 GPU、保持 mmap，并发由 llama-server 自动管理。',
-    tone: 'normal',
-    config: {
-      ctxLength,
-      gpuLayers,
-      batchSize: 512,
-      physicalBatchSize: 512,
-      parallel: -1,
-      fastAttention: true,
-      kvCache: true,
-      kvUnified: true,
-      mmap: true,
-      mlock: false,
-      noWarmup: false,
-    },
-    items: [
-      { label: '上下文长度', value: formatCtx(ctxLength) },
-      { label: 'GPU 卸载', value: layerCount > 0 ? `${gpuLayers} / ${layerCount} 层` : '自动尽量使用 GPU' },
-      { label: 'parallel', value: '自动' },
-      { label: '启动预热', value: '启用' },
-    ],
-  };
-}
-
 export default function ModelLoadPage() {
   const { state, dispatch } = useApp();
   const model = state.models.find((m) => m.id === state.selectedModelId);
@@ -236,8 +106,9 @@ export default function ModelLoadPage() {
   const cancelLoadRef = useRef<(() => void) | null>(null);
   const [autoTuneRunning, setAutoTuneRunning] = useState(false);
   const [autoTuneLog, setAutoTuneLog] = useState<string[]>([]);
-  const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResult | null>(null);
   const [autoTuneApplied, setAutoTuneApplied] = useState(false);
+  // API 调用名草稿：输入过程中不落库，失焦/回车才算「输入结束」并保存。
+  const [apiNameDraft, setApiNameDraft] = useState<string | null>(null);
   const [logoMessage, setLogoMessage] = useState<string | null>(null);
   // 显存校准从该模型的运行记录派生：每条带实测显存的启动记录都参与修正
   // 「计算暂存 + 运行时」经验项（详见 vramCalibration.ts）。启动成功写入
@@ -257,6 +128,11 @@ export default function ModelLoadPage() {
   // 分项校准只作用于「计算 + 运行」经验项；整体兜底校准缩放总预测，分项 pills 不缩放。
   const calibrationIsScratch = calibration?.scratchRatio != null;
 
+  // 调参自动应用：事件监听闭包只建一次，通过 ref 拿到最新的应用函数与
+  // 调参开始时的模型，避免中途切换模型后把参数套错对象。
+  const autoTuneModelRef = useRef<ModelInfo | null>(null);
+  const applyTuneRef = useRef<(record: TuneRecord, target?: ModelInfo) => void>(() => {});
+
   // 自动调参进度事件监听（组件生命周期内常驻）。
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -265,13 +141,19 @@ export default function ModelLoadPage() {
       setAutoTuneLog((log) => [...log.slice(-59), progress.message]);
     }).then((unlisten) => unlisteners.push(unlisten));
     void listenDesktopEvent<AutoTuneResult>('autotune:done', (result) => {
-      setAutoTuneResult(result);
       setAutoTuneRunning(false);
       setAutoTuneLog((log) => [...log, `调参完成，最佳：ngl=${result.best.ngl} ctx=${result.best.ctx} kv=${result.best.kv} ts=${result.best.ts.toFixed(1)}`]);
+      // 调参结束自动应用最优参数（针对开始调参时的那个模型）。
+      const tuned = autoTuneModelRef.current;
+      if (tuned) applyTuneRef.current(result.best, tuned);
     }).then((unlisten) => unlisteners.push(unlisten));
     void listenDesktopEvent<{ error: string }>('autotune:error', (payload) => {
       setAutoTuneLog((log) => [...log, `自动调参失败：${payload.error}`]);
       setAutoTuneRunning(false);
+    }).then((unlisten) => unlisteners.push(unlisten));
+    void listenDesktopEvent<{ message?: string }>('autotune:cancelled', () => {
+      setAutoTuneRunning(false);
+      setAutoTuneLog((log) => [...log, '调参已停止。']);
     }).then((unlisten) => unlisteners.push(unlisten));
     return () => unlisteners.forEach((unlisten) => unlisten());
   }, []);
@@ -445,8 +327,8 @@ export default function ModelLoadPage() {
     if (!isDesktopRuntime() || autoTuneRunning || isLoading) return;
     setAutoTuneRunning(true);
     setAutoTuneLog([]);
-    setAutoTuneResult(null);
     setAutoTuneApplied(false);
+    autoTuneModelRef.current = model;
     try {
       const tuneConfig: AutoTuneConfig = {
         executable_path: 'resources/llama-server.exe',
@@ -470,7 +352,18 @@ export default function ModelLoadPage() {
     }
   };
 
-  const applyTuneRecord = (record: TuneRecord) => {
+  const stopAutoTuneRun = async () => {
+    if (!autoTuneRunning) return;
+    setAutoTuneLog((log) => [...log, '正在停止调参...']);
+    try {
+      await cancelAutoTune();
+    } catch {
+      // 取消命令失败时等待后端事件兜底
+    }
+    setAutoTuneRunning(false);
+  };
+
+  const applyTuneRecord = (record: TuneRecord, target: ModelInfo = model) => {
     const next: Partial<ModelLoadConfig> = {
       gpuLayers: record.ngl,
       ctxLength: record.ctx,
@@ -482,13 +375,13 @@ export default function ModelLoadPage() {
     };
     dispatch({
       type: 'UPDATE_MODEL_CONFIG',
-      payload: { modelId: model.id, config: next },
+      payload: { modelId: target.id, config: next },
     });
     setAutoTuneApplied(true);
     if (isDesktopRuntime()) {
       void saveTuneResult({
-        model_name: model.name,
-        model_path: model.filePath ?? '',
+        model_name: target.name,
+        model_path: target.filePath ?? '',
         ngl: record.ngl,
         ctx: record.ctx,
         kv: record.kv,
@@ -500,8 +393,8 @@ export default function ModelLoadPage() {
       }).catch(() => undefined);
       // 调参结果同时写入独立运行记录，供后续推荐与调参对比。
       void saveModelRunRecord({
-        model_id: model.id,
-        model_name: model.name,
+        model_id: target.id,
+        model_name: target.name,
         kind: 'autotune',
         timestamp: Math.floor(Date.now() / 1000),
         ngl: record.ngl,
@@ -514,6 +407,7 @@ export default function ModelLoadPage() {
       refreshRunRecords();
     }
   };
+  applyTuneRef.current = applyTuneRecord;
 
   const config = model.loadConfig;
   const layerCount = Math.max(0, model.blockCount ?? 0);
@@ -524,23 +418,15 @@ export default function ModelLoadPage() {
     { value: 32768, label: '32K' },
     { value: 65536, label: '64K' },
     { value: 102400, label: '100K' },
+    { value: 163840, label: '160K' },
+    { value: 204800, label: '200K' },
   ].filter((tick) => tick.value <= ctxMax);
-  // 预测带校准（有实测样本时修正经验项）；vramRecommend 内部固定用裸口径。
+  // 预测带校准（有实测样本时修正经验项）。
   const vramPrediction = predictVramUsage(
     model,
     config,
     calibration && calibration.samples > 0 ? calibration : undefined,
   );
-  const recommendedPreset = buildRecommendedLoadPreset(model, state.systemStats);
-  const applyRecommendedConfig = () => {
-    dispatch({
-      type: 'UPDATE_MODEL_CONFIG',
-      payload: {
-        modelId: model.id,
-        config: recommendedPreset.config,
-      },
-    });
-  };
   const headerCards = [
     { icon: Cpu, label: '架构', value: model.architecture ?? '未读取' },
     { icon: Layers, label: '层数（block_count）', value: formatNumber(model.blockCount) },
@@ -550,15 +436,11 @@ export default function ModelLoadPage() {
     { icon: Gauge, label: '注意力头（heads）', value: formatPair(model.headCount, model.headCountKv) },
     { icon: FileText, label: 'K/V 长度', value: formatPair(model.keyLength, model.valueLength) },
   ];
-  const tabs = [
-    { id: 'params' as const, label: '加载参数', icon: Hash },
-    { id: 'info' as const, label: '模型信息', icon: BarChart3 },
-  ];
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div className="mx-auto max-w-[1180px]">
+        <div className="mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px]">
           <ModelLoadTopBar
             model={model}
             prediction={vramPrediction}
@@ -567,6 +449,7 @@ export default function ModelLoadPage() {
             calibrationIsScratch={calibrationIsScratch}
             isLoading={isLoading}
             loadMessage={loadError ?? loadProgress}
+            statusMessage={logoMessage}
             loadPercent={loadError ? 0 : loadProgressPercent}
             isError={Boolean(loadError)}
             onChangeLogo={handleChangeLogo}
@@ -574,7 +457,21 @@ export default function ModelLoadPage() {
             onLoad={() => void handleLoad()}
             onStop={() => void handleStopLoading()}
             onAutoTune={() => void startAutoTuneRun()}
+            onStopAutoTune={() => void stopAutoTuneRun()}
             autoTuneRunning={autoTuneRunning}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            apiName={apiNameDraft ?? model.apiName ?? ''}
+            apiNamePlaceholder={suggestedApiName(model)}
+            onApiNameChange={setApiNameDraft}
+            onApiNameCommit={() => {
+              if (apiNameDraft == null) return;
+              dispatch({
+                type: 'SET_MODEL_API_NAME',
+                payload: { modelId: model.id, apiName: apiNameDraft.trim() },
+              });
+              setApiNameDraft(null);
+            }}
           />
 
           {logoLibraryOpen && (
@@ -586,107 +483,15 @@ export default function ModelLoadPage() {
             />
           )}
 
-          <div className="mb-2 border-b border-[var(--border-subtle)] py-4">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex min-w-0 items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleChangeLogo}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    handleClearLogo();
-                  }}
-                  className="relative flex h-9 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--surface-muted)] text-sm font-semibold transition-colors hover:bg-[var(--surface-hover)] dark:bg-white/[0.06]"
-                  style={{ color: model.themeColorSolid }}
-                  title="点击更换头像，右键恢复默认"
-                >
-                  <ModelFamilyLogo
-                    family={model.family}
-                    architecture={model.architecture}
-                    name={model.name}
-                    size={18}
-                    customSrc={model.customLogo}
-                    tone={model.themeColorSolid}
-                    fallback={model.family[0]}
-                  />
-                  <span className="absolute inset-0 grid place-items-center bg-black/35 text-white opacity-0 transition-opacity hover:opacity-100">
-                    <ImagePlus className="h-3.5 w-3.5" />
-                  </span>
-                </button>
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.family}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-                    <span className="mono-font">{model.params}</span>
-                    <span>·</span>
-                    <span>{model.quant}</span>
-                    <span>·</span>
-                    <span>{model.fileSize}</span>
-                    <span className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
-                      model.modelType === 'moe' ? 'bg-[var(--accent-subtle)] text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]' : 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]'
-                    }`}>
-                      {formatModelType(model.modelType)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                {tabs.map((tab) => {
-                  const Icon = tab.icon;
-                  return (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`relative flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
-                        activeTab === tab.id ? 'text-[var(--accent)] dark:text-[var(--accent)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.07]'
-                      }`}
-                    >
-                      {activeTab === tab.id && (
-                        <span
-                          className="absolute inset-0 rounded-md bg-[var(--surface-muted)] transition-colors dark:bg-white/[0.08]"
-                        />
-                      )}
-                      <Icon className="relative z-10 h-4 w-4" />
-                      <span className="relative z-10">{tab.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            <div className="mt-3 space-y-1.5">
-              <div className="flex items-center gap-2">
-                <span className="flex-shrink-0 text-[11px] text-[var(--text-tertiary)]">API 调用名</span>
-                <input
-                  value={model.apiName ?? ''}
-                  placeholder={suggestedApiName(model)}
-                  onChange={(event) => dispatch({
-                    type: 'SET_MODEL_API_NAME',
-                    payload: { modelId: model.id, apiName: event.target.value },
-                  })}
-                  className="mono-font h-8 w-64 max-w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
-                />
-              </div>
-              <div className="text-[11px] leading-4 text-[var(--text-secondary)]">
-                对外 API 使用 <span className="mono-font text-[var(--text-primary)]">{resolveApiName(model)}</span>
-                {logoMessage ? ` · ${logoMessage}` : ''}
-              </div>
-            </div>
-          </div>
-
           {activeTab === 'params' ? (
             <div>
-              <RecommendedParamsCard preset={recommendedPreset} onApply={applyRecommendedConfig} />
-
-              <AutoTuneCard
+              <RunRecordsCard
+                records={runRecords}
                 running={autoTuneRunning}
-                disabled={!isDesktopRuntime() || isLoading}
                 log={autoTuneLog}
-                result={autoTuneResult}
                 applied={autoTuneApplied}
-                onApplyResult={() => autoTuneResult && applyTuneRecord(autoTuneResult.best)}
                 onClearLog={() => setAutoTuneLog([])}
               />
-
-              <RunRecordsCard records={runRecords} />
               <div className="grid items-start lg:grid-cols-2">
                 <ParamSection title="推理与显存" icon={Cpu}>
                   <SliderParamRow
@@ -935,7 +740,7 @@ export default function ModelLoadPage() {
                 <p className="text-sm leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.longDescription}</p>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4">
                 <InfoCard icon={Calendar} label="发布日期" value={model.releaseDate} />
                 <InfoCard icon={FileText} label="许可协议" value={model.license} />
                 <InfoCard icon={Box} label="参数量" value={model.params} />
@@ -957,7 +762,7 @@ export default function ModelLoadPage() {
               {model.benchmarks && (
                 <div className="border-b border-[var(--border-subtle)] py-5">
                   <h3 className="mb-3 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">基准测试</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-4">
+                  <div className="grid grid-cols-2 lg:grid-cols-4">
                     {Object.entries(model.benchmarks).map(([key, value]) => (
                       <div key={key} className="border-b border-[var(--border-subtle)] p-3 text-center last:border-b-0">
                         <div className="mb-1 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{key}</div>
@@ -1067,25 +872,92 @@ const RUN_RECORD_KIND_LABEL: Record<ModelRunRecord['kind'], string> = {
   autotune: '调参',
 };
 
-// 模型运行记录：单独保存的启动参数与实测表现，用于对比调参和验证显存预测偏差。
-// 默认折叠，点击标题展开。
-function RunRecordsCard({ records }: { records: ModelRunRecord[] }) {
+// 运行记录 + 自动调参合并卡：调参日志与启动/调参记录在同一个卡片里查看。
+// 调参进行中自动展开；结束后最优参数会自动应用（见 applyTuneRecord）。
+function RunRecordsCard({ records, running, log, applied, onClearLog }: {
+  records: ModelRunRecord[];
+  running: boolean;
+  log: string[];
+  applied: boolean;
+  onClearLog: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
-  if (records.length === 0) return null;
+  const logViewportRef = useRef<HTMLDivElement | null>(null);
+  const [logCollapsed, setLogCollapsed] = useState(false);
+
+  // 调参开始时自动展开卡片；日志区跟随滚动到底部。
+  useEffect(() => {
+    if (running) setExpanded(true);
+  }, [running]);
+  useEffect(() => {
+    if (!logCollapsed && logViewportRef.current) {
+      logViewportRef.current.scrollTop = logViewportRef.current.scrollHeight;
+    }
+  }, [log.length, logCollapsed]);
+
+  if (records.length === 0 && log.length === 0 && !running) return null;
   return (
     <div className="border-b border-[var(--border-subtle)] py-4">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+        className="flex w-full flex-wrap items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
       >
         <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)] transition-transform ${expanded ? 'rotate-90' : ''}`} />
         <History className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
         运行记录
-        <span className="text-xs font-normal text-[var(--text-tertiary)]">{records.length} 条 · 供推荐与调参对比</span>
+        {records.length > 0 && (
+          <span className="text-xs font-normal text-[var(--text-tertiary)]">{records.length} 条 · 含调参与启动实测</span>
+        )}
+        {running && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-white shadow-sm">
+            <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
+            调参搜索中…
+          </span>
+        )}
+        {!running && applied && (
+          <span className="rounded-md bg-[var(--state-success-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]">
+            已自动应用调参结果
+          </span>
+        )}
       </button>
       {expanded && (
         <div className="mt-2 space-y-1.5">
+          {log.length > 0 && (
+            <div>
+              <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                <span className="font-mono text-[11px]">调参日志（共 {log.length} 条）</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLogCollapsed((value) => !value)}
+                    className="hover:text-[var(--text-primary)] dark:hover:text-white"
+                  >
+                    {logCollapsed ? '展开日志' : '收起日志'}
+                  </button>
+                  <span>·</span>
+                  <button
+                    type="button"
+                    onClick={onClearLog}
+                    disabled={running}
+                    className="hover:text-[var(--text-primary)] disabled:opacity-40 dark:hover:text-white"
+                  >
+                    清空
+                  </button>
+                </div>
+              </div>
+              {!logCollapsed && (
+                <div
+                  ref={logViewportRef}
+                  className="max-h-36 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-2.5 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-secondary)]"
+                >
+                  {log.map((line, index) => (
+                    <div key={index} className="break-words">{line}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {records.slice(0, 8).map((record) => {
             const deviation = record.vram_gb != null && record.vram_predicted_gb
               ? ((record.vram_gb - record.vram_predicted_gb) / record.vram_predicted_gb * 100)
@@ -1113,7 +985,7 @@ function RunRecordsCard({ records }: { records: ModelRunRecord[] }) {
                 )}
                 {record.note && (
                   <span
-                    className="max-w-[280px] truncate text-[var(--state-warning)] dark:text-[var(--state-warning)]"
+                    className="break-words text-[var(--state-warning)] dark:text-[var(--state-warning)]"
                     title={record.note}
                   >
                     {record.note}
@@ -1125,142 +997,6 @@ function RunRecordsCard({ records }: { records: ModelRunRecord[] }) {
               </div>
             );
           })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RecommendedParamsCard({ preset, onApply }: { preset: RecommendedLoadPreset; onApply: () => void }) {
-  const warning = preset.tone === 'warning';
-  return (
-    <div className={`border-b py-4 ${
-      warning
-        ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)]'
-        : 'border-[var(--border-subtle)]'
-    }`}>
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
-          <div className={`flex items-center gap-2 text-sm font-semibold ${
-            warning ? 'text-[var(--state-warning)] dark:text-[var(--state-warning)]' : 'text-[var(--text-primary)] dark:text-[var(--text-primary)]'
-          }`}>
-            <Info className="h-4 w-4 flex-shrink-0" />
-            {preset.title}
-          </div>
-          <div className={`mt-2 text-sm leading-relaxed ${
-            warning ? 'text-[var(--state-warning)] dark:text-[var(--state-warning-border)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'
-          }`}>
-            {preset.description}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-            {preset.items.map((item) => (
-              <div key={item.label} className="border-l border-[var(--border-subtle)] px-3 py-1">
-                <div className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.label}</div>
-                <div className="mt-1 truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{item.value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onApply}
-          className="flex-shrink-0 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
-        >
-          应用推荐参数
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AutoTuneCard({ running, disabled, log, result, applied, onApplyResult, onClearLog }: {
-  running: boolean;
-  disabled: boolean;
-  log: string[];
-  result: AutoTuneResult | null;
-  applied: boolean;
-  onApplyResult: () => void;
-  onClearLog: () => void;
-}) {
-  const logViewportRef = useRef<HTMLDivElement | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    if (!collapsed && logViewportRef.current) {
-      logViewportRef.current.scrollTop = logViewportRef.current.scrollHeight;
-    }
-  }, [log.length, collapsed]);
-
-  return (
-    <div className={`border-b py-4 transition-colors ${
-      running
-        ? 'border-[var(--accent)] bg-[var(--accent-subtle)]/20'
-        : 'border-[var(--border-subtle)]'
-    }`}>
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
-            <Wand2 className={`h-4 w-4 flex-shrink-0 ${running ? 'animate-pulse text-[var(--accent)]' : 'text-[var(--accent)]'}`} />
-            <span>自动调参（实测搜索）</span>
-            {running && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-white shadow-sm">
-                <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
-                搜索中…
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
-          {!disabled && result && !applied && (
-            <button
-              type="button"
-              onClick={onApplyResult}
-              className="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
-            >
-              应用最佳参数
-            </button>
-          )}
-          {applied && (
-            <span className="rounded-md bg-[var(--state-success-bg)] px-2.5 py-1.5 text-xs font-medium text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]">
-              已应用调参结果
-            </span>
-          )}
-        </div>
-      </div>
-
-      {log.length > 0 && (
-        <div className="mt-3">
-          <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-            <span className="font-mono text-[11px]">搜索日志（共 {log.length} 条）</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setCollapsed(!collapsed)}
-                className="hover:text-[var(--text-primary)] dark:hover:text-white"
-              >
-                {collapsed ? '展开日志' : '收起日志'}
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={onClearLog}
-                disabled={running}
-                className="hover:text-[var(--text-primary)] disabled:opacity-40 dark:hover:text-white"
-              >
-                清空
-              </button>
-            </div>
-          </div>
-          {!collapsed && (
-            <div
-              ref={logViewportRef}
-              className="max-h-36 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-2.5 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-secondary)]"
-            >
-              {log.map((line, index) => (
-                <div key={index} className="truncate">{line}</div>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -1350,7 +1086,7 @@ function LogoLibraryDialog({ selected, onSelect, onClear, onClose }: {
   );
 }
 
-function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSamples, calibrationIsScratch, isLoading, loadMessage, loadPercent, isError, onChangeLogo, onReset, onLoad, onStop, onAutoTune, autoTuneRunning }: {
+function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSamples, calibrationIsScratch, isLoading, loadMessage, statusMessage, loadPercent, isError, onChangeLogo, onReset, onLoad, onStop, onAutoTune, onStopAutoTune, autoTuneRunning, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit }: {
   model: ModelInfo;
   prediction: VramPrediction;
   calibrationRatio: number;
@@ -1358,6 +1094,7 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
   calibrationIsScratch: boolean;
   isLoading: boolean;
   loadMessage: string | null;
+  statusMessage: string | null;
   loadPercent: number;
   isError: boolean;
   onChangeLogo: () => void;
@@ -1365,18 +1102,29 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
   onLoad: () => void;
   onStop: () => void;
   onAutoTune: () => void;
+  onStopAutoTune: () => void;
   autoTuneRunning: boolean;
+  activeTab: 'params' | 'info';
+  onTabChange: (tab: 'params' | 'info') => void;
+  apiName: string;
+  apiNamePlaceholder: string;
+  onApiNameChange: (value: string) => void;
+  onApiNameCommit: () => void;
 }) {
   const safePercent = clamp(loadPercent, 0, 100);
   const offloadPercent = Math.round(prediction.offloadRatio * 100);
   const expertPercent = Math.round(prediction.expertGpuRatio * 100);
   // 分项 pills 与校准后的总预测保持同口径：分项校准只作用在「计算 + 运行」经验项上。
   const calibratedRatio = calibrationSamples > 0 && calibrationIsScratch ? calibrationRatio : 1;
-  const progressText = loadMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
+  const progressText = loadMessage ?? statusMessage ?? (isLoading ? '正在准备加载...' : '显存预测会随参数实时更新');
+  const tabs = [
+    { id: 'params' as const, label: '加载参数', icon: Hash },
+    { id: 'info' as const, label: '模型信息', icon: BarChart3 },
+  ];
 
   return (
     <div className="model-load-summary sticky top-0 z-40 mb-1 overflow-hidden border-b border-[var(--border-subtle)] bg-[var(--app-bg)] px-1 py-2">
-      <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
+      <div className="model-load-summary-row flex flex-col gap-2">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <button
             type="button"
@@ -1396,18 +1144,38 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
             />
           </button>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</h1>
+            {/* 名字与 API 调用名恒同一行：名字截断让位，输入框不收缩、有余量时自动加宽 */}
+            <div className="flex min-w-0 items-center gap-x-2">
+              <h1 className="min-w-0 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</h1>
+              <input
+                value={apiName}
+                placeholder={apiNamePlaceholder}
+                onChange={(event) => onApiNameChange(event.target.value)}
+                onBlur={onApiNameCommit}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                }}
+                className="mono-font h-7 w-44 flex-shrink-0 flex-grow rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-white/[0.05]"
+                title="API 调用名：对外接口显示的模型名，输入结束（失焦/回车）自动保存，留空用默认名"
+                aria-label="API 调用名"
+              />
+            </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
               <span className="mono-font">{model.params}</span>
               <span>·</span>
               <span>{model.quant}</span>
               <span>·</span>
               <span>{model.fileSize}</span>
+              <span className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                model.modelType === 'moe' ? 'bg-[var(--accent-subtle)] text-[var(--accent)] dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)]' : 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]'
+              }`}>
+                {formatModelType(model.modelType)}
+              </span>
             </div>
           </div>
         </div>
 
-        <div className="model-load-summary-metrics xl:w-[560px] xl:flex-shrink-0">
+        <div className="model-load-summary-metrics">
           <div className="flex items-center gap-2 border-l border-[var(--border-subtle)] px-2.5 py-1.5">
             <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
             <div className="min-w-0">
@@ -1438,16 +1206,49 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 xl:flex-shrink-0 xl:justify-end">
-          <button
-            onClick={onAutoTune}
-            disabled={isLoading || autoTuneRunning}
-            className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09]"
-            title="实测搜索最优 ngl / ctx / KV 组合，完成后在「加载参数」页应用结果"
-          >
-            <Wand2 className={`h-4 w-4 text-[var(--accent)] ${autoTuneRunning ? 'animate-pulse' : ''}`} />
-            {autoTuneRunning ? '调参中…' : '自动调参'}
-          </button>
+        <div className="model-load-summary-actions flex flex-wrap items-center gap-2">
+          <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            {tabs.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => onTabChange(tab.id)}
+                  className={`relative flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
+                    activeTab === tab.id ? 'text-[var(--accent)] dark:text-[var(--accent)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.07]'
+                  }`}
+                >
+                  {activeTab === tab.id && (
+                    <span
+                      className="absolute inset-0 rounded-md bg-[var(--surface-muted)] transition-colors dark:bg-white/[0.08]"
+                    />
+                  )}
+                  <Icon className="relative z-10 h-4 w-4" />
+                  <span className="relative z-10">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          {autoTuneRunning ? (
+            <button
+              onClick={onStopAutoTune}
+              className="flex h-9 items-center gap-2 rounded-lg border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 text-sm text-[var(--state-danger)] transition-colors hover:bg-[var(--state-danger-border)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)]"
+              title="停止自动调参（已测得的样本会保留）"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+              停止调参
+            </button>
+          ) : (
+            <button
+              onClick={onAutoTune}
+              disabled={isLoading}
+              className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.09]"
+              title="实测搜索最优 ngl / ctx / KV 组合，结束后自动应用最优参数"
+            >
+              <Wand2 className="h-4 w-4 text-[var(--accent)]" />
+              自动调参
+            </button>
+          )}
           <button
             onClick={onReset}
             disabled={isLoading}
@@ -1479,7 +1280,7 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
       <div className="mt-2 grid gap-1.5">
         <div className="flex min-w-0 items-center gap-2 text-xs">
           <Info className={`h-3.5 w-3.5 flex-shrink-0 ${isError ? 'text-[var(--state-danger)] dark:text-[var(--state-danger)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`} />
-          <span className={`min-w-0 truncate ${isError ? 'text-[var(--state-danger)] dark:text-[var(--state-danger)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>{progressText}</span>
+          <span className={`min-w-0 break-words ${isError ? 'text-[var(--state-danger)] dark:text-[var(--state-danger)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>{progressText}</span>
           <span className="mono-font ml-auto flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safePercent.toFixed(0)}%</span>
         </div>
         <div className="h-1 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.08]">
@@ -1489,7 +1290,7 @@ function ModelLoadTopBar({ model, prediction, calibrationRatio, calibrationSampl
           />
         </div>
         {prediction.missing.length > 0 && (
-          <div className="truncate text-[11px] text-[var(--state-warning)] dark:text-[var(--state-warning)]">
+          <div className="break-words text-[11px] text-[var(--state-warning)] dark:text-[var(--state-warning)]">
             预测缺少表头: {Array.from(new Set(prediction.missing)).join(', ')}
           </div>
         )}
@@ -1616,15 +1417,15 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
   };
 
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_minmax(300px,auto)] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel
         label="空闲时自动卸载"
         description="有消息输入或模型输出时会重新计时。"
       />
       <div className="flex flex-wrap items-center gap-2 lg:justify-end">
         <ToggleSwitch checked={checked} onChange={onToggle} ariaLabel="空闲时自动卸载" />
-        <div className={`flex min-w-0 items-center gap-1.5 text-sm ${checked ? 'text-[var(--text-primary)] dark:text-[var(--text-primary)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>
-          <span className="whitespace-nowrap">没有消息输入和输出的</span>
+        <div className={`flex min-w-0 flex-wrap items-center gap-1.5 text-sm ${checked ? 'text-[var(--text-primary)] dark:text-[var(--text-primary)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>
+          <span>没有消息输入和输出的</span>
           <input
             type="number"
             value={safeMinutes}
@@ -1635,7 +1436,7 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
             onChange={(event) => handleMinuteChange(event.target.value)}
             className="mono-font h-8 w-16 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] disabled:opacity-55 dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
           />
-          <span className="whitespace-nowrap">分钟后自动卸载</span>
+          <span>分钟后自动卸载</span>
         </div>
       </div>
     </div>
@@ -1664,7 +1465,7 @@ function SpecDecodeParamRow({ model, value, onChange }: {
   ];
 
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label="推测解码" description={description} badge="实验" />
       <select
         value={value}
@@ -1684,7 +1485,7 @@ function SpecDecodeParamRow({ model, value, onChange }: {
 
 function ToggleParamRow({ label, description, badge, checked, onChange }: { label: string; description?: string; badge?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} badge={badge} />
       <div className="flex justify-end">
         <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
@@ -1703,7 +1504,7 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
   };
 
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} badge={badge} />
       <div className="flex items-center gap-2 lg:justify-end">
         {autoLabel && (
@@ -1734,7 +1535,7 @@ function OptionalNumberParamRow({ label, description, enabled, value, onToggle, 
   label: string; description?: string; enabled: boolean; value: number; onToggle: (v: boolean) => void; onChange: (v: number) => void; step: number; autoLabel: string;
 }) {
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
       <div className="flex items-center gap-2 lg:justify-end">
         <ToggleSwitch size="sm" checked={enabled} onChange={onToggle} ariaLabel={label} />
@@ -1759,7 +1560,7 @@ function OptionalNumberParamRow({ label, description, enabled, value, onToggle, 
 
 function ReadOnlyParamRow({ label, description, value }: { label: string; description?: string; value: string }) {
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} />
       <span className="mono-font text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)] lg:justify-self-end lg:text-right">{value}</span>
     </div>
@@ -1789,7 +1590,7 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
   label: string; description?: string; badge?: string; enabled: boolean; value: string; onToggle: (v: boolean) => void; onChange: (v: string) => void;
 }) {
   return (
-    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
+    <div className={`${rowBorderClass()} grid gap-3 px-3 py-3 lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
       <ParamLabel label={label} description={description} badge={badge} />
       <div className="flex items-center gap-2 lg:justify-end">
         <ToggleSwitch size="sm" checked={enabled} onChange={onToggle} ariaLabel={label} />
@@ -1813,8 +1614,8 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
 
 function CheckboxParamRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(220px,1fr)_auto] lg:items-center`}>
-      <span className="min-w-0 truncate font-medium">{label}</span>
+    <div className={`${rowBorderClass()} grid cursor-pointer gap-3 px-3 py-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.04] lg:grid-cols-[minmax(160px,1fr)_auto] lg:items-center`}>
+      <span className="min-w-0 break-words font-medium">{label}</span>
       <div className="flex justify-end">
         <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
       </div>

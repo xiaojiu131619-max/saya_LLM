@@ -124,21 +124,29 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
   }[model.status];
 
   if (isSingleColumn) {
+    // 单列两行布局：第一行 = 名称 + 类型 + 大小 + 量化；第二行 = 标签 + 速度 + 操作按钮。
+    // 整卡可点进入参数页，操作按钮自行 stopPropagation。
     return (
       <article
         style={{ animationDelay: `${Math.min(index * 10, 80)}ms` }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        className={`anim-card-rise model-glass-card group flex min-h-[52px] w-full items-center gap-2 px-3 py-2 ${
+        role="button"
+        tabIndex={0}
+        onClick={handleClick}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleClick();
+          }
+        }}
+        aria-label={`打开 ${model.name} 的加载参数`}
+        className={`anim-card-rise model-glass-card group flex w-full cursor-pointer flex-col gap-1.5 px-3 py-2 ${
           isHighlighted ? 'model-glass-card--active' : ''
         } ${model.status === 'loading' ? 'model-glass-card--loading' : ''}`}
       >
-        <button
-          type="button"
-          onClick={handleClick}
-          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-          aria-label={`打开 ${model.name} 的加载参数`}
-        >
+        {/* 第一行不换行：名字过长时截断让位，类型/大小/量化恒可见（窗口最小 800px 时仍放得下） */}
+        <div className="flex min-w-0 items-center gap-2">
           <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)]">
             <span
               className="absolute inset-0 rounded-full opacity-20"
@@ -159,66 +167,71 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
               title={statusLabel}
             />
           </span>
-
-          <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{model.name}</span>
-            <CompactPill>{model.params}</CompactPill>
-            <CompactPill className="hidden sm:inline-flex">{model.quant}</CompactPill>
-            <CompactPill className="hidden md:inline-flex">
-              {model.modelType === 'moe' ? 'MoE' : '稠密'}
-            </CompactPill>
-            <span className="hidden lg:inline-flex">
-              <CapabilityBadges model={model} dense onlyActive />
+          <span
+            className="min-w-0 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+            title={model.name}
+          >
+            {model.name}
+          </span>
+          <CompactPill>
+            {model.modelType === 'moe' ? 'MoE' : '稠密'}
+          </CompactPill>
+          <CompactPill title={`${model.params} · ${model.fileSize}`}>
+            {model.params} · {model.fileSize}
+          </CompactPill>
+          <CompactPill>{model.quant}</CompactPill>
+          {recentUsedAt && (
+            <span
+              className="flex h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
+              title={recentTitle}
+            >
+              <History className="h-3 w-3" />
+              最近使用
             </span>
-            {recentUsedAt && (
-              <span
-                className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] sm:inline-flex dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
-                title={recentTitle}
-              >
-                <History className="h-3 w-3" />
-                最近使用
-              </span>
-            )}
-            <CompactPill className="hidden lg:inline-flex">
+          )}
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 pl-10">
+          <span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+            <CapabilityBadges model={model} dense onlyActive twoLine />
+            <CompactPill title="历史平均生成速度">
               {model.avgTokensPerSec ? `${model.avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'}
             </CompactPill>
           </span>
-        </button>
-
-        <div className="flex flex-shrink-0 items-center gap-1">
-          {launchMemory && (
-            <button
-              onClick={(event) => void handleQuickLaunch(event)}
-              disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
-              title={formatLaunchMemoryTitle(launchMemory.config)}
-            >
-              {quickStarting ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Zap className="h-3.5 w-3.5 fill-current" />
-              )}
-            </button>
-          )}
-          {model.status === 'loaded' && (
-            <button
-              onClick={handleQuickChat}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
-              title="开始对话"
-            >
-              <Play className="ml-0.5 h-3.5 w-3.5 text-[var(--accent)]" />
-            </button>
-          )}
-          {model.filePath && (
-            <button
-              onClick={handleReveal}
-              disabled={!isDesktopRuntime()}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
-              title="在资源管理器中显示"
-            >
-              <FolderSearch className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
-            </button>
-          )}
+          <span className="flex flex-shrink-0 items-center gap-1">
+            {launchMemory && (
+              <button
+                onClick={(event) => void handleQuickLaunch(event)}
+                disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
+                title={formatLaunchMemoryTitle(launchMemory.config)}
+              >
+                {quickStarting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Zap className="h-3.5 w-3.5 fill-current" />
+                )}
+              </button>
+            )}
+            {model.status === 'loaded' && (
+              <button
+                onClick={handleQuickChat}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
+                title="开始对话"
+              >
+                <Play className="ml-0.5 h-3 w-3 text-[var(--accent)]" />
+              </button>
+            )}
+            {model.filePath && (
+              <button
+                onClick={handleReveal}
+                disabled={!isDesktopRuntime()}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--border)] disabled:opacity-40"
+                title="在资源管理器中显示"
+              >
+                <FolderSearch className="h-3 w-3 text-[var(--text-secondary)]" />
+              </button>
+            )}
+          </span>
         </div>
       </article>
     );
@@ -332,9 +345,9 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
   );
 }
 
-function CompactPill({ children, className = '' }: { children: ReactNode; className?: string }) {
+function CompactPill({ children, className = '', title }: { children: ReactNode; className?: string; title?: string }) {
   return (
-    <span className={`h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
+    <span title={title} className={`h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
       {children}
     </span>
   );
@@ -393,8 +406,8 @@ function CapabilityBadges({ model, dense = false, onlyActive = false, twoLine = 
   // 信息量，全量 9 个格子还会把标签文字挤压成竖排折行。
   const visibleDefs = onlyActive || twoLine ? activeDefs : CAPABILITY_DEFS;
 
-  // 超出上限时折叠为 "+N"：单列一行最多 4 个，磁贴宽度约 215px、每行 3-4 个。
-  const MAX_SHOWN = dense ? 3 : twoLine ? 6 : 4;
+  // 超出上限时折叠为 "+N"：单列窄行最多 3 个，两行布局（磁贴/单列第二行）最多 6 个。
+  const MAX_SHOWN = dense && !twoLine ? 3 : twoLine ? 6 : 4;
   const shouldFold = visibleDefs.length > MAX_SHOWN;
   const displayedDefs = shouldFold ? visibleDefs.slice(0, MAX_SHOWN - 1) : visibleDefs;
   const hiddenCount = shouldFold ? visibleDefs.length - (MAX_SHOWN - 1) : 0;

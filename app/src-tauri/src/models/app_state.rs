@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,8 @@ impl Default for AppConfig {
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub gpu_monitor: Mutex<Option<GpuMonitor>>,
+    /// 自动调参取消标记：cancel_auto_tune 置位，调参循环在每个测量点之间检查。
+    pub auto_tune_cancel: AtomicBool,
 }
 
 impl AppState {
@@ -129,6 +132,7 @@ impl AppState {
         Self {
             config: Mutex::new(config),
             gpu_monitor: Mutex::new(None),
+            auto_tune_cancel: AtomicBool::new(false),
         }
     }
 }

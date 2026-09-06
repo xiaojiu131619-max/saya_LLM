@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::models::app_state::AppState;
@@ -86,6 +88,12 @@ pub async fn start_auto_tune(
 ) -> Result<(), String> {
     let app2 = app.clone();
 
+    // 新一轮调参开始前清掉上一次的取消标记。
+    {
+        let state = app2.state::<AppState>();
+        state.auto_tune_cancel.store(false, Ordering::Relaxed);
+    }
+
     tokio::spawn(async move {
         let state = app2.state::<AppState>();
         let gm = &state.gpu_monitor;
@@ -101,6 +109,33 @@ pub async fn start_auto_tune(
     });
 
     Ok(())
+}
+
+/// 请求停止自动调参：置位取消标记并立即停掉测量中的 llama-server，
+/// 让当前 measure_point 尽快失败返回；调参任务随后发出 autotune:cancelled。
+#[tauri::command]
+pub async fn cancel_auto_tune(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.auto_tune_cancel.store(true, Ordering::Relaxed);
+    drop(state);
+    let _ = crate::services::process_manager::stop_server();
+    Ok(())
+}
+
+fn tune_cancelled(app: &AppHandle) -> bool {
+    app.state::<AppState>()
+        .auto_tune_cancel
+        .load(Ordering::Relaxed)
+}
+
+/// 停掉 server 并通知前端调参已取消。
+async fn abort_tune(app: &AppHandle) {
+    let _ = crate::services::process_manager::stop_server();
+    app.emit(
+        "autotune:cancelled",
+        serde_json::json!({ "message": "自动调参已停止" }),
+    )
+    .ok();
 }
 
 // ============================================================
@@ -136,10 +171,19 @@ async fn auto_tune_dense(
     records.push(r.clone());
     emit_record(app, "init", "初始加载", &r);
 
+    if tune_cancelled(app) {
+        abort_tune(app).await;
+        return;
+    }
+
     if vram_pct <= benchmark::VRAM_LIMIT {
         // --- Phase 1: VRAM 有余量，向上升级 CTX ---
         emit(app, "ctx_up", "显存有余量，尝试增大上下文...", None);
         for &next_ctx in benchmark::CTX_UP.iter() {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             if next_ctx > config.max_ctx as u32 || next_ctx <= ctx {
                 continue;
             }
@@ -162,6 +206,10 @@ async fn auto_tune_dense(
         emit(app, "ctx_down", "显存超标，降低上下文...", None);
         let mut found = false;
         for &down_ctx in benchmark::CTX_DOWN.iter() {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             if down_ctx >= ctx {
                 continue;
             }
@@ -184,6 +232,10 @@ async fn auto_tune_dense(
         if !found {
             emit(app, "kv_down", "ctx最低仍超标，降级 KV 缓存...", None);
             for next_kv in benchmark::KV_STEPS.iter() {
+                if tune_cancelled(app) {
+                    abort_tune(app).await;
+                    return;
+                }
                 let r = match benchmark::measure_point(config, gm, "dense", ngl, ctx, 0, next_kv)
                     .await
                 {
@@ -221,6 +273,10 @@ async fn auto_tune_dense(
     }
 
     // --- Output ---
+    if tune_cancelled(app) {
+        abort_tune(app).await;
+        return;
+    }
     let _ = crate::services::process_manager::stop_server();
     emit_result(app, &records, &config.sort_mode, false);
 }
@@ -266,6 +322,11 @@ async fn auto_tune_moe(
     records.push(r);
     emit_record(app, "init", "初始加载", records.last().unwrap());
 
+    if tune_cancelled(app) {
+        abort_tune(app).await;
+        return;
+    }
+
     if records.last().unwrap().fits {
         // --- Phase 1: 反向搜索 ncmoe (找最小值 = 更多 GPU) ---
         emit(
@@ -279,6 +340,10 @@ async fn auto_tune_moe(
 
         // 二分搜索
         while high - low > 5 {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             let mid = (low + high) / 2;
             let r = match benchmark::measure_point(config, gm, "moe", ngl, ctx, mid, &kv).await {
                 Ok(r) => r,
@@ -301,6 +366,10 @@ async fn auto_tune_moe(
         // ±5 逼近
         let mut ncmoe = best_ncmoe;
         while ncmoe > 0 {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             let next = ncmoe.saturating_sub(5);
             let r = match benchmark::measure_point(config, gm, "moe", ngl, ctx, next, &kv).await {
                 Ok(r) => r,
@@ -318,6 +387,10 @@ async fn auto_tune_moe(
 
         // ±1 微调
         while ncmoe > 0 {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             let next = ncmoe - 1;
             let r = match benchmark::measure_point(config, gm, "moe", ngl, ctx, next, &kv).await {
                 Ok(r) => r,
@@ -339,6 +412,10 @@ async fn auto_tune_moe(
             if last_pct < benchmark::VRAM_LIMIT {
                 emit(app, "ctx_up", "ncmoe=0 仍有余量，增大上下文...", None);
                 for &next_ctx in benchmark::CTX_UP.iter() {
+                    if tune_cancelled(app) {
+                        abort_tune(app).await;
+                        return;
+                    }
                     if next_ctx > config.max_ctx as u32 || next_ctx <= ctx {
                         continue;
                     }
@@ -365,6 +442,10 @@ async fn auto_tune_moe(
         emit(app, "ctx_down", "初始显存超标，降低上下文...", None);
         let mut found = false;
         for &down_ctx in benchmark::CTX_DOWN.iter() {
+            if tune_cancelled(app) {
+                abort_tune(app).await;
+                return;
+            }
             if down_ctx >= ctx {
                 continue;
             }
@@ -389,6 +470,10 @@ async fn auto_tune_moe(
         if !found {
             emit(app, "kv_down", "ctx最低仍超标，降级 KV 缓存...", None);
             for next_kv in benchmark::KV_STEPS.iter() {
+                if tune_cancelled(app) {
+                    abort_tune(app).await;
+                    return;
+                }
                 let r = match benchmark::measure_point(
                     config,
                     gm,
@@ -433,6 +518,10 @@ async fn auto_tune_moe(
     }
 
     // --- Output ---
+    if tune_cancelled(app) {
+        abort_tune(app).await;
+        return;
+    }
     let _ = crate::services::process_manager::stop_server();
     emit_result(app, &records, &config.sort_mode, true);
 }
@@ -468,6 +557,10 @@ async fn ngl_step_down(
     let mut ngl_try = params.ngl_start;
 
     loop {
+        if tune_cancelled(app) {
+            abort_tune(app).await;
+            return false;
+        }
         // Step down (clamping the final step to land exactly on 0).
         if ngl_try <= step {
             if ngl_try == 0 {
@@ -504,6 +597,10 @@ async fn ngl_step_down(
         if fits {
             // Climb back up 1 layer at a time to reclaim layers that still fit.
             while ngl_try < params.ngl_start {
+                if tune_cancelled(app) {
+                    abort_tune(app).await;
+                    return false;
+                }
                 ngl_try += 1;
                 let r2 = match benchmark::measure_point(
                     config,
