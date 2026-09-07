@@ -363,6 +363,8 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
             || key == "tokenizer.chat_template"
             || key == "clip.has_vision_encoder"
             || key == "clip.has_audio_encoder"
+            || key == "clip.vision.projection_dim"
+            || key == "clip.audio.projection_dim"
             || key == "clip.projector_type"
             || key == "clip.vision.projector_type"
             || key == "clip.audio.projector_type";

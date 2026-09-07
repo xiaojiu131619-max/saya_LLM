@@ -91,11 +91,34 @@ export interface DesktopConfig {
   proxy_url: string | null;
   /** 首次启动环境检测是否已完成；旧配置文件缺失该字段时视为未完成。 */
   env_check_done?: boolean;
+  /** 用户指定的自编译核心路径（llama-server.exe 绝对路径）；未设置为 null。 */
+  kernel_override_path?: string | null;
 }
 
 export async function setDesktopProxyUrl(proxyUrl: string | null) {
   if (!isDesktopRuntime()) return;
   await invoke('set_proxy_url', { proxyUrl });
+}
+
+export async function getKernelOverridePath() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<string | null>('get_kernel_override_path');
+}
+
+export async function setKernelOverridePath(path: string | null) {
+  if (!isDesktopRuntime()) return;
+  await invoke('set_kernel_override_path', { path });
+}
+
+/** 弹出系统文件选择框，挑选自编译核心的 llama-server.exe；取消返回 null。 */
+export async function pickKernelExe() {
+  if (!isDesktopRuntime()) return null;
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'llama-server', extensions: ['exe'] }],
+  });
+  return typeof selected === 'string' ? selected : null;
 }
 
 export interface PingResult {
@@ -861,6 +884,21 @@ export async function getDesktopServerLogs() {
 export async function clearDesktopServerLogs() {
   if (!isDesktopRuntime()) return;
   await invoke('clear_server_logs');
+}
+
+export interface TokenUsageAgg {
+  model_name: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  response_count: number;
+  last_seen_ms: number;
+}
+
+/** 读取自当前模型加载以来经 llama-server 的 token 累计（含对外 API / dsh 请求）。 */
+export async function getApiTokenUsage() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<TokenUsageAgg[]>('api_token_usage');
 }
 
 export interface SystemLogEntry {

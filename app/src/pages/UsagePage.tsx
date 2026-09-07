@@ -27,6 +27,16 @@ const MONTH_LABELS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8
 const HEATMAP_LEVELS_LIGHT = ['var(--border)', 'var(--state-danger-border)', 'var(--state-danger-border)', 'var(--accent-hover)', 'var(--accent-hover)'];
 const HEATMAP_LEVELS_DARK = ['rgba(255,255,255,0.06)', 'var(--accent)', 'var(--accent)', 'var(--accent)', 'var(--accent)'];
 
+// 大数字计数：>=1e9 用 B，>=1e6 用 M，>=1e3 用 K，否则原样。1.24M / 512K / 8K 风格。
+function formatCount(value: number): string {
+  if (!Number.isFinite(value)) return '0';
+  const abs = Math.abs(value);
+  if (abs >= 1e9) return `${(value / 1e9).toFixed(abs >= 1e10 ? 0 : 2).replace(/\.?0+$/, '')}B`;
+  if (abs >= 1e6) return `${(value / 1e6).toFixed(abs >= 1e7 ? 1 : 2).replace(/\.?0+$/, '')}M`;
+  if (abs >= 1e3) return `${(value / 1e3).toFixed(abs >= 1e4 ? 1 : 2).replace(/\.?0+$/, '')}K`;
+  return value.toLocaleString();
+}
+
 function tokenLevel(tokens: number, maxTokens: number): number {
   if (tokens <= 0) return 0;
   const ratio = tokens / maxTokens;
@@ -123,9 +133,9 @@ export default function UsagePage() {
           <PageHeader icon={BarChart3} title="使用详情" description="真实用量数据来自 llama.cpp 响应。" className="anim-fade-rise mb-6" />
 
           <div className="mb-1 grid grid-cols-2 lg:grid-cols-4">
-            <MetricCard icon={Hash} label="总令牌数（Token）" value={totals.totalTokens.toLocaleString()} delay={0} />
-            <MetricCard icon={Activity} label="输入令牌" value={totals.promptTokens.toLocaleString()} delay={40} />
-            <MetricCard icon={CalendarDays} label="输出令牌" value={totals.completionTokens.toLocaleString()} delay={80} />
+            <MetricCard icon={Hash} label="总令牌数（Token）" value={formatCount(totals.totalTokens)} delay={0} />
+            <MetricCard icon={Activity} label="输入令牌" value={formatCount(totals.promptTokens)} delay={40} />
+            <MetricCard icon={CalendarDays} label="输出令牌" value={formatCount(totals.completionTokens)} delay={80} />
             <MetricCard icon={Gauge} label="平均速度（tok/s）" value={avgTokensPerSec > 0 ? avgTokensPerSec.toFixed(1) : '暂无'} delay={120} />
           </div>
 
@@ -175,7 +185,7 @@ export default function UsagePage() {
                           return (
                             <div
                               key={day}
-                              title={`${day}：${tokens.toLocaleString()} 个 Token`}
+                              title={`${day}：${formatCount(tokens)} 个 Token`}
                               className="h-3 w-3 flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[var(--accent)]/60"
                               style={{ background: heatmapPalette[level] }}
                             />
@@ -269,7 +279,7 @@ function DonutChart({ items }: { items: Array<{ id: string; label: string; value
   return (
     <div className="flex flex-col items-center justify-center">
       <div
-        title={items.map((item) => `${item.label}：${item.value.toLocaleString()} Token`).join('\n')}
+        title={items.map((item) => `${item.label}：${formatCount(item.value)} Token`).join('\n')}
         className="relative flex h-44 w-44 items-center justify-center rounded-full"
         style={{ background: total > 0 ? `conic-gradient(${segments.join(', ')})` : 'rgba(128,128,128,0.12)' }}
       >
@@ -313,7 +323,7 @@ function UsageRankRow({ rank, name, tokens, total, color, responseCount, avgToke
             </div>
           </div>
         </div>
-        <div className="mono-font flex-shrink-0 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{tokens.toLocaleString()}</div>
+        <div className="mono-font flex-shrink-0 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{formatCount(tokens)}</div>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)] dark:bg-white/[0.08]">
         <div className="h-full rounded-full transition-[width] duration-500 ease-out" style={{ width: `${percent}%`, background: color }} />

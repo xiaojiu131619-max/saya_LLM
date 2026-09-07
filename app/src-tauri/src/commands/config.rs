@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tauri::State;
 
 use crate::models::app_state::{AppConfig, AppState, ModelPreset, ModelRunRecord, TuneHistoryEntry};
+use crate::services::{auto_updater, process_manager};
 
 const EXTERNAL_API_SECRET_SERVICE: &str = "Agent LLM External API";
 const EXTERNAL_API_SECRET_ACCOUNT: &str = "openai-compatible";
@@ -282,6 +283,8 @@ pub fn delete_model_preset(state: State<'_, AppState>, model_key: String) -> Res
 pub fn init_config() -> (AppState, Option<String>) {
     let t0 = std::time::Instant::now();
     let (config, pending_key) = load_config_from_disk();
+    // 把已保存的自编译核心路径同步到全局镜像，供启动早期的内核解析使用。
+    auto_updater::set_kernel_override(config.kernel_override_path.clone());
     eprintln!("[perf] load_config took {:?}", t0.elapsed());
     (AppState::new(config), pending_key)
 }
@@ -337,6 +340,57 @@ pub fn set_proxy_url(state: State<'_, AppState>, proxy_url: Option<String>) -> R
     Ok(())
 }
 
+/// 读取当前指定的自编译核心路径；未设置为 null。
+#[tauri::command]
+pub fn get_kernel_override_path(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    Ok(config.kernel_override_path.clone())
+}
+
+/// 保存自编译核心路径（llama-server.exe 绝对路径）；传空字符串或 null 表示清除并回退内置核心。
+/// 保存后加载模型与本页内核状态解析都优先使用该路径，正在运行的服务需重新加载模型才会切换。
+#[tauri::command]
+pub fn set_kernel_override_path(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let override_path = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let candidate = PathBuf::from(value);
+            if !candidate.is_absolute() {
+                return Err("请填写 llama-server.exe 的完整绝对路径（例如 D:\\llama.cpp\\build\\bin\\Release\\llama-server.exe）。".to_string());
+            }
+            if !candidate.is_file() {
+                return Err(format!("文件不存在：{}", value));
+            }
+            let name = candidate
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !process_manager::is_allowed_exe_name(name) {
+                return Err(format!(
+                    "仅支持核心可执行文件（llama-server.exe / llama-cli.exe 等），当前文件名：{}",
+                    name
+                ));
+            }
+            Ok(value.to_string())
+        })
+        .transpose()?;
+
+    {
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        let mut new_config = (*config).clone();
+        new_config.kernel_override_path = override_path.clone();
+        persist_config(&new_config)?;
+        *config = new_config;
+    }
+    auto_updater::set_kernel_override(override_path);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_tune_result(state: State<'_, AppState>, entry: TuneHistoryEntry) -> Result<(), String> {
     let mut config = state.config.lock().map_err(|e| e.to_string())?;
@@ -367,6 +421,9 @@ pub fn reset_app_config(state: State<'_, AppState>) -> Result<(), String> {
     // 内存中的 AppConfig 恢复成默认值。
     let mut guard = state.config.lock().map_err(|e| e.to_string())?;
     *guard = AppConfig::default();
+    drop(guard);
+    // 出厂重置后自编译核心路径同步清空，回退内置核心。
+    auto_updater::set_kernel_override(None);
 
     Ok(())
 }

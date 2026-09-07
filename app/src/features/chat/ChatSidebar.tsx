@@ -1,6 +1,5 @@
 ﻿import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Bot,
   CheckSquare,
   Download,
   MessageSquarePlus,
@@ -31,7 +30,6 @@ interface ChatSidebarProps {
   onDeleteSession: (sessionId: string) => void;
   onExportSession: (sessionId: string) => void;
   onOpenGlobalSettings: () => void;
-  onOpenAgent: () => void;
   onOpenModelLoad: () => void;
   onToggleTheme: () => void;
   onToggleCollapse: () => void;
@@ -60,7 +58,6 @@ export default function ChatSidebar({
   onDeleteSession,
   onExportSession,
   onOpenGlobalSettings,
-  onOpenAgent,
   onOpenModelLoad,
   onToggleTheme,
   onToggleCollapse,
@@ -243,7 +240,6 @@ export default function ChatSidebar({
         </button>
         <div className={`flex items-center gap-2 transition-all duration-200 ${collapsed ? 'flex-col justify-center' : ''}`}>
           <ThemeToggleButton theme={theme} onClick={onToggleTheme} />
-          <MiniToolButton icon={Bot} label="Agent（智能体）" onClick={onOpenAgent} />
           <MiniToolButton icon={Settings} label="软件设置" onClick={onOpenGlobalSettings} />
           <AnimatePresence initial={false}>
             {!collapsed && <motion.span {...expandedMotion} className="ml-auto text-xs text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">Agent LLM</motion.span>}

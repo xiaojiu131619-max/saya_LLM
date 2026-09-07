@@ -124,8 +124,8 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
   }[model.status];
 
   if (isSingleColumn) {
-    // 单列两行布局：第一行 = 名称 + 类型 + 大小 + 量化；第二行 = 标签 + 速度 + 操作按钮。
-    // 整卡可点进入参数页，操作按钮自行 stopPropagation。
+    // 单行紧凑布局：图标 + 名称 + 类型 + 大小 + 量化 + 能力标签 + 速度 + 最近使用 + 操作按钮，全部一行。
+    // 整卡可点进入参数页，操作按钮自行 stopPropagation；名字过长时截断让位，其余信息项恒可见。
     return (
       <article
         style={{ animationDelay: `${Math.min(index * 10, 80)}ms` }}
@@ -141,98 +141,99 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
           }
         }}
         aria-label={`打开 ${model.name} 的加载参数`}
-        className={`anim-card-rise model-glass-card group flex w-full cursor-pointer flex-col gap-1.5 px-3 py-2 ${
+        className={`anim-card-rise model-glass-card group flex min-h-[52px] w-full cursor-pointer items-center gap-2 px-3 py-1.5 ${
           isHighlighted ? 'model-glass-card--active' : ''
         } ${model.status === 'loading' ? 'model-glass-card--loading' : ''}`}
       >
-        {/* 第一行不换行：名字过长时截断让位，类型/大小/量化恒可见（窗口最小 800px 时仍放得下） */}
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)]">
-            <span
-              className="absolute inset-0 rounded-full opacity-20"
-              style={{ background: model.themeColorSolid }}
-            />
-            <ModelFamilyLogo
-              family={model.family}
-              architecture={model.architecture}
-              name={model.name}
-              size={16}
-              customSrc={model.customLogo}
-              tone={model.themeColorSolid}
-              className="relative"
-              fallback={<span className="relative text-sm font-semibold" style={{ color: model.themeColorSolid }}>{themeGroup.icon}</span>}
-            />
-            <span
-              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] ${statusClass}`}
-              title={statusLabel}
-            />
-          </span>
+        <span className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)]">
           <span
-            className="min-w-0 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
-            title={model.name}
+            className="absolute inset-0 rounded-full opacity-20"
+            style={{ background: model.themeColorSolid }}
+          />
+          <ModelFamilyLogo
+            family={model.family}
+            architecture={model.architecture}
+            name={model.name}
+            size={16}
+            customSrc={model.customLogo}
+            tone={model.themeColorSolid}
+            className="relative"
+            fallback={<span className="relative text-sm font-semibold" style={{ color: model.themeColorSolid }}>{themeGroup.icon}</span>}
+          />
+          <span
+            className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] ${statusClass}`}
+            title={statusLabel}
+          />
+        </span>
+
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+          title={model.name}
+        >
+          {model.name}
+        </span>
+
+        <CompactPill>
+          {model.modelType === 'moe' ? 'MoE' : '稠密'}
+        </CompactPill>
+        <CompactPill title={`${model.params} · ${model.fileSize}`}>
+          <span className="hidden sm:inline">{model.params} · </span>{model.fileSize}
+        </CompactPill>
+        <CompactPill className="hidden md:inline-flex">{model.quant}</CompactPill>
+
+        <span className="hidden min-[1000px]:inline-flex">
+          <CapabilityBadges model={model} dense onlyActive />
+        </span>
+        {model.avgTokensPerSec ? (
+          <CompactPill title="历史平均生成速度" className="hidden lg:inline-block">
+            {model.avgTokensPerSec.toFixed(1)} tok/s
+          </CompactPill>
+        ) : null}
+        {recentUsedAt && (
+          <span
+            className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
+            title={recentTitle}
           >
-            {model.name}
+            <History className="h-3 w-3" />
+            最近使用
           </span>
-          <CompactPill>
-            {model.modelType === 'moe' ? 'MoE' : '稠密'}
-          </CompactPill>
-          <CompactPill title={`${model.params} · ${model.fileSize}`}>
-            {model.params} · {model.fileSize}
-          </CompactPill>
-          <CompactPill>{model.quant}</CompactPill>
-          {recentUsedAt && (
-            <span
-              className="flex h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
-              title={recentTitle}
+        )}
+
+        <span className="ml-auto flex flex-shrink-0 items-center gap-1">
+          {launchMemory && (
+            <button
+              onClick={(event) => void handleQuickLaunch(event)}
+              disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
+              title={formatLaunchMemoryTitle(launchMemory.config)}
             >
-              <History className="h-3 w-3" />
-              最近使用
-            </span>
+              {quickStarting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Zap className="h-3.5 w-3.5 fill-current" />
+              )}
+            </button>
           )}
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5 pl-10">
-          <span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
-            <CapabilityBadges model={model} dense onlyActive twoLine />
-            <CompactPill title="历史平均生成速度">
-              {model.avgTokensPerSec ? `${model.avgTokensPerSec.toFixed(1)} tok/s` : 'tok/s 暂无'}
-            </CompactPill>
-          </span>
-          <span className="flex flex-shrink-0 items-center gap-1">
-            {launchMemory && (
-              <button
-                onClick={(event) => void handleQuickLaunch(event)}
-                disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
-                title={formatLaunchMemoryTitle(launchMemory.config)}
-              >
-                {quickStarting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Zap className="h-3.5 w-3.5 fill-current" />
-                )}
-              </button>
-            )}
-            {model.status === 'loaded' && (
-              <button
-                onClick={handleQuickChat}
-                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
-                title="开始对话"
-              >
-                <Play className="ml-0.5 h-3 w-3 text-[var(--accent)]" />
-              </button>
-            )}
-            {model.filePath && (
-              <button
-                onClick={handleReveal}
-                disabled={!isDesktopRuntime()}
-                className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--border)] disabled:opacity-40"
-                title="在资源管理器中显示"
-              >
-                <FolderSearch className="h-3 w-3 text-[var(--text-secondary)]" />
-              </button>
-            )}
-          </span>
-        </div>
+          {model.status === 'loaded' && (
+            <button
+              onClick={handleQuickChat}
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
+              title="开始对话"
+            >
+              <Play className="ml-0.5 h-3.5 w-3.5 text-[var(--accent)]" />
+            </button>
+          )}
+          {model.filePath && (
+            <button
+              onClick={handleReveal}
+              disabled={!isDesktopRuntime()}
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--border)] disabled:opacity-40"
+              title="在资源管理器中显示"
+            >
+              <FolderSearch className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            </button>
+          )}
+        </span>
       </article>
     );
   }
@@ -347,7 +348,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
 
 function CompactPill({ children, className = '', title }: { children: ReactNode; className?: string; title?: string }) {
   return (
-    <span title={title} className={`h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
+    <span title={title} className={`inline-flex h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
       {children}
     </span>
   );

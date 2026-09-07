@@ -1197,7 +1197,6 @@ export default function ChatPage() {
           }
           dispatch({ type: 'SET_VIEW', payload: 'settings' });
         }}
-        onOpenAgent={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
         onOpenModelLoad={handleOpenModelLoad}
         onToggleTheme={() => dispatch({ type: 'TOGGLE_THEME' })}
         onToggleCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}

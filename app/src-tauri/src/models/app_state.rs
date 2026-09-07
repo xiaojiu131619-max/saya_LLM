@@ -91,6 +91,10 @@ pub struct AppConfig {
     /// 首次启动环境检测是否已完成（无论是否全部通过）。
     /// false 时前端会运行一次环境检测并对未通过项弹出安装提示。
     pub env_check_done: bool,
+    /// 用户指定的自编译核心可执行文件（llama-server.exe 的绝对路径）。
+    /// 设置后加载模型与本页内核状态都优先使用该路径；None 表示使用内置版本化核心。
+    #[serde(default)]
+    pub kernel_override_path: Option<String>,
     /// dsh（DeepSeek Harness）接入配置（v0.4 新增，serde default 平滑迁移）。
     pub dsh: crate::models::dsh_types::DshConfig,
 }
@@ -115,6 +119,7 @@ impl Default for AppConfig {
             close_to_tray: true,
             proxy_url: None,
             env_check_done: false,
+            kernel_override_path: None,
             dsh: crate::models::dsh_types::DshConfig::default(),
         }
     }

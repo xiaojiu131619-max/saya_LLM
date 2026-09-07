@@ -14,6 +14,10 @@ import {
   HardDrive,
   Stethoscope,
   ChevronRight,
+  Wrench,
+  FolderOpen,
+  Save,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import PageHeader from '@/components/PageHeader';
@@ -22,10 +26,13 @@ import EnvCheckDialog from '@/features/workspace/EnvCheckDialog';
 import {
   cancelKernelUpdate,
   checkDesktopEngine,
+  getKernelOverridePath,
   isDesktopRuntime,
   listenDesktopEvent,
   listInstalledKernels,
   listRecentLlamaReleases,
+  pickKernelExe,
+  setKernelOverridePath,
   stopDesktopServer,
   updateLlamaKernel,
   type DesktopEngineInfo,
@@ -95,6 +102,11 @@ export default function KernelUpdatePage() {
   const [kernelDownloadSource, setKernelDownloadSource] = useState<KernelDownloadSource>(loadKernelDownloadSource);
   // 环境检测：手动打开检测弹窗（从「服务控制」并入核心更新）。
   const [envCheckOpen, setEnvCheckOpen] = useState(false);
+  // 自编译核心：已保存路径 + 输入框草稿 + 操作反馈。
+  const [overridePath, setOverridePath] = useState<string | null>(null);
+  const [overrideInput, setOverrideInput] = useState('');
+  const [overrideMessage, setOverrideMessage] = useState<string | null>(null);
+  const [overrideSaving, setOverrideSaving] = useState(false);
 
   const updating = updatingVersion !== null;
   const progressPercent = parseProgressPercent(engineMessage);
@@ -209,6 +221,48 @@ export default function KernelUpdatePage() {
     }
   };
 
+  const refreshOverride = async () => {
+    const saved = await getKernelOverridePath();
+    setOverridePath(saved);
+    setOverrideInput(saved ?? '');
+  };
+
+  const handleBrowseOverride = async () => {
+    const picked = await pickKernelExe();
+    if (picked) setOverrideInput(picked);
+  };
+
+  // 保存自编译核心路径；输入为空等价于恢复内置核心。后端会校验文件存在与可执行文件名。
+  const handleSaveOverride = async () => {
+    const trimmed = overrideInput.trim();
+    setOverrideSaving(true);
+    try {
+      await setKernelOverridePath(trimmed || null);
+      setOverridePath(trimmed || null);
+      setOverrideMessage(trimmed ? '已保存。重新加载模型后生效。' : '已清除，恢复使用内置核心。');
+      await refreshEngine();
+    } catch (error) {
+      setOverrideMessage(`保存失败：${String(error)}`);
+    } finally {
+      setOverrideSaving(false);
+    }
+  };
+
+  const handleClearOverride = async () => {
+    setOverrideSaving(true);
+    try {
+      await setKernelOverridePath(null);
+      setOverridePath(null);
+      setOverrideInput('');
+      setOverrideMessage('已清除，恢复使用内置版本化核心。');
+      await refreshEngine();
+    } catch (error) {
+      setOverrideMessage(`清除失败：${String(error)}`);
+    } finally {
+      setOverrideSaving(false);
+    }
+  };
+
   // 进入页面自动检查：当前内核 + 发布列表 + 本机已安装核心一次到位。
   useEffect(() => {
     if (autoCheckedRef.current || typeof window === 'undefined') return;
@@ -228,6 +282,11 @@ export default function KernelUpdatePage() {
         setListMessage(`自动读取发布列表失败：${String(error)}`);
       }
     })();
+  }, []);
+
+  // 已保存的自编译核心路径一次到位（非桌面运行时返回 null，同样落到空输入框）。
+  useEffect(() => {
+    void refreshOverride();
   }, []);
 
   const versionBadge = (() => {
@@ -472,6 +531,78 @@ export default function KernelUpdatePage() {
           {!updating && engineMessage && (
             <p className="mt-4 px-1 text-xs text-secondary-custom">{engineMessage}</p>
           )}
+
+          <SettingSection title="自编译核心" icon={Wrench} delay={0.2}>
+            <SettingRow
+              label="核心路径指定"
+              description={
+                overridePath
+                  ? '自编译核心已启用：加载模型、跑分与本页内核状态都优先使用它。'
+                  : '当前使用内置版本化核心。要运行自编译的 llama.cpp，在此指定 llama-server.exe 的完整路径。'
+              }
+            >
+              {overridePath ? (
+                <span className="flex-shrink-0 rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-success)]">
+                  自编译核心
+                </span>
+              ) : (
+                <span className="flex-shrink-0 rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[10px] font-medium text-secondary-custom">
+                  内置核心
+                </span>
+              )}
+            </SettingRow>
+            <div className="border-t border-[var(--border-subtle)]" />
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <input
+                  value={overrideInput}
+                  onChange={(event) => setOverrideInput(event.target.value)}
+                  placeholder="例如 D:\llama.cpp\build\bin\Release\llama-server.exe"
+                  spellCheck={false}
+                  className="form-input min-w-0 flex-1 px-3 py-2 font-mono text-xs text-primary-custom"
+                />
+                <button
+                  onClick={() => void handleBrowseOverride()}
+                  disabled={overrideSaving || updating}
+                  className="flex min-h-9 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] px-2.5 text-xs text-primary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  浏览
+                </button>
+              </div>
+              <div className="flex items-start justify-between gap-3">
+                <p
+                  className={`min-w-0 text-xs leading-5 ${
+                    state.serverRunning && overridePath
+                      ? 'text-[var(--state-warning)]'
+                      : 'text-secondary-custom'
+                  }`}
+                >
+                  {state.serverRunning && overridePath
+                    ? '服务正在运行：停止并重新加载模型后，新核心才会生效。'
+                    : (overrideMessage ?? '重新加载模型后生效；路径失效时自动回退内置核心。')}
+                </p>
+                <div className="flex flex-shrink-0 gap-2">
+                  <button
+                    onClick={() => void handleClearOverride()}
+                    disabled={overrideSaving || updating || !overridePath}
+                    className="flex min-h-8 items-center gap-1 rounded-md px-2 text-xs text-secondary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    恢复内置
+                  </button>
+                  <button
+                    onClick={() => void handleSaveOverride()}
+                    disabled={overrideSaving || updating || overrideInput.trim() === (overridePath ?? '')}
+                    className="flex min-h-8 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                  >
+                    {overrideSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
+                </div>
+              </div>
+            </div>
+          </SettingSection>
         </div>
       </div>
 

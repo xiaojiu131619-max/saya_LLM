@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useReducer, useRef, 
 import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset } from '@/types';
 import {
   checkDesktopEngine,
+  getApiTokenUsage,
   getDesktopConfig,
   getDesktopServerStatus,
   getDesktopSystemAppearance,
@@ -94,6 +95,18 @@ type Action =
         tokensPerSec?: number;
         firstTokenDelay?: number;
         genTime?: number;
+      };
+    }
+  | {
+      type: 'SET_API_USAGE';
+      payload: {
+        modelId: string;
+        modelName?: string;
+        modelColor?: string;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        responseCount: number;
       };
     };
 
@@ -714,6 +727,31 @@ function appReducer(state: AppState, action: Action): AppState {
           : model),
       };
     }
+    // 快照式写入外部 API 的 token 用量（比 ADD_USAGE 更适合“整块累计”场景，
+    // 避免增量差分导致 prompt/completion 重复累加或百分比失真）。
+    case 'SET_API_USAGE': {
+      const { modelId, modelName, modelColor, promptTokens, completionTokens, totalTokens, responseCount } = action.payload;
+      const existing = state.usageByModel[modelId];
+      const prevTotal = existing?.totalTokens ?? 0;
+      const day = todayKey();
+      const nextUsage: ModelUsageStats = {
+        modelName: modelName ?? existing?.modelName ?? modelId,
+        modelColor: modelColor ?? existing?.modelColor,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        responseCount,
+        totalTokensPerSec: existing?.totalTokensPerSec ?? 0,
+        totalFirstTokenDelay: existing?.totalFirstTokenDelay ?? 0,
+        totalGenTime: existing?.totalGenTime ?? 0,
+        lastUsedAt: Date.now(),
+        dailyTokens: {
+          ...(existing?.dailyTokens ?? {}),
+          [day]: (existing?.dailyTokens[day] ?? 0) + Math.max(0, totalTokens - prevTotal),
+        },
+      };
+      return { ...state, usageByModel: { ...state.usageByModel, [modelId]: nextUsage } };
+    }
     default:
       return state;
   }
@@ -1006,6 +1044,76 @@ export function AppProvider({ children }: { children: ReactNode }) {
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [state.activeModelId]);
+
+  // 轮询 llama-server 日志累计的 token 用量（含对外 API / dsh 等非前端聊天请求）。
+  // key = `api-<model_name>`；为避免把已在前端聊天统计里计入的 token 重复累加，
+  // 先从日志总额里扣掉前端聊天统计（state.usageByModel 里非 api- 前缀同模型名的 total）。
+  const usageByModelRef = useRef(state.usageByModel);
+  useEffect(() => {
+    usageByModelRef.current = state.usageByModel;
+  }, [state.usageByModel]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      if (disposed) return;
+      try {
+        const entries = await getApiTokenUsage();
+        if (disposed || !Array.isArray(entries)) return;
+        for (const entry of entries) {
+          const modelId = `api-${entry.model_name}`;
+          // 该模型在前端聊天统计里已计入的 token（真实模型 id，非 api- 前缀）。
+          // 日志总额 = 聊天 + 外部 API；净 API = 总额 − 已计聊天，避免总数虚高。
+          const chat = Object.entries(usageByModelRef.current)
+            .filter(([id]) => !id.startsWith('api-'))
+            .reduce(
+              (acc, [id, usage]) => {
+                const matches = usage.modelName === entry.model_name || id === entry.model_name;
+                if (!matches) return acc;
+                return {
+                  promptTokens: acc.promptTokens + usage.promptTokens,
+                  completionTokens: acc.completionTokens + usage.completionTokens,
+                  totalTokens: acc.totalTokens + usage.totalTokens,
+                };
+              },
+              { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            );
+          // 净 API 消耗（钳制为 ≥0）。
+          const apiTotal = Math.max(0, entry.total_tokens - chat.totalTokens);
+          if (apiTotal <= 0) {
+            continue;
+          }
+          const apiPrompt = Math.min(entry.prompt_tokens, apiTotal);
+          const apiCompletion = apiTotal - apiPrompt;
+          dispatch({
+            type: 'SET_API_USAGE',
+            payload: {
+              modelId,
+              modelName: `API · ${entry.model_name}`,
+              modelColor: 'var(--accent)',
+              promptTokens: apiPrompt,
+              completionTokens: apiCompletion,
+              totalTokens: apiTotal,
+              responseCount: entry.response_count,
+            },
+          });
+        }
+      } catch {
+        // 桌面运行时偶尔失效（服务刚重启）时静默跳过，下个周期再试。
+        return;
+      }
+      timer = window.setTimeout(poll, 2000);
+    };
+    void poll();
+
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [dispatch]);
 
   // H1: 把"构建快照 + JSON.stringify + 同步写 localStorage"集中到一个 ref 函数，
   // 流式输出时每个 token 都会改写 chatSessions，若每次都全量序列化+写盘会严重阻塞主线程。

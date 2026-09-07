@@ -367,8 +367,13 @@ pub async fn dsh_bind_model(
     let write_base = base_url.clone();
     let write_model = model_id.clone();
     let write_key = api_key.clone();
+    // 从当前生效的 llama-server 配置取真实上下文，避免在 dsh 里写死固定值。
+    // 仅当本次加载的模型可查到 n_ctx 时上报，否则省略由 dsh 按协议默认。
+    let write_ctx = crate::services::process_manager::current_server_config()
+        .map(|config| config.n_ctx)
+        .filter(|ctx| *ctx > 0);
     tokio::task::spawn_blocking(move || {
-        dsh_config_service::write_provider(&write_base, &write_model, write_key.as_deref())
+        dsh_config_service::write_provider(&write_base, &write_model, write_key.as_deref(), write_ctx)
     })
     .await
     .map_err(|e| e.to_string())??;

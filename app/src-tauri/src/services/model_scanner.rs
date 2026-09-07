@@ -45,9 +45,10 @@ fn cache_path(file_path: &Path) -> PathBuf {
     get_cache_dir().join(format!("{:016x}.json", hash))
 }
 
-// v18：MTP 架构白名单对齐部署内核二进制标记（补 GLM4/GLM-DSA/DeepSeek32/DeepSeek4/
-// MiMo2/Nemotron-H-MoE/Qwen3Next/HY-V3，保留 cohere2moe/step35），递增版本使旧扫描缓存失效。
-const SCANNER_VERSION: u32 = 21;
+// v22：mmproj 侧车加维度级配对校验（projection_dim == 主模型 embedding_length），
+// 修复目录里无关 mmproj（如 Qwen 的投影）被挂到任意模型上导致加载时报
+// "mismatch between text model and mmproj" 而启动失败；递增版本使旧扫描缓存失效。
+const SCANNER_VERSION: u32 = 22;
 
 fn infer_video_support(
     name: &str,
@@ -452,6 +453,32 @@ fn optional_values_match<T: PartialEq>(left: Option<T>, right: Option<T>) -> boo
     }
 }
 
+/// mmproj 侧车与主模型的维度级配对校验。
+/// llama.cpp 加载 mmproj 时要求投影维度与主模型 n_embd 一致，否则报
+/// "mismatch between text model (n_embd) and mmproj (n_embd)" 并退出；
+/// 这里用 GGUF 元数据提前把关，避免目录里无关的 mmproj 被挂到模型上导致加载失败。
+/// mmproj 缺少 projection_dim 元数据时保守放行，交由加载时校验兜底。
+fn mmproj_is_compatible(main: Option<&GgufMetadata>, mmproj: &GgufMetadata) -> bool {
+    let Some(main) = main else {
+        return true;
+    };
+    if main.embedding_length == 0 {
+        return true;
+    }
+    let projections: Vec<u64> = mmproj
+        .metadata_entries
+        .iter()
+        .filter(|(key, _)| {
+            key == "clip.vision.projection_dim" || key == "clip.audio.projection_dim"
+        })
+        .filter_map(|(_, value)| value.parse::<u64>().ok())
+        .collect();
+    if projections.is_empty() {
+        return true;
+    }
+    projections.iter().any(|dim| *dim == main.embedding_length)
+}
+
 pub(crate) fn mtp_draft_is_compatible(main: &GgufMetadata, draft: &GgufMetadata) -> bool {
     let gemma4_assistant =
         main.architecture == "gemma4" && draft.architecture == "gemma4-assistant";
@@ -607,7 +634,10 @@ fn find_companion_gguf(
                 Err(_) => continue,
             };
             let valid = match kind {
-                "mmproj" => metadata.mmproj_supports_vision || metadata.mmproj_supports_audio,
+                "mmproj" => {
+                    (metadata.mmproj_supports_vision || metadata.mmproj_supports_audio)
+                        && mmproj_is_compatible(target, &metadata)
+                }
                 "mtp" => target.is_some_and(|main| mtp_draft_is_compatible(main, &metadata)),
                 // DSpark/DFlash 草稿架构随 llama.cpp 版本演进，这里不做 GGUF 内部
                 // 校验：命名匹配 + 可解析即候选，真正的配对校验由 llama-server 在
@@ -915,6 +945,17 @@ mod tests {
     /// 写一个可被 parse_gguf_header 接受的最小合成 GGUF
     ///（general.architecture + block_count + 一个主模型张量）。
     fn write_scanner_gguf(path: &Path, arch: &str, block_count: u32) {
+        write_scanner_gguf_extra(path, arch, block_count, &[], &[]);
+    }
+
+    /// 写入带额外 KV 的最小 GGUF：extra_kv 为 u32 标量，extra_bools 为布尔标量。
+    fn write_scanner_gguf_extra(
+        path: &Path,
+        arch: &str,
+        block_count: u32,
+        extra_kv: &[(&str, u32)],
+        extra_bools: &[(&str, bool)],
+    ) {
         fn push_string(data: &mut Vec<u8>, value: &str) {
             data.extend_from_slice(&(value.len() as u64).to_le_bytes());
             data.extend_from_slice(value.as_bytes());
@@ -924,18 +965,30 @@ mod tests {
             data.extend_from_slice(&4u32.to_le_bytes());
             data.extend_from_slice(&value.to_le_bytes());
         }
+        fn push_bool_kv(data: &mut Vec<u8>, key: &str, value: bool) {
+            push_string(data, key);
+            data.extend_from_slice(&7u32.to_le_bytes());
+            data.push(u8::from(value));
+        }
 
+        let kv_count = 4 + extra_kv.len() + extra_bools.len();
         let mut data = Vec::new();
         data.extend_from_slice(b"GGUF");
         data.extend_from_slice(&3u32.to_le_bytes());
         data.extend_from_slice(&1u64.to_le_bytes()); // tensor count
-        data.extend_from_slice(&4u64.to_le_bytes()); // kv count
+        data.extend_from_slice(&(kv_count as u64).to_le_bytes());
         push_string(&mut data, "general.architecture");
         data.extend_from_slice(&8u32.to_le_bytes()); // string
         push_string(&mut data, arch);
         push_u32_kv(&mut data, &format!("{arch}.block_count"), block_count);
         push_u32_kv(&mut data, "general.name", 0);
         push_u32_kv(&mut data, "general.context_length", 32_768);
+        for (key, value) in extra_kv {
+            push_u32_kv(&mut data, key, *value);
+        }
+        for (key, value) in extra_bools {
+            push_bool_kv(&mut data, key, *value);
+        }
         // 张量：名字 + n_dims=1 + dim + type + offset
         push_string(&mut data, "blk.0.attn_norm.weight");
         data.extend_from_slice(&1u32.to_le_bytes());
@@ -1019,6 +1072,94 @@ mod tests {
             info_b.dspark_draft_path.is_none(),
             "家族不匹配的侧车不得跨模型挂载"
         );
+    }
+
+    #[test]
+    fn mmproj_needs_matching_projection_dim() {
+        // 复刻线上场景：D:\LLM 平铺目录里放着 Qwen 的 mmproj，Spark-X2.5-4B（n_embd 2560）
+        // 曾被挂上投影维度 5120 的无关 mmproj，llama-server 加载时报 mismatch 退出。
+        let dir = scanner_test_dir("mmproj-dim");
+        let main = dir.join("Spark-X2.5-4B.gguf");
+        write_scanner_gguf_extra(
+            &main,
+            "spark2_5",
+            36,
+            &[("spark2_5.embedding_length", 2560)],
+            &[],
+        );
+        let stray = dir.join("mmproj-Qwen3.8-27B-Uncensored-f16.gguf");
+        write_scanner_gguf_extra(
+            &stray,
+            "clip",
+            0,
+            &[("clip.vision.projection_dim", 5120)],
+            &[("clip.has_vision_encoder", true)],
+        );
+        let qwen = dir.join("Qwen3.8-27B-Uncensored-IQ2_XXS.gguf");
+        write_scanner_gguf_extra(
+            &qwen,
+            "qwen35",
+            48,
+            &[("qwen35.embedding_length", 5120)],
+            &[],
+        );
+
+        let info_main = parse_model_info_from_path(&main).expect("parse spark model");
+        assert!(
+            info_main.mmproj_path.is_none(),
+            "投影维度不匹配的 mmproj 不得挂到模型上"
+        );
+        let info_qwen = parse_model_info_from_path(&qwen).expect("parse qwen model");
+        assert!(
+            info_qwen.mmproj_path.is_some(),
+            "维度匹配的主模型仍应正常挂载 mmproj"
+        );
+
+        // 目录里出现维度匹配的 mmproj 时恢复配对（前缀命名即可，无需名字重合）。
+        let matched = dir.join("mmproj-Spark-X2.5-4B-f16.gguf");
+        write_scanner_gguf_extra(
+            &matched,
+            "clip",
+            0,
+            &[("clip.vision.projection_dim", 2560)],
+            &[("clip.has_vision_encoder", true)],
+        );
+        let info_matched = parse_model_info_from_path(&main).expect("parse spark model again");
+        assert!(
+            info_matched.mmproj_path.is_some(),
+            "维度匹配的 mmproj 应正常挂载"
+        );
+    }
+
+    #[test]
+    fn mmproj_compatibility_without_projection_dim_stays_permissive() {
+        // 老 mmproj 可能没有 projection_dim 元数据：不拦截，交由加载时校验兜底。
+        let main = GgufMetadata {
+            embedding_length: 2560,
+            ..GgufMetadata::default()
+        };
+        assert!(mmproj_is_compatible(Some(&main), &vision_projector("llava")));
+        assert!(mmproj_is_compatible(None, &vision_projector("llava")));
+
+        let audio_matched = GgufMetadata {
+            mmproj_supports_audio: true,
+            metadata_entries: vec![(
+                "clip.audio.projection_dim".to_string(),
+                "2560".to_string(),
+            )],
+            ..GgufMetadata::default()
+        };
+        assert!(mmproj_is_compatible(Some(&main), &audio_matched));
+
+        let audio_mismatched = GgufMetadata {
+            mmproj_supports_audio: true,
+            metadata_entries: vec![(
+                "clip.audio.projection_dim".to_string(),
+                "4096".to_string(),
+            )],
+            ..GgufMetadata::default()
+        };
+        assert!(!mmproj_is_compatible(Some(&main), &audio_mismatched));
     }
 
     #[test]

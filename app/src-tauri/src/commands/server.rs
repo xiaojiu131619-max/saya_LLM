@@ -89,6 +89,13 @@ pub fn clear_server_logs() -> Result<(), String> {
     Ok(())
 }
 
+/// 读取自当前模型加载以来累计的 token 用量（qllama-server `slot print_timing` 解析）。
+/// 供前端把经 llama-server 的全部请求（含对外 API / dsh）并入使用详情。
+#[tauri::command]
+pub fn api_token_usage() -> Vec<process_manager::TokenUsageAgg> {
+    process_manager::api_token_usage()
+}
+
 /// 读取统一日志中枢。since_ms 大于 0 时返回该时间戳之后的增量，供前端轮询。
 #[tauri::command]
 pub fn get_system_logs(since_ms: Option<u64>) -> Result<Vec<process_manager::SystemLogEntry>, String> {

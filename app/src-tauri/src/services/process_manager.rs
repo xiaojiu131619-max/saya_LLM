@@ -143,6 +143,23 @@ use crate::services::model_scanner::mtp_draft_is_compatible;
 static CHILD_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 static SERVER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SYSTEM_LOGS: Lazy<Mutex<Vec<SystemLogEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// 单个模型的 token 累计（来自 llama-server `slot print_timing` 日志行）。
+/// 对外 API / dsh / 应用内聊天请求都会产生这些日志行，在这里统一累计，
+/// 前端据此把「经 llama-server 的全部 token 消耗」并入使用详情。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TokenUsageAgg {
+    pub model_name: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub response_count: u64,
+    /// 最近一次解析到的时间戳（毫秒），用于去抖。
+    pub last_seen_ms: u64,
+}
+
+/// 全量 token 累计表：key = 模型 alias（同一次服务期间只有一个模型）。
+static API_TOKEN_USAGE: Lazy<Mutex<Vec<TokenUsageAgg>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static LAST_SERVER_CONFIG: Lazy<Mutex<Option<ServerConfig>>> = Lazy::new(|| Mutex::new(None));
 static SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -350,7 +367,7 @@ fn build_redacted_command_line(exe: &str, cmd: &Command) -> String {
     s
 }
 
-fn is_allowed_exe_name(name: &str) -> bool {
+pub(crate) fn is_allowed_exe_name(name: &str) -> bool {
     matches!(name, "llama-server.exe" | "llama-bench.exe" | "llama-cli.exe" | "llama-quantize.exe" | "llama-fit-params.exe")
 }
 
@@ -379,6 +396,9 @@ pub(crate) fn resolve_exe_path(path: &str) -> String {
             exe_dir.as_ref().map(|d| d.join("resources")),
             exe_dir.as_ref().and_then(|d| d.parent().map(|g| g.join("resources"))),
             exe_dir.clone(),
+            // 用户指定的自编译核心所在目录：同样只放行该目录与白名单文件名。
+            crate::services::auto_updater::kernel_override()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf())),
         ]
         .into_iter()
         .flatten()
@@ -415,6 +435,8 @@ pub(crate) fn resolve_exe_path(path: &str) -> String {
         .and_then(|d| d.parent().map(|p| p.to_path_buf()));
 
     let candidates: Vec<PathBuf> = [
+        // 用户指定的自编译核心优先；路径失效时自然落回版本化目录与内置 resources。
+        crate::services::auto_updater::kernel_override(),
         // 版本化核心目录优先：kernels/<版本>_<时间>/ 里的最新一个。
         crate::services::auto_updater::active_kernel_exe(),
         exe_dir
@@ -1307,6 +1329,15 @@ fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 当前生效的 llama-server 启动配置（进程未启动时可能为 None）。
+/// 供 dsh 接入等处读取真实上下文长度等参数，避免写死固定值。
+pub fn current_server_config() -> Option<ServerConfig> {
+    LAST_SERVER_CONFIG
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
 pub fn ping_server() -> PingResult {
     let config = match LAST_SERVER_CONFIG
         .lock()
@@ -2076,6 +2107,8 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
     );
 
     stop_server().ok();
+    // 启动（或切换）模型时清空跨模型累计的 token 用量，避免串号。
+    clear_api_usage();
 
     let exe = resolve_exe_path(&config.executable_path);
     eprintln!("[server] resolved exe path: {}", exe);
@@ -2353,8 +2386,107 @@ pub fn add_log(line: &str) {
             logs.drain(0..1000);
         }
     }
+    // 从 llama-server 的请求完成日志（slot print_timing）解析 token 用量。
+    collect_api_usage(line);
     // llama-server 的原始输出同步进统一日志中枢，按内容分级。
     push_system_log(classify_llama_level(line), "llama", line);
+}
+
+/// 解析 llama-server 每条请求完成时的 `slot print_timing` 行中的 token 计数，
+/// 累进 API_TOKEN_USAGE。
+///
+/// 格式（llama.cpp `server` 侧稳定输出）：
+/// `slot print_timing: id  N | task M | prompt eval time = X ms / P tokens (...)`
+/// `slot print_timing: id  N | task M |        eval time = Y ms / C tokens (...)`
+/// `slot print_timing: id  N | task M |       total time = Z ms / T tokens`
+///
+/// 只统计 `prompt eval` 与 `eval` 两行（P=prompt，C=completion），跳过 total 行以免重复。
+fn collect_api_usage(line: &str) {
+    if !line.contains("slot print_timing") || !line.contains("tokens") {
+        return;
+    }
+    let Some((prompt, completion)) = parse_print_timing(line) else {
+        return;
+    };
+    let model_name = current_server_model_name();
+
+    if let Ok(mut table) = API_TOKEN_USAGE.lock() {
+        let entry = if let Some(entry) = table.iter_mut().find(|e| e.model_name == model_name) {
+            entry
+        } else {
+            table.push(TokenUsageAgg {
+                model_name: model_name.clone(),
+                ..TokenUsageAgg::default()
+            });
+            table.last_mut().expect("刚 push，必存在")
+        };
+        if prompt > 0 {
+            entry.prompt_tokens += prompt;
+        }
+        if completion > 0 {
+            entry.completion_tokens += completion;
+        }
+        let added = prompt + completion;
+        if added > 0 {
+            entry.total_tokens += added;
+            entry.response_count += 1;
+        }
+        entry.last_seen_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    }
+}
+
+/// 从单行 `slot print_timing` 里抽出 (prompt_tokens, completion_tokens)：
+/// `prompt eval` 行返回 (P, 0)，`eval` 行返回 (0, C)，其它（如 total）返回 None。
+fn parse_print_timing(line: &str) -> Option<(u64, u64)> {
+    let is_prompt = line.contains("prompt eval time");
+    let is_eval = line.contains("eval time") && !line.contains("prompt eval time");
+    if !is_prompt && !is_eval {
+        return None;
+    }
+    // 找 " / <N> tokens" 片段。
+    let tokens_part = line
+        .split('/')
+        .nth(1)
+        .and_then(|rest| rest.trim().split_whitespace().next())?;
+    let count: u64 = tokens_part.parse().ok()?;
+    if is_prompt {
+        Some((count, 0))
+    } else {
+        Some((0, count))
+    }
+}
+
+/// 当前服务关联的模型名（优先 alias，其次模型文件名），用于归并 token 统计。
+fn current_server_model_name() -> String {
+    let model_name = LAST_SERVER_CONFIG
+        .lock()
+        .ok()
+        .and_then(|config| config.as_ref().map(|c| {
+            c.model_alias
+                .clone()
+                .or_else(|| {
+                    std::path::Path::new(&c.model_path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                })
+        }))
+        .flatten();
+    model_name.unwrap_or_else(|| "llama-server".to_string())
+}
+
+/// 读取当前累计的 token 用量（供前端并入使用详情）。
+pub fn api_token_usage() -> Vec<TokenUsageAgg> {
+    API_TOKEN_USAGE
+        .lock()
+        .map(|table| table.clone())
+        .unwrap_or_default()
+}
+
+/// 清空 token 用量累计（服务重启/切换模型时调用，避免跨模型串号）。
+pub fn clear_api_usage() {
+    if let Ok(mut table) = API_TOKEN_USAGE.lock() {
+        table.clear();
+    }
 }
 
 /// 按内容给 llama-server 输出行分级，纯启发式，只影响展示颜色与筛选。
@@ -2488,6 +2620,21 @@ mod tests {
     fn parse_listed_devices_reads_cuda() {
         let output = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4090 (24576 MiB, 24000 MiB free)\n";
         assert_eq!(super::parse_listed_devices(output), vec!["CUDA0"]);
+    }
+
+    #[test]
+    fn parse_print_timing_extracts_tokens() {
+        // prompt_eval 行返回 (P, 0)；eval 行返回 (0, C)；total 行返回 None。
+        let prompt = "0.09.682.736 I slot print_timing: id  3 | task 0 | prompt eval time =      73.83 ms /    18 tokens (    4.10 ms per token,   243.79 tokens per second)";
+        let eval = "0.09.682.741 I slot print_timing: id  3 | task 0 |        eval time =     197.04 ms /    16 tokens (   13.14 ms per token,    76.13 tokens per second)";
+        let total = "0.09.682.742 I slot print_timing: id  3 | task 0 |       total time =     270.88 ms /    34 tokens";
+        assert_eq!(super::parse_print_timing(prompt), Some((18, 0)));
+        assert_eq!(super::parse_print_timing(eval), Some((0, 16)));
+        assert_eq!(super::parse_print_timing(total), None);
+        // 无关行/缺 tokens 的行返回 None。
+        assert_eq!(super::parse_print_timing("llama_server: listening on http://0.0.0.0:8080"), None);
+        assert_eq!(super::parse_print_timing("slot print_timing: prompt eval time = x"), None);
+        assert_eq!(super::parse_print_timing(""), None);
     }
 
     #[test]

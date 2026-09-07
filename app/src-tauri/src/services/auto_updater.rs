@@ -8,12 +8,38 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 static UPDATE_LOG: Lazy<PathBuf> = Lazy::new(|| resource_dir().join("update.log"));
 
 /// 用户请求取消当前更新任务的全局标志。
 /// 下载循环与各安装阶段都会检查它，命中后尽快返回错误并清理现场。
 static UPDATE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// 用户指定的自编译核心路径（llama-server.exe 绝对路径）全局镜像。
+/// 启动加载配置与 set_kernel_override_path 时写入，
+/// 供 resolve_exe_path 在拿不到 AppState 的调用点（进程管理、环境检测等）读取。
+static KERNEL_OVERRIDE: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+
+/// 同步自编译核心路径到全局镜像；None 表示清除并回退内置核心。
+pub fn set_kernel_override(path: Option<String>) {
+    let trimmed = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Ok(mut guard) = KERNEL_OVERRIDE.lock() {
+        *guard = trimmed;
+    }
+}
+
+/// 当前生效的自编译核心路径；未设置时返回 None。
+pub fn kernel_override() -> Option<PathBuf> {
+    KERNEL_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
 
 pub fn request_cancel() {
     UPDATE_CANCELLED.store(true, Ordering::SeqCst);

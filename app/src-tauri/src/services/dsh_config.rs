@@ -18,10 +18,6 @@ use serde_yaml::Value;
 pub const PROVIDER_ID: &str = "agent-llm-local";
 /// 提供方显示名。
 pub const PROVIDER_DISPLAY_NAME: &str = "Agent LLM 本地模型";
-/// dsh 会话默认输出的最大 token（spike 实测推理模型需要足量空间）。
-const MODEL_MAX_TOKENS: u32 = 8192;
-/// contextWindow 上报值（提示用途；真实上下文以 llama-server 启动参数为准）。
-const MODEL_CONTEXT_WINDOW: u32 = 32768;
 
 fn settings_path() -> PathBuf {
     crate::services::dsh_installer::dsh_home_dir().join("settings.yaml")
@@ -93,8 +89,9 @@ pub fn write_provider(
     base_url: &str,
     model_id: &str,
     api_key: Option<&str>,
+    context_window: Option<u32>,
 ) -> Result<(), String> {
-    write_provider_at(&settings_path(), base_url, model_id, api_key)
+    write_provider_at(&settings_path(), base_url, model_id, api_key, context_window)
 }
 
 /// `write_provider` 的路径参数化版本（单测使用）。
@@ -103,20 +100,29 @@ pub(crate) fn write_provider_at(
     base_url: &str,
     model_id: &str,
     api_key: Option<&str>,
+    context_window: Option<u32>,
 ) -> Result<(), String> {
     let mut root = read_root_at(path)?;
     let authorization = format!("Bearer {}", api_key.unwrap_or("unused"));
+    // contextWindow 用真实运行配置（否则省略，让 dsh 按协议默认），
+    // maxTokens 不再写死：dsh 会话输出上限跟随模型实际能力，而非固定 8192。
+    let model_entry = match context_window {
+        Some(ctx) => serde_json::json!({
+            "id": model_id,
+            "name": model_id,
+            "contextWindow": ctx,
+        }),
+        None => serde_json::json!({
+            "id": model_id,
+            "name": model_id,
+        }),
+    };
     let provider = serde_yaml::to_value(serde_json::json!({
         "displayName": PROVIDER_DISPLAY_NAME,
         "api": "openai-completions",
         "baseURL": format!("{}/v1", base_url.trim_end_matches('/')),
         "headers": { "authorization": authorization },
-        "models": [ {
-            "id": model_id,
-            "name": model_id,
-            "contextWindow": MODEL_CONTEXT_WINDOW,
-            "maxTokens": MODEL_MAX_TOKENS,
-        } ]
+        "models": [ model_entry ],
     }))
     .map_err(|e| format!("无法构造提供方配置：{}", e))?;
     set_nested(
@@ -302,7 +308,7 @@ mod tests {
         let path = temp_settings("roundtrip");
         std::fs::write(&path, USER_KEYS_YAML).unwrap();
 
-        write_provider_at(&path, "http://127.0.0.1:8080", "demo-model", None).unwrap();
+        write_provider_at(&path, "http://127.0.0.1:8080", "demo-model", None, Some(32768)).unwrap();
         let (model, base_url) = read_binding_at(&path);
         assert_eq!(model.as_deref(), Some("demo-model"));
         assert_eq!(base_url.as_deref(), Some("http://127.0.0.1:8080/v1"));
@@ -311,6 +317,10 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("welcomeNoticeVersion"));
         assert!(text.contains("agent-presets"));
+
+        // contextWindow 上报真实上下文；maxTokens 不再写死（省略跟随协议默认）。
+        assert!(text.contains("contextWindow: 32768"));
+        assert!(!text.contains("maxTokens"), "maxTokens 不应再写死，应省略由协议默认");
 
         // 备份文件在首次写入时生成。
         assert!(path.with_extension("yaml.bak").exists());
@@ -321,7 +331,7 @@ mod tests {
     fn remove_provider_keeps_user_keys_and_foreign_default() {
         let path = temp_settings("remove");
         std::fs::write(&path, USER_KEYS_YAML).unwrap();
-        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None).unwrap();
+        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None, None).unwrap();
 
         // 用户手动把默认模型改成别的提供方时，解除接入不得误删。
         let mut root = read_root_at(&path).unwrap();
@@ -339,7 +349,7 @@ mod tests {
         assert!(text.contains("welcomeNoticeVersion"));
 
         // 默认模型仍指向本应用时才一并移除。
-        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None).unwrap();
+        write_provider_at(&path, "http://127.0.0.1:9000", "m1", None, None).unwrap();
         remove_provider_at(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("agent-default-model"));
