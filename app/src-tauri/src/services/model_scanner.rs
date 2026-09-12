@@ -48,7 +48,11 @@ fn cache_path(file_path: &Path) -> PathBuf {
 // v22：mmproj 侧车加维度级配对校验（projection_dim == 主模型 embedding_length），
 // 修复目录里无关 mmproj（如 Qwen 的投影）被挂到任意模型上导致加载时报
 // "mismatch between text model and mmproj" 而启动失败；递增版本使旧扫描缓存失效。
-const SCANNER_VERSION: u32 = 22;
+// v23：新增 model_task（chat / embedding / rerank）与 pooling_type 解析，旧缓存
+// 不含这两个字段，必须递增版本触发重扫。
+// v24：修正多模态嵌入模型的能力判定——embedding 任务同样保留 mmproj（供图片/视频
+// 向量），只剥离推测解码侧车；旧缓存的 embedding 模型 mmproj 被错误置空，需重扫。
+const SCANNER_VERSION: u32 = 24;
 
 fn infer_video_support(
     name: &str,
@@ -371,6 +375,83 @@ fn parse_quantization(name: &str) -> Option<String> {
 
 fn is_moe(name: &str) -> bool {
     name.contains("MoE") || name.contains("moe") || name.contains("A3B") || name.contains("A4B")
+}
+
+/// 编码器类嵌入架构（llama.cpp 以非因果注意力运行，专门做句向量）。
+fn is_embedding_architecture(arch: &str) -> bool {
+    matches!(
+        arch,
+        "bert"
+            | "nomic-bert"
+            | "nomic-bert-moe"
+            | "jina-bert-v2"
+            | "jina-bert-v3"
+            | "modernbert"
+            | "t5encoder"
+            | "bge"
+            | "gte"
+            | "e5"
+    )
+}
+
+/// 判定模型任务类型：chat / embedding / rerank。
+///
+/// 优先级（从权威到宽松）：
+/// 1. 重排：`pooling_type == rank` 或名字含 rerank/ranker；
+/// 2. 嵌入：`pooling_type` 为 mean/cls/last、`attention.causal == false`（双向编码器）、
+///    编码器架构白名单，或文件名带 embed / 常见向量模型前缀；
+/// 3. 其余按 chat（对话/补全）处理。
+///
+/// 之所以先看 GGUF 元数据再看文件名：pooling_type / attention.causal 是训练时的
+/// 真实配置，比命名词典可靠；命名只作为旧文件缺元数据时的兜底。
+pub fn detect_model_task(
+    name: &str,
+    architecture: Option<&str>,
+    gguf: Option<&GgufMetadata>,
+) -> &'static str {
+    let name_lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = name_lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let pooling = gguf.and_then(|metadata| metadata.pooling_type.as_deref());
+    let causal = gguf.and_then(|metadata| metadata.attention_causal);
+
+    let name_has_rerank = tokens.iter().any(|token| {
+        *token == "rerank" || *token == "reranker" || *token == "ranker"
+    });
+    if pooling == Some("rank") || name_has_rerank {
+        return "rerank";
+    }
+
+    if matches!(pooling, Some("mean") | Some("cls") | Some("last")) {
+        return "embedding";
+    }
+    if causal == Some(false) {
+        return "embedding";
+    }
+    if architecture.is_some_and(is_embedding_architecture) {
+        return "embedding";
+    }
+
+    let name_has_embed = tokens.iter().any(|token| {
+        *token == "embed" || *token == "embedding" || *token == "embeddings"
+    }) || name_lower.contains("text-embedding")
+        || name_lower.contains("nomic-embed")
+        || name_lower.contains("bge-m3")
+        || name_lower.contains("bge-large")
+        || name_lower.contains("bge-base")
+        || name_lower.contains("bge-small")
+        || name_lower.contains("gte-")
+        || name_lower.contains("jina-embed")
+        || name_lower.contains("e5-")
+        || name_lower.contains("gte-large")
+        || name_lower.contains("mxbai-embed");
+    if name_has_embed {
+        return "embedding";
+    }
+
+    "chat"
 }
 
 fn detect_reasoning_support(name: &str, architecture: Option<&str>) -> bool {
@@ -817,20 +898,75 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
                 || t == "cot"
         }) || detect_reasoning_support(&name, gguf.as_ref().map(|g| g.architecture.as_str()));
 
-    let mmproj = find_companion_gguf(path, &name, "mmproj", gguf.as_ref());
-    let mtp_draft = find_companion_gguf(path, &name, "mtp", gguf.as_ref());
-    let dspark_draft = find_companion_gguf(path, &name, "dspark", gguf.as_ref());
-    let dflash_draft = find_companion_gguf(path, &name, "dflash", gguf.as_ref());
-    let mmproj_path = mmproj.as_ref().map(|(path, _)| path.clone());
-    let mtp_draft_path = mtp_draft.as_ref().map(|(path, _)| path.clone());
-    let dspark_draft_path = dspark_draft.as_ref().map(|(path, _)| path.clone());
-    let dflash_draft_path = dflash_draft.as_ref().map(|(path, _)| path.clone());
-    let mmproj_metadata = mmproj.as_ref().map(|(_, metadata)| metadata);
-    let video_support = infer_video_support(&name, &gguf_tags, mmproj_metadata);
+    let model_task = detect_model_task(
+        &name,
+        gguf.as_ref().map(|metadata| metadata.architecture.as_str()),
+        gguf.as_ref(),
+    );
+    // mmproj 视觉投影：对话 / VLM 用于图像理解，**多模态嵌入模型**用于图像与视频向量，
+    // 因此 embedding 任务同样必须保留（WeMM 这类模型只有挂上 mmproj 才能编码图片/视频）。
+    // 仅重排模型不需要投影。
+    //
+    // 推测解码侧车（mtp / dspark / dflash）只服务自回归生成：embedding / rerank
+    // 模型不会走生成路径，挂上只会被内核拒绝，一律不挂。
+    let keeps_mmproj = model_task == "chat" || model_task == "embedding";
+    let keeps_drafter = model_task == "chat";
+    let (
+        mmproj_path,
+        mmproj_metadata,
+        mtp_draft_path,
+        dspark_draft_path,
+        dflash_draft_path,
+        video_support,
+    ) = {
+        let mmproj = keeps_mmproj
+            .then(|| find_companion_gguf(path, &name, "mmproj", gguf.as_ref()))
+            .flatten();
+        let video = if keeps_mmproj {
+            infer_video_support(&name, &gguf_tags, mmproj.as_ref().map(|(_, m)| m))
+        } else {
+            VideoSupportLevel::None
+        };
+        // 先取出能力字段再消费元数据，避免把整个 GgufMetadata 搬进 ModelInfo。
+        let mmproj_meta = mmproj.as_ref().map(|(_, m)| {
+            (
+                m.mmproj_supports_vision,
+                m.mmproj_supports_audio,
+                m.mmproj_projector_type.clone(),
+                m.mmproj_vision_projector_type.clone(),
+                m.mmproj_audio_projector_type.clone(),
+            )
+        });
+        let drafter = |kind: &str| {
+            keeps_drafter
+                .then(|| find_companion_gguf(path, &name, kind, gguf.as_ref()))
+                .flatten()
+                .map(|(path, _)| path)
+        };
+        (
+            mmproj.map(|(path, _)| path),
+            mmproj_meta,
+            drafter("mtp"),
+            drafter("dspark"),
+            drafter("dflash"),
+            video,
+        )
+    };
+    let (
+        mmproj_supports_vision,
+        mmproj_supports_audio,
+        mmproj_projector_type,
+        mmproj_vision_projector_type,
+        mmproj_audio_projector_type,
+    ) = mmproj_metadata.unwrap_or((false, false, None, None, None));
     let has_embedded_mtp = gguf
         .as_ref()
         .map(|metadata| metadata.has_embedded_mtp)
         .unwrap_or(false);
+    // embedding / rerank 模型不走自回归生成，MTP 与其无关：即使底座带 NextN 层
+    // 也不作为能力暴露，避免卡片上出现误导性的「MTP」徽标。
+    let reports_mtp = keeps_drafter;
+    let has_embedded_mtp = has_embedded_mtp && reports_mtp;
     // unsloth Dynamic GGUF：量化标签带 UD- 前缀（UD-Q4_K_XL / UD-IQ4_XS 等）
     let upper_file_name = file_name.to_ascii_uppercase();
     let is_dynamic_quant = upper_file_name.contains("UD-Q") || upper_file_name.contains("UD-IQ");
@@ -889,18 +1025,11 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         tokenizer_eos_id: gguf.as_ref().and_then(|g| g.tokenizer_eos_id),
         tokenizer_pad_id: gguf.as_ref().and_then(|g| g.tokenizer_pad_id),
         mmproj_path,
-        mmproj_supports_vision: mmproj_metadata
-            .map(|metadata| metadata.mmproj_supports_vision)
-            .unwrap_or(false),
-        mmproj_supports_audio: mmproj_metadata
-            .map(|metadata| metadata.mmproj_supports_audio)
-            .unwrap_or(false),
-        mmproj_projector_type: mmproj_metadata
-            .and_then(|metadata| metadata.mmproj_projector_type.clone()),
-        mmproj_vision_projector_type: mmproj_metadata
-            .and_then(|metadata| metadata.mmproj_vision_projector_type.clone()),
-        mmproj_audio_projector_type: mmproj_metadata
-            .and_then(|metadata| metadata.mmproj_audio_projector_type.clone()),
+        mmproj_supports_vision,
+        mmproj_supports_audio,
+        mmproj_projector_type,
+        mmproj_vision_projector_type,
+        mmproj_audio_projector_type,
         video_support,
         mtp_draft_path,
         dspark_draft_path,
@@ -909,6 +1038,8 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         supports_reasoning,
         gguf_tags,
         has_tool_template,
+        model_task: model_task.to_string(),
+        pooling_type: gguf.as_ref().and_then(|g| g.pooling_type.clone()),
         gguf_metadata: enriched_metadata_entries(gguf.as_ref()),
     })
 }
@@ -1132,6 +1263,44 @@ mod tests {
     }
 
     #[test]
+    fn multimodal_embedding_keeps_mmproj_but_drops_drafter() {
+        // 多模态嵌入模型（WeMM 这类：底座带 pooling，同目录配 mmproj）：
+        // 必须保留 mmproj 才能编码图片/视频；推测解码侧车则应剥离。
+        let dir = scanner_test_dir("multimodal-embedding");
+        let main = dir.join("WeMM-Embedding-2B-Q8_0.gguf");
+        write_scanner_gguf_extra(
+            &main,
+            "qwen35",
+            24,
+            &[("qwen35.embedding_length", 2048), ("qwen35.pooling_type", 3)],
+            &[],
+        );
+        // 维度匹配的视觉投影
+        write_scanner_gguf_extra(
+            &dir.join("mmproj-WeMM-Embedding-2B-BF16.gguf"),
+            "clip",
+            0,
+            &[("clip.vision.projection_dim", 2048)],
+            &[("clip.has_vision_encoder", true)],
+        );
+        // 同目录放一个 MTP 草稿：对嵌入模型没有意义
+        write_scanner_gguf_extra(&dir.join("mtp-WeMM-Embedding-2B.gguf"), "qwen35", 1, &[], &[]);
+
+        let info = parse_model_info_from_path(&main).expect("parse embedding model");
+        assert_eq!(info.model_task, "embedding");
+        assert!(
+            info.mmproj_path.is_some(),
+            "多模态嵌入模型必须保留 mmproj（图片/视频向量依赖它）"
+        );
+        assert!(info.mmproj_supports_vision);
+        assert!(
+            info.mtp_draft_path.is_none(),
+            "嵌入模型不应挂推测解码侧车"
+        );
+        assert!(!info.mtp_support, "嵌入模型不应报告 MTP 能力");
+    }
+
+    #[test]
     fn mmproj_compatibility_without_projection_dim_stays_permissive() {
         // 老 mmproj 可能没有 projection_dim 元数据：不拦截，交由加载时校验兜底。
         let main = GgufMetadata {
@@ -1297,5 +1466,58 @@ mod tests {
             assert!(info.mtp_support);
             assert!(info.mtp_draft_path.is_none());
         }
+    }
+
+    #[test]
+    fn detect_model_task_classifies_embedding_and_rerank() {
+        // 1) 元数据里的 pooling_type=cls → 嵌入
+        let embedding = GgufMetadata {
+            pooling_type: Some("cls".to_string()),
+            ..GgufMetadata::default()
+        };
+        assert_eq!(
+            detect_model_task("SomeModel-Q4_K_M", Some("bert"), Some(&embedding)),
+            "embedding"
+        );
+
+        // 2) 非因果注意力（双向编码器）→ 嵌入，即使名字里没有 embed
+        let bidirectional = GgufMetadata {
+            attention_causal: Some(false),
+            ..GgufMetadata::default()
+        };
+        assert_eq!(
+            detect_model_task("mystery-model", Some("bert"), Some(&bidirectional)),
+            "embedding"
+        );
+
+        // 3) pooling_type=rank → 重排（优先于其它信号）
+        let reranker = GgufMetadata {
+            pooling_type: Some("rank".to_string()),
+            attention_causal: Some(false),
+            ..GgufMetadata::default()
+        };
+        assert_eq!(
+            detect_model_task("BAAI-bge-reranker-v2", Some("bert"), Some(&reranker)),
+            "rerank"
+        );
+
+        // 4) 只有文件名线索也能识别（旧文件缺元数据时的兜底）
+        assert_eq!(
+            detect_model_task("nomic-embed-text-v1.5-Q4_K_M", Some("nomic-bert"), None),
+            "embedding"
+        );
+
+        // 5) 普通对话模型保持 chat
+        let chat = GgufMetadata {
+            pooling_type: None,
+            attention_causal: Some(true),
+            ..GgufMetadata::default()
+        };
+        assert_eq!(
+            detect_model_task("Qwen3.5-9B-Instruct-Q4_K_M", Some("qwen35"), Some(&chat)),
+            "chat"
+        );
+        // 没有任何线索时也要落到 chat，不能误判为嵌入
+        assert_eq!(detect_model_task("Unknown-Model", None, None), "chat");
     }
 }

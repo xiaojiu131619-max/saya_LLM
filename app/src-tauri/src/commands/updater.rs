@@ -2,6 +2,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::models::app_state::AppState;
 use crate::services::auto_updater;
+use crate::services::ffmpeg_installer;
 use crate::services::process_manager;
 
 /// 从应用配置中读取代理地址（核心更新相关的所有 HTTP 请求共用）。
@@ -92,4 +93,33 @@ pub fn list_installed_kernels() -> Vec<auto_updater::InstalledKernel> {
 #[tauri::command]
 pub fn get_update_history() -> Vec<auto_updater::UpdateLogEntry> {
     auto_updater::get_update_log()
+}
+
+/// 下载并安装 ffmpeg / ffprobe 到应用 resources 目录（视频与部分音频格式的可选运行时）。
+/// 与内核更新共用代理设置、镜像加速偏好与取消标志。
+#[tauri::command]
+pub async fn install_ffmpeg(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    use_mirror: Option<bool>,
+) -> Result<String, String> {
+    let proxy = proxy_from_state(&state);
+    let mirror = use_mirror.unwrap_or(true);
+    tokio::task::spawn_blocking(move || {
+        ffmpeg_installer::install(proxy.as_deref(), mirror, |message| {
+            app.emit(
+                "ffmpeg:progress",
+                serde_json::json!({ "message": message }),
+            )
+            .ok();
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 取消正在进行的 ffmpeg 安装（与内核更新共用取消标志）。
+#[tauri::command]
+pub fn cancel_ffmpeg_install() {
+    auto_updater::request_cancel();
 }

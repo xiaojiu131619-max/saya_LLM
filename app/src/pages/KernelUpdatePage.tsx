@@ -18,14 +18,17 @@ import {
   FolderOpen,
   Save,
   RotateCcw,
+  Film,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import PageHeader from '@/components/PageHeader';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
 import EnvCheckDialog from '@/features/workspace/EnvCheckDialog';
+import FfmpegInstallButton from '@/components/FfmpegInstallButton';
 import {
   cancelKernelUpdate,
   checkDesktopEngine,
+  checkVideoRuntime,
   getKernelOverridePath,
   isDesktopRuntime,
   listenDesktopEvent,
@@ -38,6 +41,7 @@ import {
   type DesktopEngineInfo,
   type InstalledKernelInfo,
   type LlamaReleaseInfo,
+  type VideoRuntimeInfo,
 } from '@/lib/desktop';
 
 // 内核下载源偏好：mirror=内置 GitHub 镜像加速，direct=直连 GitHub 官方。
@@ -107,6 +111,8 @@ export default function KernelUpdatePage() {
   const [overrideInput, setOverrideInput] = useState('');
   const [overrideMessage, setOverrideMessage] = useState<string | null>(null);
   const [overrideSaving, setOverrideSaving] = useState(false);
+  // ffmpeg / ffprobe 运行时状态（视频与部分音频格式的可选组件）。
+  const [videoRuntime, setVideoRuntime] = useState<VideoRuntimeInfo | null>(null);
 
   const updating = updatingVersion !== null;
   const progressPercent = parseProgressPercent(engineMessage);
@@ -150,6 +156,10 @@ export default function KernelUpdatePage() {
 
   const refreshInstalledKernels = async () => {
     setInstalledKernels(await listInstalledKernels());
+  };
+
+  const refreshVideoRuntime = async () => {
+    setVideoRuntime(await checkVideoRuntime().catch(() => null));
   };
 
   const handleCheckEngine = async () => {
@@ -274,6 +284,7 @@ export default function KernelUpdatePage() {
       setListMessage('正在自动读取最近发布列表...');
       await refreshEngine();
       await refreshInstalledKernels();
+      await refreshVideoRuntime();
       try {
         const releases = await listRecentLlamaReleases(8);
         setReleaseList(releases);
@@ -474,6 +485,48 @@ export default function KernelUpdatePage() {
               </div>
             </SettingSection>
           )}
+
+          <SettingSection title="视频运行时（ffmpeg）" icon={Film} delay={0.14}>
+            <SettingRow
+              label="ffmpeg / ffprobe"
+              description={
+                videoRuntime?.native_video_ready
+                  ? '已就绪：视频原生处理与多模态视频向量可用。'
+                  : '未安装。安装后可用视频原生理解与多模态视频向量；仅影响视频与部分音频，不影响对话与图片。'
+              }
+            >
+              {videoRuntime?.native_video_ready ? (
+                <span className="flex-shrink-0 rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-success)]">
+                  已就绪
+                </span>
+              ) : (
+                <span className="flex-shrink-0 rounded-full bg-[var(--state-warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-warning)]">
+                  未安装
+                </span>
+              )}
+            </SettingRow>
+            {videoRuntime?.native_video_ready && videoRuntime.ffmpeg_path && (
+              <>
+                <div className="border-t border-[var(--border-subtle)]" />
+                <SettingRow label="安装位置" description={videoRuntime.ffmpeg_path}>
+                  <span />
+                </SettingRow>
+              </>
+            )}
+            <div className="border-t border-[var(--border-subtle)]" />
+            <div className="px-3 py-2.5">
+              <FfmpegInstallButton
+                onInstalled={() => {
+                  setEngineMessage('ffmpeg 与 ffprobe 已安装，原生视频处理已可用。');
+                  void refreshVideoRuntime();
+                }}
+              />
+              <p className="mt-2 text-xs leading-5 text-secondary-custom">
+                从 BtbN/FFmpeg-Builds 官方发布下载静态 win64 构建，安装到应用 resources 目录；
+                下载经过 GitHub 官方 SHA256 校验，安装前会实际运行验证。
+              </p>
+            </div>
+          </SettingSection>
 
           <SettingSection title="下载设置" icon={Package} delay={0.12}>
             <SettingRow

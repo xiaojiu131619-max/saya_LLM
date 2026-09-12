@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'embedding';
 export type ThemeType = 'dark' | 'light';
 // 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
 export type ThemeMode = 'system' | ThemeType;
@@ -7,6 +7,8 @@ export type AccentSource = 'auto' | 'default';
 export type SortType = 'default' | 'name' | 'size' | 'updated';
 export type GridColumnType = 1 | 2;
 export type ModelType = 'dense' | 'moe';
+/// 模型任务类型：对话/补全、向量嵌入、重排。
+export type ModelTask = 'chat' | 'embedding' | 'rerank';
 export type ModelStatus = 'loaded' | 'standby' | 'downloading' | 'loading' | 'error';
 export type ReasoningMode = 'off' | 'auto' | 'think' | 'deep';
 
@@ -182,6 +184,14 @@ export interface ModelInfo {
   supportsTools?: boolean;
   supportsReasoning?: boolean;
   supportsMtp?: boolean;
+  /// 任务类型（chat / embedding / rerank）：向量与重排模型走独立服务进程。
+  modelTask?: ModelTask;
+  /// GGUF 声明的默认池化方式（mean / cls / last / rank）。
+  poolingType?: string;
+  /// 是否为向量嵌入模型（可作为独立服务与对话/VLM 同时运行）。
+  supportsEmbedding?: boolean;
+  /// 是否为重排模型（--rerank 端点）。
+  supportsRerank?: boolean;
   /** 对外 API 调用名（llama.cpp --alias）；空则用提取到的关键词 */
   apiName?: string;
   /** 用户自定义头像，data URL */

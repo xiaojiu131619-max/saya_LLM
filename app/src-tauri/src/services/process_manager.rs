@@ -563,6 +563,15 @@ pub fn check_video_runtime() -> VideoRuntimeInfo {
     }
 }
 
+/// 把 ffmpeg/ffprobe 所在目录前置到子进程 PATH，供向量服务解码视频使用。
+/// 返回探测到的媒体运行时信息，便于调用方在缺少 ffmpeg 时给出可见提示。
+pub(crate) fn configure_media_runtime_path_pub(
+    command: &mut Command,
+    server_exe: &Path,
+) -> VideoRuntimeInfo {
+    configure_media_runtime_path(command, server_exe)
+}
+
 fn configure_media_runtime_path(command: &mut Command, server_exe: &Path) -> VideoRuntimeInfo {
     let info = video_runtime_info_for_exe(server_exe);
     let mut prepended = Vec::new();
@@ -605,7 +614,27 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn stop_stale_servers_for_exe(exe: &str) {
+/// 当前由本应用管理的 llama 进程 PID 集合（对话服务 + 向量服务）。
+/// 供孤儿清扫排除正在运行的实例：两个服务共用同一 exe，仅按路径清扫会误杀
+/// 另一个正在运行的进程。
+pub(crate) fn managed_llama_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    if let Ok(mut guard) = CHILD_PROCESS.lock() {
+        if let Some(child) = guard.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                pids.push(child.id());
+            }
+        }
+    }
+    if let Some(pid) = crate::services::embedding_manager::embedding_child_pid() {
+        pids.push(pid);
+    }
+    pids
+}
+
+/// 清扫与目标 exe 同路径的遗留 llama-server，但跳过 `keep_pids` 中正在运行的实例。
+/// 对话服务与向量服务共用同一个 llama-server.exe，启动任一方时都不能杀掉另一方。
+pub(crate) fn stop_stale_servers_for_exe_excluding(exe: &str, keep_pids: &[u32]) {
     let exe_path = Path::new(exe);
     let mut system = System::new_all();
     system.refresh_processes();
@@ -613,6 +642,9 @@ fn stop_stale_servers_for_exe(exe: &str) {
     let process_name = media_binary_file_name("llama-server");
     let mut stopped = 0usize;
     for process in system.processes_by_exact_name(&process_name) {
+        if keep_pids.contains(&process.pid().as_u32()) {
+            continue;
+        }
         if let Some(process_exe) = process.exe() {
             if same_path(process_exe, exe_path) {
                 eprintln!(
@@ -636,7 +668,7 @@ fn stop_stale_servers_for_exe(exe: &str) {
     }
 }
 
-fn parse_progress(line: &str) -> u32 {
+pub(crate) fn parse_progress(line: &str) -> u32 {
     if line.contains("server is listening") {
         return 100;
     }
@@ -694,7 +726,7 @@ fn parse_progress(line: &str) -> u32 {
     5
 }
 
-fn stage_name(progress: u32) -> String {
+pub(crate) fn stage_name(progress: u32) -> String {
     match progress {
         0..=15 => "启动推理引擎...".into(),
         16..=35 => "分析模型参数...".into(),
@@ -993,7 +1025,7 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
         ));
     }
 
-    stop_stale_servers_for_exe(&exe);
+    stop_stale_servers_for_exe_excluding(&exe, &managed_llama_pids());
     clear_logs();
 
     // Honor the configured ngl exactly. The detail page defaults the slider to
@@ -1047,10 +1079,7 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     } else {
         "--no-kv-unified"
     });
-    cmd.arg(if config.mmap { "--mmap" } else { "--no-mmap" });
-    if config.mlock {
-        cmd.arg("--mlock");
-    }
+    apply_mmap_mlock_args(&mut cmd, &exe, config);
     if config.no_warmup {
         cmd.arg("--no-warmup");
     }
@@ -1538,6 +1567,49 @@ fn runtime_supports_mtp_architecture(exe: &str, architecture: &str) -> bool {
         && any_file_contains(&driver_candidates, &[b"draft-mtp"])
 }
 
+/// 是否为采用 `-lm/--load-mode` 的新内核（b10883 起 llama.cpp 移除了独立的
+/// --mmap/--no-mmap/--mlock 旗标，并入 --load-mode）。与 MTP 能力探测同一思路：
+/// 以内核二进制中的参数标记为准，标记位于 llama-common.dll（common 参数定义
+/// 所在），单体/旧布局回退探测 llama.dll 与 exe 本体，探测不到即按老内核处理。
+pub(crate) fn kernel_supports_load_mode(exe: &str) -> bool {
+    let exe_path = Path::new(exe);
+    let candidates = [
+        exe_path.with_file_name("llama-common.dll"),
+        exe_path.with_file_name("libllama-common.so"),
+        exe_path.with_file_name("libllama-common.dylib"),
+        exe_path.with_file_name("llama.dll"),
+        exe_path.with_file_name("libllama.so"),
+        exe_path.with_file_name("libllama.dylib"),
+        exe_path.to_path_buf(),
+    ];
+    any_file_contains(&candidates, &[b"--load-mode"])
+}
+
+/// 新内核 --load-mode 取值，与旧旗标语义一一对应：(mmap, mlock) 四种组合
+/// 全部显式枚举，不做隐式回落，保证参数行为可复现。
+fn load_mode_value(mmap: bool, mlock: bool) -> &'static str {
+    match (mmap, mlock) {
+        (true, false) => "mmap",
+        (true, true) => "mmap+mlock",
+        (false, true) => "mlock",
+        (false, false) => "none",
+    }
+}
+
+/// 按内核代际写 mmap/mlock 参数：新内核用 --load-mode 单参数表达，
+/// 老内核（b10687、spark 自编译等）沿用 --mmap/--no-mmap/--mlock。
+fn apply_mmap_mlock_args(cmd: &mut Command, exe: &str, config: &ServerConfig) {
+    if kernel_supports_load_mode(exe) {
+        cmd.arg("--load-mode")
+            .arg(load_mode_value(config.mmap, config.mlock));
+    } else {
+        cmd.arg(if config.mmap { "--mmap" } else { "--no-mmap" });
+        if config.mlock {
+            cmd.arg("--mlock");
+        }
+    }
+}
+
 /// DSpark/DFlash 侧车启动前校验：文件存在 + 内核带对应 --spec-type 能力。
 /// 与 MTP 校验同样采用显式失败：不支持时阻止启动并给出中文指引，
 /// 不做静默降级（用户显式选择的参数不能被悄悄丢弃）。
@@ -1601,7 +1673,8 @@ fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {    let draft_path = config
+fn validate_mtp_config(exe: &str, config: &ServerConfig) -> Result<()> {
+    let draft_path = config
         .mtp_draft_path
         .as_deref()
         .map(str::trim)
@@ -1800,10 +1873,7 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     } else {
         "--no-kv-unified"
     });
-    cmd.arg(if config.mmap { "--mmap" } else { "--no-mmap" });
-    if config.mlock {
-        cmd.arg("--mlock");
-    }
+    apply_mmap_mlock_args(&mut cmd, exe, config);
     if config.no_warmup {
         cmd.arg("--no-warmup");
     }
@@ -2121,7 +2191,7 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
         return Err(anyhow::anyhow!("{}", message));
     }
 
-    stop_stale_servers_for_exe(&exe);
+    stop_stale_servers_for_exe_excluding(&exe, &managed_llama_pids());
     log_session_separator(&format!(
         "开始加载模型：{}（端口 {}，监听 {}）",
         config
@@ -2707,6 +2777,37 @@ mod tests {
         assert!(server_tools_are_protected("0.0.0.0", Some("secret")));
         assert!(!server_tools_are_protected("0.0.0.0", None));
         assert!(!server_tools_are_protected("192.168.1.20", Some("  ")));
+    }
+
+    #[test]
+    fn load_mode_kernel_detection_and_value_mapping() {
+        let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-load-mode-runtime-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).expect("create synthetic runtime");
+        let exe = dir.join("llama-server.exe");
+        std::fs::write(&exe, b"server").expect("write server");
+
+        // 无标记 → 老内核（b10687/spark 自编译等），沿用旧旗标
+        assert!(!kernel_supports_load_mode(
+            exe.to_str().expect("runtime path")
+        ));
+        std::fs::write(dir.join("llama-common.dll"), b"-lm, --load-mode MODE")
+            .expect("write common library");
+        assert!(kernel_supports_load_mode(
+            exe.to_str().expect("runtime path")
+        ));
+
+        std::fs::remove_dir_all(dir).ok();
+
+        // --load-mode 取值与旧旗标语义一一对应
+        assert_eq!(load_mode_value(true, false), "mmap");
+        assert_eq!(load_mode_value(true, true), "mmap+mlock");
+        assert_eq!(load_mode_value(false, true), "mlock");
+        assert_eq!(load_mode_value(false, false), "none");
     }
 
     #[test]

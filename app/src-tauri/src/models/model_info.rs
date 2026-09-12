@@ -121,5 +121,12 @@ pub struct ModelInfo {
     // chat_template 是否含工具调用语法（tool_calls / function 等关键字）
     #[serde(default)]
     pub has_tool_template: bool,
+    /// 模型任务类型：`chat`（对话/补全）、`embedding`（向量）、`rerank`（重排）。
+    /// 由 GGUF 元数据（pooling_type / attention.causal / 架构）与文件名共同判定。
+    #[serde(default)]
+    pub model_task: String,
+    /// GGUF 声明的默认池化方式（mean / cls / last / rank）；None = 未声明。
+    #[serde(default)]
+    pub pooling_type: Option<String>,
     pub gguf_metadata: Vec<(String, String)>,
 }

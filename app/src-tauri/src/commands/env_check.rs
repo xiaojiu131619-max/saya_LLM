@@ -250,7 +250,7 @@ fn check_video_runtime() -> EnvCheckItem {
         format!("未找到{}。不影响对话与图片理解，仅视频原生处理与部分音频格式受限。", missing),
     )
     .with_hint(
-        "可选安装：从 ffmpeg 官方构建页下载 Windows 版，将 ffmpeg.exe / ffprobe.exe 放入应用 resources 目录或加入 PATH 后重新检测。",
+        "推荐在本弹窗内点「一键安装 ffmpeg」自动下载并安装到应用 resources 目录；也可从 ffmpeg 官方构建页手动下载，将 ffmpeg.exe / ffprobe.exe 放入 resources 目录或加入 PATH 后重新检测。",
         Some("https://www.gyan.dev/ffmpeg/builds/"),
         None,
     )

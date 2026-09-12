@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, RotateCcw, Box, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2 } from 'lucide-react';
+import { Play, RotateCcw, Box, Boxes, Layers, BarChart3, Calendar, FileText, Hash, Cpu, Database, Gauge, HardDrive, History, Info, Square, ChevronRight, Settings2, Wand2 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { getServerApiKey, getDesktopSystemStats, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
 import type { AutoTuneConfig, AutoTuneProgress, AutoTuneResult, TuneRecord } from '@/lib/desktop';
@@ -436,6 +436,44 @@ export default function ModelLoadPage() {
     { icon: Gauge, label: '注意力头（heads）', value: formatPair(model.headCount, model.headCountKv) },
     { icon: FileText, label: 'K/V 长度', value: formatPair(model.keyLength, model.valueLength) },
   ];
+
+  // 向量 / 重排模型不走对话加载链路（--embeddings 与对话参数语义冲突）：
+  // 单独引导到「向量服务」页，用独立端口与独立进程启动，可与对话/VLM 并行。
+  if (model.modelTask === 'embedding' || model.modelTask === 'rerank') {
+    const isRerank = model.modelTask === 'rerank';
+    return (
+      <div className="flex h-full flex-1 items-center justify-center overflow-y-auto bg-[var(--app-bg)] px-4 py-8">
+        <div className="w-full max-w-xl rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-6 text-center dark:border-white/[0.08] dark:bg-white/[0.03]">
+          <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-xl bg-[var(--accent-subtle)] text-[var(--accent)]">
+            {isRerank ? <Layers className="h-6 w-6" /> : <Boxes className="h-6 w-6" />}
+          </div>
+          <h2 className="text-base font-semibold text-[var(--text-primary)]">
+            {isRerank ? '这是一个重排（Rerank）模型' : '这是一个向量嵌入（Embedding）模型'}
+          </h2>
+          <p className="mx-auto mt-2 max-w-md text-xs leading-6 text-[var(--text-secondary)]">
+            向量与重排模型不使用对话 / 补全加载参数（KV 量化、投机解码、工具模板对它无意义），
+            而是在独立的「向量服务」里以 <span className="mono-font">--embeddings</span>
+            {isRerank ? ' 与 ' : ' / '}<span className="mono-font">--rerank</span> 启动。
+            它与对话 / VLM 模型使用不同端口，可同时运行，互不影响。
+          </p>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-[11px] text-[var(--text-tertiary)]">
+            <span>{model.architecture ?? '未知架构'}</span>
+            <span>·</span>
+            <span>{model.params} · {model.quant}</span>
+            {model.poolingType && <><span>·</span><span className="mono-font">pooling {model.poolingType}</span></>}
+          </div>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
+            className="mt-5 inline-flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+          >
+            <Boxes className="h-4 w-4" />
+            前往向量服务
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">

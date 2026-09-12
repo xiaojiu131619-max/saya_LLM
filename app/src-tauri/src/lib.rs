@@ -21,6 +21,7 @@ fn show_main_window(app: tauri::AppHandle) {
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
+    services::embedding_manager::stop_embedding_on_exit();
     services::dsh_manager::stop_dsh_on_exit();
     app.exit(0);
 }
@@ -57,6 +58,11 @@ pub fn run() {
             commands::server::get_server_logs,
             commands::server::clear_server_logs,
             commands::server::api_token_usage,
+            commands::server::start_embedding_server,
+            commands::server::stop_embedding_server,
+            commands::server::get_embedding_status,
+            commands::server::get_embedding_logs,
+            commands::server::clear_embedding_logs,
             commands::server::get_system_logs,
             commands::server::clear_system_logs,
             commands::server::log_app_event,
@@ -98,6 +104,8 @@ pub fn run() {
             commands::updater::list_recent_releases,
             commands::updater::download_and_update,
             commands::updater::cancel_kernel_update,
+            commands::updater::install_ffmpeg,
+            commands::updater::cancel_ffmpeg_install,
             commands::updater::list_installed_kernels,
             commands::updater::get_update_history,
             commands::dsh::dsh_env_check,
@@ -195,6 +203,7 @@ pub fn run() {
                             // 直接退出：停止服务并关闭窗口。
                             eprintln!("[app] close_to_tray disabled, quitting...");
                             let _ = services::process_manager::stop_server();
+                            services::embedding_manager::stop_embedding_on_exit();
                             // 允许窗口正常关闭，之后进程会退出。
                         }
                     }
@@ -203,6 +212,7 @@ pub fn run() {
                     if window.label() == "main" {
                         eprintln!("[app] window destroyed, stopping server...");
                         let _ = services::process_manager::stop_server();
+                        services::embedding_manager::stop_embedding_on_exit();
                     }
                 }
                 _ => {}

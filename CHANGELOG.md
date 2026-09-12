@@ -38,6 +38,25 @@
 
 ### 新增
 
+- **Embedding / Rerank 模型适配 + 与对话/VLM 模型同时运行**：新增独立「向量服务」页（模型工作区侧边栏入口，与 Agent 同级）。向量与重排模型走**独立的 llama-server 进程与独立端口**（默认 8081，与对话服务的 8080 区分），因此可以和对话/VLM 模型**同时加载、同时对外提供服务**，互不干扰：
+  - 启动参数：`--embeddings` 限定服务只提供向量用途；重排模型自动追加 `--rerank`；支持 `--pooling`（跟随模型默认 / none / mean / cls / last / rank）与可选 `--embd-normalize`
+  - 进程隔离：独立子进程槽位、独立 Windows Job Object、独立日志缓冲与代数计数；对话服务启停、内核更新、跑分/自动调参重启都**不会**波及向量服务
+  - 孤儿清扫防误杀：对话服务与向量服务共用同一个 `llama-server.exe`，原按路径清扫会误杀另一方；现改为按「当前由应用管理的 PID 集合」排除，启动任一方都保留另一方
+  - 状态与日志：向量服务页实时显示运行状态、端口、模型、类型（向量/重排），提供向量服务日志区与 `/v1/embeddings`、`/rerank` 接口地址及 curl 示例
+- **多模态向量嵌入（图片 / 视频）**：向量服务支持挂载 mmproj 的多模态嵌入模型（如 WeMM-Embedding-2B），可同时编码文本、图片与视频为同一向量空间：
+  - 启动参数：embedding 任务保留 `--mmproj` / `--mmproj-offload`（多模态向量依赖投影），只剥离推测解码侧车（MTP/DSpark/DFlash 对嵌入无意义）
+  - 媒体标记动态获取：内核**每次启动随机生成**媒体标记，写死的 `<__media__>` 永远匹配不上；就绪后从 `/props` 读取 `media_marker` 与 `modalities`，在「运行状态」中展示并用于生成正确的调用示例
+  - 请求格式：`{"input":{"prompt_string":"<媒体标记><文本>","multimodal_data":["<原始 base64>"]}}`（`multimodal_data` 只接受原始 base64，不接受 data-url 或文件路径；N 个媒体需 N 个标记）
+  - 视频依赖：视频帧由内核调用 ffmpeg/ffprobe 解码，前端会检测并在缺失时给出明确提示（图片向量不受影响）
+  - 能力徽标：多模态嵌入模型在卡片上正确显示「视觉 / 视频候选」，不再被误判为纯文本模型
+- **模型任务类型自动识别**：GGUF 解析新增 `<arch>.pooling_type` 与 `<arch>.attention.causal`，结合编码器架构白名单（bert / nomic-bert / bge / gte / e5 等）与文件名兜底，自动判定模型为 `chat` / `embedding` / `rerank`；重排模型不挂接 mmproj 与推测解码侧车，也不再显示视觉/思考/工具等对话能力徽标
+- **向量模型卡片与加载页分流**：模型卡片新增「向量 / 重排」徽标；点进向量模型的参数页不再进入对话加载参数（KV 量化、投机解码对其无意义），而是给出说明并一键跳转「向量服务」页
+- **ffmpeg 一键安装**：核心更新页新增「视频运行时（ffmpeg）」区块，环境检测弹窗的 ffmpeg 未就绪项也提供「一键安装 ffmpeg」按钮。点击后从 BtbN/FFmpeg-Builds 官方 release 下载静态 win64 构建，解压出 ffmpeg.exe / ffprobe.exe 安装到应用 resources 目录（`process_manager` 的媒体搜索路径之一），装好后对话服务的原生视频理解与向量服务的图片/视频向量都可直接使用：
+  - 安全口径与内核更新一致：下载地址限定 GitHub 官方域名；必须拿到官方 SHA256（asset digest）并逐一比对，校验不过绝不落盘；解压走带 Zip Slip 防护的实现；安装前后都实际执行 `-version` 做功能性验证
+  - 下载优先走 `api.github.com` 资产端点（部分地区 `github.com` 不可达但该端点可用），失败再回退镜像/直连；进度实时上报，可随时取消
+  - 安装完成后自动重新检测，区块与检测弹窗即时变为「已就绪」
+- 配置 `config.json` 新增 `embedding_port` 字段（默认 8081，serde default 平滑迁移，老配置无需改动）
+
 - 核心更新页最下方新增「自编译核心」区块：可指定自编译 llama.cpp 的 `llama-server.exe` 完整路径（支持系统文件选择框挑选或手动填写），保存后加载模型、跑分、环境检测与本页内核状态解析都优先使用该路径；一键恢复内置版本化核心
 - 自编译路径校验：仅接受绝对路径下真实存在的核心可执行文件（llama-server.exe / llama-cli.exe 等白名单文件名），路径失效时内核解析自动回退内置核心，不影响启动
 - **使用详情新增「API」统计来源**：后端解析 llama-server `slot print_timing` 日志中的 token 用量，把经服务的全部请求（含对外 API、dsh 智能体等非应用内聊天入口）累加并展示为 `API · <模型>` 行；自动扣除已计入应用内聊天的 token，避免总数虚高
@@ -92,6 +111,14 @@
 
 ### 修复
 
+- **代码审查修复（向量服务 / ffmpeg 安装）**：
+  - 向量服务的 Windows Job Object 在重新启动时不再泄漏句柄：覆盖全局句柄前先终止并关闭上一次的 Job Object
+  - 多模态嵌入缺 ffmpeg/ffprobe 时在向量服务日志里给出可见提示（图片向量不受影响，仅视频会解码失败），不再静默
+  - `pooling_type` 遇到未知枚举整数时留空，不再伪造 `unspecified`（避免被误当成有效池化方式）
+  - 修正 5 处函数/结构体声明与首条语句挤在同一行、以及两段文档注释粘连的格式问题
+  - 向量服务页切换模型时重置池化方式改为在选择动作内完成，消除 effect 内同步 setState 的级联渲染；服务就绪后状态轮询由 1.5s 放宽到 5s
+  - 多模态调用示例在媒体标记尚未就绪时给出明确警告占位，避免复制出必然失败的示例
+- **b10883 内核模型加载必失败（`error: invalid argument: --mmap`）**：llama.cpp b10883 移除了独立的 `--mmap`/`--no-mmap`/`--mlock` 旗标，功能并入 `-lm/--load-mode`，而应用仍无条件传旧旗标，llama-server 在参数解析阶段直接退出，GPU 尝试与 CPU 兼容重试接连挂掉（UI 里切 mmap 开关也无效，`--no-mmap` 同样被移除）。现在以内核二进制中的 `--load-mode` 参数标记做能力探测，自动选择新旧写法：探测不到标记的老内核（b10687、spark 自编译等）沿用旧旗标，新内核按 `mmap`/`mlock` 组合一一映射为 `mmap` / `mmap+mlock` / `mlock` / `none`；加载与跑分两条启动链路都已修正
 - **多模态投影（mmproj）误配导致模型加载失败**：平铺模型目录里任何一个 `mmproj-*.gguf`（如 Qwen 的视觉投影）都会被自动挂到目录内所有模型上，架构不匹配时 llama-server 报 `mismatch between text model (n_embd) and mmproj (n_embd)` 直接退出（典型受害者：Spark-X2.5-4B）。现在扫描器会用 mmproj 的 `clip.vision/audio.projection_dim` 与主模型 `embedding_length` 做维度级配对校验，不匹配不再挂载；无该元数据的旧 mmproj 仍保持放行，由加载时校验兜底
 - 扫描缓存版本升至 v22：老缓存中的错误 mmproj 配对会自动失效重扫，无需手动清理
 - 同类宽度适配问题排查修复：参数行两列布局（标签列 220→160px 下限）在视口刚过 lg、侧边栏挤压内容时不再裁掉输入框；模型信息页四格卡改在内容区足够宽时才展开四列（md→lg）；单列模型卡第一行不再因长模型名把类型/大小/量化挤到第二行（名字截断让位）；软件设置新生成的 API Key 与 Agent 页 Web UI 地址截断时补上悬浮全文

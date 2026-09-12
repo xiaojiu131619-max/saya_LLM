@@ -2,6 +2,7 @@
 import {
   ArrowLeft,
   Bot,
+  Boxes,
   ChevronRight,
   Database,
   MessageSquare,
@@ -16,6 +17,7 @@ import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
 import AgentPage from '@/pages/AgentPage';
 import ApiStatusPage from '@/features/apiStatus/ApiStatusPage';
+import EmbeddingWorkspace from '@/features/embedding/EmbeddingWorkspace';
 import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
@@ -76,6 +78,7 @@ export default function ModelWorkspace() {
   // API 状态、Agent 与 llama 日志同级：保留左侧边栏，在右侧内容区展示。
   const apiStatusOpen = state.currentView === 'apiStatus';
   const agentOpen = state.currentView === 'agent';
+  const embeddingOpen = state.currentView === 'embedding';
   const selectedModel = state.models.find((model) => model.id === state.selectedModelId);
   const loadedModel = state.models.find((model) => model.status === 'loaded')
     ?? state.models.find((model) => model.id === state.activeModelId);
@@ -199,7 +202,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -214,6 +217,16 @@ export default function ModelWorkspace() {
           >
             <Bot className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">Agent</span>
+          </button>
+          <button
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+              embeddingOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+            }`}
+            title="向量服务 · Embedding / Rerank 模型（可与对话模型同时运行）"
+          >
+            <Boxes className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">向量服务</span>
           </button>
           {detailOpen && (
             <button
@@ -301,10 +314,10 @@ export default function ModelWorkspace() {
         )}
 
         <div
-          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : detailOpen ? 'model-detail' : 'model-list'}
+          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : embeddingOpen ? 'embedding' : detailOpen ? 'model-detail' : 'model-list'}
           className="anim-fade-rise min-h-0 flex-1 overflow-hidden"
         >
-          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
+          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : embeddingOpen ? <EmbeddingWorkspace /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
         </div>
       </section>
     </div>

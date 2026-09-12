@@ -20,6 +20,7 @@ import {
 } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
+import FfmpegInstallButton from '@/components/FfmpegInstallButton';
 
 interface EnvCheckDialogProps {
   /** 设置页手动打开时传 true；不传则按「首次启动自动检测」模式工作。 */
@@ -211,8 +212,8 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                             {item.install_hint}
                           </p>
                         )}
-                        {(item.in_app_action || item.install_url) && (
-                          <div className="mt-2 flex flex-wrap gap-2">
+                        {(item.in_app_action || item.install_url || item.id === 'video_runtime') && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
                             {item.in_app_action === 'kernel-update' && (
                               <button
                                 type="button"
@@ -223,6 +224,13 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                                 前往核心更新
                               </button>
                             )}
+                            {/* ffmpeg 未就绪：应用内一键安装（下载到 resources 目录），装完自动重新检测。 */}
+                            {item.id === 'video_runtime' && item.level !== 'ok' && (
+                              <FfmpegInstallButton
+                                compact
+                                onInstalled={() => void runCheck()}
+                              />
+                            )}
                             {item.install_url && (
                               <button
                                 type="button"
@@ -230,7 +238,7 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                                 className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-primary-custom transition-colors hover:bg-[var(--surface-muted)] dark:border-white/[0.12] dark:hover:bg-white/[0.06]"
                               >
                                 <ExternalLink className="h-3.5 w-3.5" />
-                                打开下载页
+                                {item.id === 'video_runtime' ? '手动下载' : '打开下载页'}
                               </button>
                             )}
                           </div>

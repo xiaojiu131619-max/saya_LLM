@@ -1,5 +1,5 @@
 ﻿import { useState, type ReactNode } from 'react';
-import { Play, Box, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles, Mic, Film } from 'lucide-react';
+import { Play, Box, Boxes, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles, Mic, Film, Layers } from 'lucide-react';
 import type { ModelInfo } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { isDesktopRuntime, listenDesktopEvent, revealDesktopPath, startDesktopServer } from '@/lib/desktop';
@@ -176,6 +176,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         <CompactPill>
           {model.modelType === 'moe' ? 'MoE' : '稠密'}
         </CompactPill>
+        <ModelTaskPill model={model} />
         <CompactPill title={`${model.params} · ${model.fileSize}`}>
           <span className="hidden sm:inline">{model.params} · </span>{model.fileSize}
         </CompactPill>
@@ -294,6 +295,12 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         )}
       </div>
 
+      {model.modelTask && model.modelTask !== 'chat' && (
+        <div className="px-3">
+          <ModelTaskPill model={model} />
+        </div>
+      )}
+
       <div className="px-3">
         <CapabilityBadges model={model} dense twoLine />
       </div>
@@ -350,6 +357,27 @@ function CompactPill({ children, className = '', title }: { children: ReactNode;
   return (
     <span title={title} className={`inline-flex h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
       {children}
+    </span>
+  );
+}
+
+function ModelTaskPill({ model }: { model: ModelInfo }) {
+  const task = model.modelTask;
+  if (!task || task === 'chat') return null;
+  const isRerank = task === 'rerank';
+  return (
+    <span
+      title={isRerank
+        ? '重排模型：走独立向量服务（--rerank），可与对话 / VLM 模型同时运行'
+        : '向量嵌入模型：走独立向量服务（--embeddings），可与对话 / VLM 模型同时运行'}
+      className={`inline-flex h-6 flex-shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] font-semibold leading-6 ${
+        isRerank
+          ? 'border-[var(--accent-subtle)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+          : 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)]'
+      }`}
+    >
+      {isRerank ? <Layers className="h-3 w-3" /> : <Boxes className="h-3 w-3" />}
+      {isRerank ? '重排' : '向量'}
     </span>
   );
 }

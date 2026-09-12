@@ -60,6 +60,19 @@ pub struct ServerConfig {
     pub ncmoe: u32,
     pub tools: Option<String>,
     pub reasoning_budget: u32,
+    /// 专用向量/重排模型：传 `--embeddings`（限定服务只提供向量用途）。
+    /// 与 chat/VLM 互斥，由独立的向量模型进程使用。
+    #[serde(default)]
+    pub embedding: bool,
+    /// `--pooling` 取值（none / mean / cls / last / rank）；None = 用模型默认。
+    #[serde(default)]
+    pub pooling: Option<String>,
+    /// 启用重排端点 `--rerank`（配合 `--pooling rank` 的 reranker 模型）。
+    #[serde(default)]
+    pub rerank: bool,
+    /// `--embd-normalize` 归一化方式（-1 = 不归一化）；None = 内核默认 2。
+    #[serde(default)]
+    pub embd_normalize: Option<i32>,
     /// Preferred llama.cpp device selector. Empty means auto.
     #[serde(default)]
     pub device: Option<String>,
@@ -120,6 +133,10 @@ impl Default for ServerConfig {
             ncmoe: 0,
             tools: None,
             reasoning_budget: 0,
+            embedding: false,
+            pooling: None,
+            rerank: false,
+            embd_normalize: None,
             device: None,
             main_gpu: Some(0),
             retry_cpu_fallback: false,

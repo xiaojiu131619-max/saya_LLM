@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Effect, EffectState, getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
+import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ModelTask, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
 import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
@@ -68,6 +68,10 @@ export interface DesktopModelInfo {
   supports_reasoning: boolean;
   gguf_tags: string[];
   has_tool_template: boolean;
+  /** 任务类型：chat / embedding / rerank（后端按 GGUF 元数据判定）。 */
+  model_task?: string;
+  /** GGUF 声明的默认池化方式（mean / cls / last / rank）。 */
+  pooling_type?: string | null;
   gguf_metadata: Array<[string, string]>;
 }
 
@@ -93,6 +97,8 @@ export interface DesktopConfig {
   env_check_done?: boolean;
   /** 用户指定的自编译核心路径（llama-server.exe 绝对路径）；未设置为 null。 */
   kernel_override_path?: string | null;
+  /** 向量（Embedding）/ 重排模型的独立服务端口；与 default_port 不同才能并行运行。 */
+  embedding_port?: number;
 }
 
 export async function setDesktopProxyUrl(proxyUrl: string | null) {
@@ -359,6 +365,14 @@ interface ServerConfig {
   ncmoe: number;
   tools: string | null;
   reasoning_budget: number;
+  /** 向量/重排专用：传 --embeddings 限定服务只提供向量用途。 */
+  embedding?: boolean;
+  /** --pooling 取值（none/mean/cls/last/rank）；null = 用模型默认。 */
+  pooling?: string | null;
+  /** 启用重排端点 --rerank。 */
+  rerank?: boolean;
+  /** --embd-normalize 归一化方式；null = 内核默认 2。 */
+  embd_normalize?: number | null;
   device: string | null;
   main_gpu: number | null;
   retry_cpu_fallback: boolean;
@@ -500,6 +514,26 @@ interface ModelCapabilities {
   tools: boolean;
 }
 
+/**
+ * 判定模型任务类型。优先用后端读到的 GGUF 元数据（model_task / pooling_type），
+ * 旧缓存或旧后端缺字段时按文件名兜底，与后端 detect_model_task 保持同一口径。
+ */
+function resolveModelTask(raw: DesktopModelInfo): ModelTask {
+  if (raw.model_task === 'embedding' || raw.model_task === 'rerank') {
+    return raw.model_task;
+  }
+  if (raw.model_task === 'chat') return 'chat';
+  const pooling = (raw.pooling_type ?? '').toLowerCase();
+  if (pooling === 'rank') return 'rerank';
+  if (pooling === 'mean' || pooling === 'cls' || pooling === 'last') return 'embedding';
+  const text = `${raw.name} ${raw.architecture ?? ''}`.toLowerCase();
+  if (/rerank|ranker/.test(text)) return 'rerank';
+  if (/embed|bge-|gte-|e5-|jina-?v|nomic-?embed|text-embedding|mxbai-embed/.test(text)) {
+    return 'embedding';
+  }
+  return 'chat';
+}
+
 function inferVideoSupport(raw: DesktopModelInfo, vision: boolean): VideoSupportLevel {
   if (!vision) return 'none';
   if (raw.video_support && raw.video_support !== 'none') return raw.video_support;
@@ -540,6 +574,14 @@ function inferModelCapabilities(raw: DesktopModelInfo): ModelCapabilities {
   const audio = hasMmproj && Boolean(raw.mmproj_supports_audio);
   const videoSupport = inferVideoSupport(raw, vision);
   const video = videoSupport === 'verified';
+
+  // 向量 / 重排模型：不带思考、工具等自回归能力徽标。
+  // 但多模态嵌入模型（挂了视觉投影）**要**保留视觉/视频能力——它正是靠这个
+  // 编码图片与视频向量（例如 WeMM-Embedding）。
+  const task = resolveModelTask(raw);
+  if (task !== 'chat') {
+    return { vision, audio, video, videoSupport, thinking: false, tools: false };
+  }
 
   // === 工具调用 ===
   // 1) 最权威：chat_template 里有工具语法
@@ -618,6 +660,7 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
   const quant = raw.quantization ?? 'GGUF';
   const ctxLength = Math.max(0, Number(raw.context_length ?? 0));
   const capabilities = inferModelCapabilities(raw);
+  const modelTask = resolveModelTask(raw);
 
   return {
     id: `local-${hashString(raw.file_path)}`,
@@ -636,6 +679,9 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
       `文件路径：${raw.file_path}`,
       raw.split_count ? `分片 GGUF：第 ${raw.split_part ?? 1} / ${raw.split_count} 片` : null,
       raw.architecture ? `架构：${raw.architecture}` : null,
+      modelTask === 'embedding' ? '任务类型：向量嵌入（Embedding）模型，走独立向量服务，可与对话/VLM 模型同时运行。' : null,
+      modelTask === 'rerank' ? '任务类型：重排（Rerank）模型，走独立向量服务，可与对话/VLM 模型同时运行。' : null,
+      raw.pooling_type ? `默认池化方式（pooling）：${raw.pooling_type}` : null,
       raw.gguf_version ? `GGUF 版本：${raw.gguf_version}` : null,
       raw.tensor_count ? `Tensor 数量：${raw.tensor_count}` : null,
       raw.block_count ? `层数：${raw.block_count}` : null,
@@ -659,6 +705,8 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
       'Local',
       'GGUF',
       ...(raw.split_count ? ['Split GGUF'] : []),
+      ...(modelTask === 'embedding' ? ['Embedding'] : []),
+      ...(modelTask === 'rerank' ? ['Rerank'] : []),
       ...(capabilities.vision ? ['Vision'] : []),
       ...(capabilities.audio ? ['Audio'] : []),
       ...(capabilities.video ? ['Video'] : []),
@@ -728,6 +776,10 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     supportsTools: capabilities.tools,
     supportsReasoning: capabilities.thinking,
     supportsMtp: raw.mtp_support || Boolean(raw.mtp_draft_path),
+    modelTask,
+    poolingType: raw.pooling_type ?? undefined,
+    supportsEmbedding: modelTask === 'embedding' || modelTask === 'rerank',
+    supportsRerank: modelTask === 'rerank',
   };
 }
 
@@ -743,6 +795,7 @@ export async function saveDesktopConfig(config: DesktopConfig) {
 
 export async function saveDesktopRuntimeSettings(settings: {
   defaultPort?: number;
+  embeddingPort?: number;
   apiEnabled?: boolean;
   apiHost?: string;
   closeToTray?: boolean;
@@ -753,6 +806,7 @@ export async function saveDesktopRuntimeSettings(settings: {
   await saveDesktopConfig({
     ...config,
     ...(settings.defaultPort ? { default_port: settings.defaultPort } : {}),
+    ...(settings.embeddingPort ? { embedding_port: settings.embeddingPort } : {}),
     ...(settings.apiEnabled !== undefined ? { api_enabled: settings.apiEnabled } : {}),
     ...(settings.apiHost !== undefined ? { api_host: settings.apiHost } : {}),
     ...(settings.closeToTray !== undefined ? { close_to_tray: settings.closeToTray } : {}),
@@ -971,6 +1025,21 @@ export async function checkVideoRuntime() {
 
 export async function cancelKernelUpdate() {
   await invoke('cancel_kernel_update');
+}
+
+/**
+ * 下载并安装 ffmpeg / ffprobe 到应用 resources 目录。
+ * 部署到该目录后，对话服务与向量服务都能直接找到它们（原生视频处理）。
+ * 进度通过 `ffmpeg:progress` 事件上报。
+ */
+export async function installFfmpeg(useMirror = true) {
+  if (!isDesktopRuntime()) return '';
+  return invoke<string>('install_ffmpeg', { useMirror });
+}
+
+export async function cancelFfmpegInstall() {
+  if (!isDesktopRuntime()) return;
+  await invoke('cancel_ffmpeg_install');
 }
 
 export interface InstalledKernelInfo {
@@ -1212,11 +1281,157 @@ function buildServerConfig(
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,
+    embedding: false,
+    pooling: null,
+    rerank: false,
+    embd_normalize: null,
     device: cpuOnly ? 'none' : null,
     main_gpu: cpuOnly ? null : 0,
     retry_cpu_fallback: !cpuOnly,
     no_cuda: cpuOnly,
   };
+}
+
+/// 向量/重排模型的独立服务配置：只保留与显存/上下文相关的通用参数，
+/// 追加 --embeddings / --pooling / --rerank / --embd-normalize。
+/// 与对话配置分开构造，避免把 KV 量化、投机解码、工具模板等无关参数带过去。
+///
+/// mmproj 例外：多模态嵌入模型（如 WeMM）**必须**挂上视觉投影才能编码图片与视频，
+/// 因此这里与对话侧一样传入 mmproj_path。
+function buildEmbeddingServerConfig(
+  model: ModelInfo,
+  port: number,
+  executablePath: string,
+  apiConfig?: ExternalApiConfig,
+  pooling?: string,
+  embdNormalize?: number,
+): ServerConfig {
+  if (!model.filePath) {
+    throw new Error('这个模型没有本地 GGUF 文件路径，不能启动向量服务。');
+  }
+  const config = model.loadConfig;
+  const gpuLayers = Math.max(0, config.gpuLayers);
+  const cpuOnly = gpuLayers === 0;
+  const resolvedPooling = (pooling ?? model.poolingType ?? '').trim().toLowerCase();
+  const isRerank = model.supportsRerank === true || resolvedPooling === 'rank';
+  // 多模态嵌入：挂 mmproj 才能编码图片/视频。重排模型不需要投影。
+  const hasMultimodalProjector = !isRerank && Boolean(model.mmprojPath)
+    && Boolean(model.mmprojSupportsVision || model.mmprojSupportsAudio);
+  return {
+    executable_path: executablePath || 'resources/llama-server.exe',
+    model_path: model.filePath ?? '',
+    model_alias: resolveApiName(model),
+    port,
+    host: apiHost(apiConfig),
+    api_key: apiKey(apiConfig),
+    ngl: gpuLayers,
+    // 向量模型不需要长上下文；沿用模型/用户配置的 ctx，但至少给到 512 保证可运行。
+    n_ctx: Math.max(512, config.ctxLength),
+    batch_size: config.batchSize,
+    ubatch_size: config.physicalBatchSize,
+    threads: config.threads,
+    parallel: config.parallel,
+    flash_attn: config.fastAttention,
+    kv_offload: cpuOnly ? false : config.kvCache,
+    kv_unified: config.kvUnified,
+    mmap: config.mmap,
+    mlock: config.mlock,
+    no_warmup: config.noWarmup,
+    cache_type_k: config.cacheTypeK,
+    cache_type_v: config.cacheTypeV,
+    cache_type_k_enabled: config.cacheTypeKEnabled,
+    cache_type_v_enabled: config.cacheTypeVEnabled,
+    rope_freq_base: null,
+    rope_freq_scale: null,
+    seed: null,
+    chat_template: null,
+    mmproj_path: hasMultimodalProjector ? (model.mmprojPath ?? null) : null,
+    mtp_draft_path: null,
+    dspark_draft_path: null,
+    dflash_draft_path: null,
+    spec_draft_n_max: null,
+    spec_type: null,
+    ncmoe: 0,
+    tools: null,
+    reasoning_budget: 0,
+    embedding: true,
+    pooling: resolvedPooling && resolvedPooling !== 'unspecified' ? resolvedPooling : null,
+    rerank: isRerank,
+    embd_normalize: embdNormalize ?? null,
+    device: cpuOnly ? 'none' : null,
+    main_gpu: cpuOnly ? null : 0,
+    retry_cpu_fallback: false,
+    no_cuda: cpuOnly,
+  };
+}
+
+/// 启动向量/重排模型服务（独立端口、独立进程）。可与对话/VLM 服务同时运行。
+export async function startEmbeddingServer(
+  model: ModelInfo,
+  port: number,
+  executablePath = 'resources/llama-server.exe',
+  apiConfig?: ExternalApiConfig,
+  pooling?: string,
+  embdNormalize?: number,
+) {
+  if (!isDesktopRuntime()) return;
+  // 对外开放时同样要求鉴权，与对话服务一致。
+  let storedApiKey: string | null = null;
+  if (apiConfig?.enabled) {
+    storedApiKey = await getExternalApiKeyForSession().catch(() => null);
+    if (apiConfig.hasApiKey && !storedApiKey) {
+      throw new Error('无法读取已配置的 API Key，已阻止在无鉴权状态下开放向量接口。请重新申请 API Key。');
+    }
+  }
+  const runtimeApiConfig = apiConfig
+    ? { ...apiConfig, apiKey: storedApiKey ?? undefined }
+    : undefined;
+  await invoke('start_embedding_server', {
+    config: buildEmbeddingServerConfig(model, port, executablePath, runtimeApiConfig, pooling, embdNormalize),
+  });
+}
+
+export async function stopEmbeddingServer() {
+  if (!isDesktopRuntime()) return;
+  await invoke('stop_embedding_server');
+}
+
+export interface DesktopEmbeddingMediaInfo {
+  vision: boolean;
+  video: boolean;
+  audio: boolean;
+  /**
+   * 服务端每次启动随机生成的媒体标记；图片/视频向量的 prompt_string 必须以它开头。
+   * 已从 `/props` 动态获取。
+   */
+  mediaMarker: string | null;
+}
+
+export interface DesktopEmbeddingStatus {
+  running: boolean;
+  port: number | null;
+  modelName: string | null;
+  modelPath: string | null;
+  rerank: boolean;
+  pid: number | null;
+  /** 是否挂了 mmproj（多模态向量：可编码图片 / 视频）。 */
+  multimodal: boolean;
+  media: DesktopEmbeddingMediaInfo | null;
+}
+
+export async function getEmbeddingStatus() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<DesktopEmbeddingStatus>('get_embedding_status');
+}
+
+export async function getEmbeddingLogs() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<string[]>('get_embedding_logs');
+}
+
+export async function clearEmbeddingLogs() {
+  if (!isDesktopRuntime()) return;
+  await invoke('clear_embedding_logs');
 }
 
 export async function startDesktopServer(

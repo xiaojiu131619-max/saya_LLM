@@ -40,6 +40,12 @@ pub struct GgufMetadata {
     pub mmproj_vision_projector_type: Option<String>,
     pub mmproj_audio_projector_type: Option<String>,
     pub tensor_type_summary: Vec<(String, u64)>,
+    /// `<arch>.pooling_type`：向量模型默认池化方式（mean/cls/last/rank）。
+    /// 带此键基本可判定为嵌入/重排模型；`rank` 表示重排模型。
+    pub pooling_type: Option<String>,
+    /// `<arch>.attention.causal`：false 表示非因果（双向）注意力，典型的编码器
+    /// 嵌入模型（bert / nomic-bert / bge 等）为 false。
+    pub attention_causal: Option<bool>,
     // Attention head metadata — needed for an accurate KV-cache size estimate.
     pub head_count: Option<u64>,
     pub head_count_kv: Option<u64>,
@@ -293,6 +299,8 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
     let mut vlen_swa: Option<u64> = None;
     let mut klen: Option<u64> = None;
     let mut vlen: Option<u64> = None;
+    let mut pooling_type: Option<String> = None;
+    let mut attention_causal: Option<bool> = None;
     let mut rope_freq_base: Option<f64> = None;
     let mut rope_dimension_count: Option<u64> = None;
     let mut rope_scaling_type: Option<String> = None;
@@ -347,6 +355,8 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
             || key.ends_with(".attention.key_length_swa")
             || key.ends_with(".attention.value_length")
             || key.ends_with(".attention.value_length_swa")
+            || key.ends_with(".attention.causal")
+            || key.ends_with(".pooling_type")
             || key.ends_with(".nextn_predict_layers")
             || key.ends_with(".rope.freq_base")
             || key.ends_with(".rope.dimension_count")
@@ -498,6 +508,15 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
                     klen = v.as_u64();
                 } else if key.ends_with(".attention.value_length") {
                     vlen = v.as_u64();
+                } else if key.ends_with(".attention.causal") {
+                    attention_causal = v.as_bool();
+                } else if key.ends_with(".pooling_type") {
+                    // GGUF 里 pooling_type 既可能是字符串（mean/cls/last/rank），
+                    // 也可能是枚举整数；两种都归一成小写字符串，未知枚举值留空。
+                    pooling_type = v
+                        .as_str()
+                        .map(|s| s.to_ascii_lowercase())
+                        .or_else(|| v.as_u64().and_then(pooling_type_from_id));
                 } else if key.ends_with(".nextn_predict_layers") {
                     nextn_predict_layers = v.as_u64().unwrap_or(0);
                 } else if key.ends_with(".rope.freq_base") {
@@ -608,6 +627,8 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         mmproj_vision_projector_type,
         mmproj_audio_projector_type,
         tensor_type_summary,
+        pooling_type,
+        attention_causal,
         head_count: hc,
         head_count_kv: hckv,
         kv_heads_sum,
@@ -715,6 +736,20 @@ fn refresh_mtp_classification(metadata: &mut GgufMetadata) {
     metadata.mtp_architecture_supported = supported;
     metadata.has_embedded_mtp = embedded;
     metadata.is_mtp_draft_model = draft;
+}
+
+/// pooling_type 枚举整数 → 名称（对齐 llama.cpp 的 enum llama_pooling_type：
+/// UNSPECIFIED=-1, NONE=0, MEAN=1, CLS=2, LAST=3, RANK=4）。
+/// 未知 id 返回 None（表示「无池化信息」），不要把 UNSPECIFIED 的语义套到未知值上。
+fn pooling_type_from_id(id: u64) -> Option<String> {
+    match id {
+        0 => Some("none".to_string()),
+        1 => Some("mean".to_string()),
+        2 => Some("cls".to_string()),
+        3 => Some("last".to_string()),
+        4 => Some("rank".to_string()),
+        _ => None,
+    }
 }
 
 fn split_gguf_info(path: &Path) -> Option<(String, u32, u32)> {
@@ -984,6 +1019,36 @@ mod tests {
 
         let mut p = 0usize;
         assert!(read_val(&payload, &mut p, 9).is_err());
+    }
+
+    #[test]
+    fn parses_pooling_type_and_causal_flags() {
+        // 嵌入模型的元数据：pooling_type 字符串 + 非因果注意力。
+        let parsed = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("bert")),
+                ("bert.embedding_length", TestValue::U32(768)),
+                ("bert.pooling_type", TestValue::String("cls")),
+                ("bert.attention.causal", TestValue::Bool(false)),
+            ],
+            &["token_embd.weight"],
+        );
+        assert_eq!(parsed.pooling_type.as_deref(), Some("cls"));
+        assert_eq!(parsed.attention_causal, Some(false));
+
+        // pooling_type 也可能是枚举整数：3 = last。
+        let parsed_numeric = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("bert")),
+                ("bert.pooling_type", TestValue::U32(3)),
+            ],
+            &["token_embd.weight"],
+        );
+        assert_eq!(parsed_numeric.pooling_type.as_deref(), Some("last"));
+
+        // 未知枚举整数不属于任何已知池化方式：应留空，而不是伪造一个名字。
+        assert_eq!(pooling_type_from_id(3).as_deref(), Some("last"));
+        assert_eq!(pooling_type_from_id(99), None);
     }
 
     #[test]

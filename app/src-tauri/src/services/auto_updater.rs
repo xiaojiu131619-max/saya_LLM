@@ -45,14 +45,20 @@ pub fn request_cancel() {
     UPDATE_CANCELLED.store(true, Ordering::SeqCst);
 }
 
-fn ensure_not_cancelled() -> Result<(), String> {
+/// 开始一个新任务前清除上一次的取消请求。
+/// 内核更新与 ffmpeg 安装共用同一个取消标志，但同一时刻只会有一个任务在跑。
+pub(crate) fn reset_cancel() {
+    UPDATE_CANCELLED.store(false, Ordering::SeqCst);
+}
+
+pub(crate) fn ensure_not_cancelled() -> Result<(), String> {
     if UPDATE_CANCELLED.load(Ordering::SeqCst) {
-        return Err("更新已被用户取消。".to_string());
+        return Err("操作已被用户取消。".to_string());
     }
     Ok(())
 }
 
-fn resource_dir() -> PathBuf {
+pub(crate) fn resource_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().unwrap_or(&exe);
     let bundled = dir.join("_up_").join("resources");
@@ -654,7 +660,7 @@ pub fn build_proxy(proxy_url: Option<&str>) -> Result<Option<reqwest::Proxy>, St
     Ok(Some(proxy))
 }
 
-fn build_client(proxy_url: Option<&str>, timeout_secs: u64, connect_timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+pub(crate) fn build_client(proxy_url: Option<&str>, timeout_secs: u64, connect_timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
@@ -828,18 +834,19 @@ pub fn list_recent_releases(count: usize, proxy_url: Option<&str>) -> Result<Vec
     Ok(releases)
 }
 
-const GITHUB_MIRRORS: &[&str] = &["https://ghfast.top/"];
+pub(crate) const GITHUB_MIRRORS: &[&str] = &["https://ghfast.top/"];
 
 /// 允许直连下载发布包的主机。发布包最终会被当作可执行文件运行，
 /// 因此下载地址必须限定在 GitHub 官方域名，不能接受前端传入的任意 URL。
 const ALLOWED_RELEASE_HOSTS: &[&str] = &[
     "github.com",
+    "api.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 ];
 
 /// 从 `https://host/path` 中取出小写 host。仅接受 https。
-fn url_host(url: &str) -> Option<String> {
+pub(crate) fn url_host(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://")?;
     let host = rest
         .split(['/', '?', '#'])
@@ -861,7 +868,7 @@ fn host_allowed(host: &str, allowed: &[&str]) -> bool {
 }
 
 /// 校验发布包 URL 必须是 https 且落在 GitHub 官方域名内。
-fn ensure_release_url_allowed(url: &str) -> Result<(), String> {
+pub(crate) fn ensure_release_url_allowed(url: &str) -> Result<(), String> {
     match url_host(url) {
         Some(host) if host_allowed(&host, ALLOWED_RELEASE_HOSTS) => Ok(()),
         Some(host) => Err(format!(
@@ -874,7 +881,7 @@ fn ensure_release_url_allowed(url: &str) -> Result<(), String> {
 
 /// 校验加速源 URL 至少是 https。加速源内容不可信，
 /// 因此它下载到的字节必须逐一通过 SHA256 比对才会被采用。
-fn ensure_mirror_url_allowed(mirror: &str) -> Result<(), String> {
+pub(crate) fn ensure_mirror_url_allowed(mirror: &str) -> Result<(), String> {
     match url_host(mirror) {
         Some(_) => Ok(()),
         None => Err(format!(
@@ -932,7 +939,7 @@ fn fetch_expected_sha256(tag: &str, asset_name: &str, proxy_url: Option<&str>) -
     Err(format!("更新源中找不到发布包 {}，已中止更新。", asset_name))
 }
 
-fn mirror_download_url(mirror: &str, url: &str) -> String {
+pub(crate) fn mirror_download_url(mirror: &str, url: &str) -> String {
     format!(
         "{}/{}",
         mirror.trim_end_matches('/'),
@@ -1022,7 +1029,7 @@ fn try_download_stream(
     }
 }
 
-fn download_with_progress(
+pub(crate) fn download_with_progress(
     resp: reqwest::blocking::Response,
     on_progress: &dyn Fn(String),
 ) -> Result<Vec<u8>, String> {
@@ -1097,12 +1104,12 @@ fn download_zip_bytes(
     Ok((bytes, sha256))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
-fn validate_downloaded_zip(bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn validate_downloaded_zip(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 1_000_000 {
         return Err("下载文件过小，可能不是完整发布包。".to_string());
     }
@@ -1282,7 +1289,7 @@ fn detect_installed_version(resources: &Path) -> Option<String> {
         .or_else(|| load_log().current_version)
 }
 
-fn expand_zip(zip_path: &Path, extract_dir: &Path) -> Result<(), String> {
+pub(crate) fn expand_zip(zip_path: &Path, extract_dir: &Path) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("无法打开压缩文件: {}", e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法读取压缩文件: {}", e))?;
     fs::create_dir_all(extract_dir).map_err(|e| format!("无法创建解压目录: {}", e))?;

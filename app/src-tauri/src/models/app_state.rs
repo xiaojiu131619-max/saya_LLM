@@ -95,6 +95,10 @@ pub struct AppConfig {
     /// 设置后加载模型与本页内核状态都优先使用该路径；None 表示使用内置版本化核心。
     #[serde(default)]
     pub kernel_override_path: Option<String>,
+    /// 向量（Embedding）/ 重排模型的独立服务端口。
+    /// 与 default_port（对话/VLM 服务）不同端口，才能同时运行两类模型；默认 8081。
+    #[serde(default = "default_embedding_port")]
+    pub embedding_port: u16,
     /// dsh（DeepSeek Harness）接入配置（v0.4 新增，serde default 平滑迁移）。
     pub dsh: crate::models::dsh_types::DshConfig,
 }
@@ -120,9 +124,14 @@ impl Default for AppConfig {
             proxy_url: None,
             env_check_done: false,
             kernel_override_path: None,
+            embedding_port: default_embedding_port(),
             dsh: crate::models::dsh_types::DshConfig::default(),
         }
     }
+}
+
+fn default_embedding_port() -> u16 {
+    8081
 }
 
 pub struct AppState {
