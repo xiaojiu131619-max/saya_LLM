@@ -3,6 +3,7 @@ pub mod config;
 pub mod dsh;
 pub mod env_check;
 pub mod hardware;
+pub mod mcp;
 pub mod model;
 pub mod server;
 pub mod system;

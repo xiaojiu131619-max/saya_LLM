@@ -2427,6 +2427,135 @@ pub fn stop_server() -> Result<()> {
     Ok(())
 }
 
+/// 为旁路子进程（MCP 服务器等）挂上 KILL_ON_JOB_CLOSE 的 Job Object，
+/// 保证应用被强杀时这些进程不会变成孤儿。
+/// 与 llama-server 共用同一个 Job 句柄：句柄在应用退出时统一关闭，
+/// 期间任何被 attach 的子进程都会被一并回收。
+#[cfg(windows)]
+pub fn attach_child_job(child: &Child, _tag: &str) {
+    use std::os::windows::io::AsRawHandle;
+    job_guard::attach(child.as_raw_handle());
+}
+
+#[cfg(not(windows))]
+pub fn attach_child_job(_child: &Child, _tag: &str) {}
+
+/// 构建旁路子进程的环境变量表：用户配置项 + 关闭交互式确认提示。
+/// 返回键值对列表，由调用方逐项 `env()` 注册，不做任何字符串拼接。
+fn sidecar_env(env: &[crate::models::mcp_types::McpEnvVar]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|item| (item.key.trim().to_string(), item.value.clone()))
+        .filter(|(key, _)| !key.is_empty())
+        .collect();
+    // 关掉 npx / uvx 之类的交互式确认提示，否则它们会阻塞等待输入。
+    pairs.push(("npm_config_yes".to_string(), "true".to_string()));
+    pairs.push(("NPM_CONFIG_YES".to_string(), "true".to_string()));
+    pairs
+}
+
+/// 校验旁路程序名/路径并解析为可执行文件路径。
+/// 只接受带空格的整串作为单一程序名（不做拆分），也不接受 shell 元字符。
+fn resolve_sidecar_program(program: &str) -> Result<String, String> {
+    let trimmed = program.trim();
+    if trimmed.is_empty() {
+        return Err("启动命令不能为空。".to_string());
+    }
+    if trimmed.contains(['&', '|', ';', '>', '<', '`', '\n', '\r']) {
+        return Err(format!("启动命令包含不允许的字符：{trimmed}"));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// 侧车进程的启动参数（供 `Command` 逐项消费）。
+struct SidecarLaunch {
+    program: String,
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    cwd: Option<String>,
+}
+
+fn build_sidecar_launch(
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    extra_env: &[crate::models::mcp_types::McpEnvVar],
+) -> Result<SidecarLaunch, String> {
+    Ok(SidecarLaunch {
+        program: resolve_sidecar_program(program)?,
+        args: args.to_vec(),
+        envs: sidecar_env(extra_env),
+        cwd: cwd
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| dir.to_string()),
+    })
+}
+
+/// 组装侧车进程的 `Command`：程序、参数、环境、工作目录逐项登记。
+fn sidecar_command(launch: &SidecarLaunch) -> Command {
+    let mut cmd = Command::new(launch.program.as_str());
+    cmd.args(&launch.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in &launch.envs {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = launch.cwd.as_deref() {
+        cmd.current_dir(dir);
+    }
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    cmd
+}
+
+/// 拉起一个旁路子进程（MCP stdio 服务器等），接管 stdin/stdout/stderr 三个管道。
+/// 参数以列表逐项传递，不经过任何 shell 解释。
+pub fn spawn_sidecar_process(
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    extra_env: &[crate::models::mcp_types::McpEnvVar],
+) -> Result<Child, String> {
+    let launch = build_sidecar_launch(program, args, cwd, extra_env)?;
+    let mut cmd = sidecar_command(&launch);
+    let child = cmd
+        .spawn()
+        .map_err(|error| format!("无法启动该命令：{error}。请确认它存在且已加入 PATH。"))?;
+    attach_child_job(&child, "sidecar");
+    Ok(child)
+}
+
+/// 终止一个旁路子进程及其子进程树。
+///
+/// Windows 上用 `taskkill /T /F` 保证被解释器再拉起的子进程也一起回收
+/// （参数逐项传递，不拼接 shell 命令）；`taskkill` 不可用时回退到 `Child::kill`。
+pub fn terminate_process_tree(child: &mut Child, tag: &str) {
+    let pid = child.id();
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .arg("/F")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000)
+            .status();
+        if status.map(|status| status.success()).unwrap_or(false) {
+            let _ = child.wait();
+            return;
+        }
+    }
+    let _ = tag;
+    if let Err(error) = child.kill() {
+        eprintln!("[mcp] 终止子进程 {pid} 失败: {error}");
+    }
+    let _ = child.wait();
+}
+
 pub fn is_server_running() -> bool {
     // 不能用 expect：本函数被前端的状态轮询（get_server_status）反复调用，
     // 一旦锁中毒就会变成每次轮询都 panic，把一次局部故障放大成整个应用不可用。

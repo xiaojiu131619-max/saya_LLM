@@ -172,6 +172,11 @@ fn persist_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// 供其它命令模块复用的配置落盘入口（MCP 服务器增删改等）。
+pub(crate) fn persist_config_public(config: &AppConfig) -> Result<(), String> {
+    persist_config(config)
+}
+
 #[tauri::command]
 pub fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     let start = std::time::Instant::now();

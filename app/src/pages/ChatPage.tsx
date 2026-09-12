@@ -26,9 +26,10 @@ import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { checkVideoRuntime, effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type VideoRuntimeInfo } from '@/lib/desktop';
+import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
-import type { ChatMessageContentPart } from '@/types';
+import { MAX_TOOL_ROUNDS, collectMcpToolSpecs, runChatToolLoop as runToolLoop, type ChatRoundRunner } from '@/features/chat/mcpTools';
+import type { ChatMessageContentPart, ToolActivity } from '@/types';
 import {
   CHAT_HISTORY_MODEL_ID,
   MAX_ATTACHMENT_BYTES,
@@ -713,35 +714,95 @@ export default function ChatPage() {
       });
       // 滚动统一由内容变化的 useLayoutEffect（100ms 节流）接管，避免每个 token 都 scrollToIndex。
     };
+    const updateActivity = (activities: ToolActivity[]) => {
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, toolActivity: activities },
+      });
+    };
+
+    // MCP 工具清单：只纳入已连接服务器的工具；没有可用工具时请求不带 tools 字段。
+    const toolSpecs = collectMcpToolSpecs(state.mcpServers);
+    const conversation: ChatCompletionMessage[] = [...modelMessages, userMsg].map((msg) => ({
+      role: msg.role,
+      content: msg.multimodalContent ?? msg.content,
+    }));
+    const port = activeModel.serverPort ?? state.serverPort;
+    const reasoningSupported = activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0;
+    const runRound: ChatRoundRunner = (messages, handlers) => streamChatCompletion({
+      port,
+      modelName: activeModel.name,
+      config: state.chatConfig,
+      ctxTotal: activeModel.loadConfig.ctxLength,
+      supportsReasoning: reasoningSupported,
+      reasoningBudget: activeModel.loadConfig.reasoningBudget,
+      videoSupport: activeVideoSupport,
+      apiKey: effectiveRequestApiKey(state.apiConfig),
+      signal: abortController.signal,
+      ...(toolSpecs.specs.length > 0 ? { tools: toolSpecs.specs } : {}),
+      messages,
+      onToken: handlers.onToken,
+      onReasoningDelta: handlers.onReasoningDelta,
+    });
+
     try {
-      const metrics = await streamChatCompletion({
-            port: activeModel.serverPort ?? state.serverPort,
-            modelName: activeModel.name,
-            config: state.chatConfig,
-            ctxTotal: activeModel.loadConfig.ctxLength,
-            supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
-            reasoningBudget: activeModel.loadConfig.reasoningBudget,
-            videoSupport: activeVideoSupport,
-            apiKey: effectiveRequestApiKey(state.apiConfig),
-            signal: abortController.signal,
-            messages: [...modelMessages, userMsg].map((msg) => ({
-              role: msg.role,
-              content: msg.multimodalContent ?? msg.content,
-            })),
-            onToken: (token) => {
-              streamedContent += token;
-              updateAssistantContent(streamedContent);
-            },
-            onReasoningDelta: (reasoningContent) => {
-              dispatch({
-                type: 'UPDATE_MESSAGE',
-                payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
-              });
-            },
+      const first = await runRound(conversation, {
+        onToken: (token) => {
+          streamedContent += token;
+          updateAssistantContent(streamedContent);
+        },
+        onReasoningDelta: (reasoningContent) => {
+          dispatch({
+            type: 'UPDATE_MESSAGE',
+            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
           });
+        },
+      });
+
+      // 工具调用循环：模型请求工具 → 应用执行 → 结果回填 → 继续生成。
+      let metrics = first;
+      if (first.toolCalls.length > 0) {
+        const contentRef = { value: streamedContent };
+        const outcome = await runToolLoop({
+          runRound: async (messages, handlers) => {
+            const result = await runRound(messages, handlers);
+            metrics = result;
+            return result;
+          },
+          servers: state.mcpServers,
+          conversation,
+          initialContent: streamedContent,
+          initialPromptTokens: first.promptTokens,
+          initialCompletionTokens: first.completionTokens,
+          initialMetrics: first,
+          callTool: async (serverId, toolName, args) => {
+            const payload = await callMcpTool(serverId, toolName, args);
+            return { text: payload?.text ?? '', isError: payload?.isError };
+          },
+          signal: abortController.signal,
+          onContent: (content) => {
+            contentRef.value = content;
+            updateAssistantContent(content);
+          },
+          onReasoningDelta: (reasoningContent) => {
+            dispatch({
+              type: 'UPDATE_MESSAGE',
+              payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
+            });
+          },
+          onActivity: updateActivity,
+        });
+
+        streamedContent = contentRef.value;
+        if (outcome.hitRoundLimit) {
+          streamedContent += `\n\n（本轮工具调用已达 ${MAX_TOOL_ROUNDS} 轮上限，为避免失控已停止继续调用。）`;
+          updateAssistantContent(streamedContent);
+        }
+        metrics = outcome.metrics;
+      }
 
       const genTime = (performance.now() - startTime) / 1000;
-      if (metrics.totalTokens > 0) {
+      if (metrics.promptTokens > 0 || metrics.completionTokens > 0) {
         dispatch({
           type: 'ADD_USAGE',
           payload: {
@@ -750,10 +811,10 @@ export default function ChatPage() {
             modelColor: activeModel.themeColorSolid,
             promptTokens: metrics.promptTokens,
             completionTokens: metrics.completionTokens,
-            totalTokens: metrics.totalTokens,
+            totalTokens: metrics.promptTokens + metrics.completionTokens,
             tokensPerSec: metrics.tokensPerSec,
             firstTokenDelay: metrics.firstTokenDelay,
-            genTime: metrics.genTime,
+            genTime,
           },
         });
       }
@@ -884,35 +945,92 @@ export default function ChatPage() {
       });
       // 滚动统一由内容变化的 useLayoutEffect（100ms 节流）接管，避免每个 token 都 scrollToIndex。
     };
+    const updateActivity = (activities: ToolActivity[]) => {
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, toolActivity: activities },
+      });
+    };
+
+    const toolSpecs = collectMcpToolSpecs(state.mcpServers);
+    const conversation: ChatCompletionMessage[] = nextHistory.map((message) => ({
+      role: message.role,
+      content: message.multimodalContent ?? message.content,
+    }));
+    const port = activeModel.serverPort ?? state.serverPort;
+    const reasoningSupported = activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0;
+    const runRound: ChatRoundRunner = (messages, handlers) => streamChatCompletion({
+      port,
+      modelName: activeModel.name,
+      config: state.chatConfig,
+      ctxTotal: activeModel.loadConfig.ctxLength,
+      supportsReasoning: reasoningSupported,
+      reasoningBudget: activeModel.loadConfig.reasoningBudget,
+      videoSupport: activeVideoSupport,
+      apiKey: effectiveRequestApiKey(state.apiConfig),
+      signal: abortController.signal,
+      ...(toolSpecs.specs.length > 0 ? { tools: toolSpecs.specs } : {}),
+      messages,
+      onToken: handlers.onToken,
+      onReasoningDelta: handlers.onReasoningDelta,
+    });
+
     try {
-      const metrics = await streamChatCompletion({
-            port: activeModel.serverPort ?? state.serverPort,
-            modelName: activeModel.name,
-            config: state.chatConfig,
-            ctxTotal: activeModel.loadConfig.ctxLength,
-            supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
-            reasoningBudget: activeModel.loadConfig.reasoningBudget,
-            videoSupport: activeVideoSupport,
-            apiKey: effectiveRequestApiKey(state.apiConfig),
-            signal: abortController.signal,
-            messages: nextHistory.map((message) => ({
-              role: message.role,
-              content: message.multimodalContent ?? message.content,
-            })),
-            onToken: (token) => {
-              streamedContent += token;
-              updateAssistantContent(streamedContent);
-            },
-            onReasoningDelta: (reasoningContent) => {
-              dispatch({
-                type: 'UPDATE_MESSAGE',
-                payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
-              });
-            },
+      const first = await runRound(conversation, {
+        onToken: (token) => {
+          streamedContent += token;
+          updateAssistantContent(streamedContent);
+        },
+        onReasoningDelta: (reasoningContent) => {
+          dispatch({
+            type: 'UPDATE_MESSAGE',
+            payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
           });
+        },
+      });
+
+      let metrics = first;
+      if (first.toolCalls.length > 0) {
+        const contentRef = { value: streamedContent };
+        const outcome = await runToolLoop({
+          runRound: async (messages, handlers) => {
+            const result = await runRound(messages, handlers);
+            metrics = result;
+            return result;
+          },
+          servers: state.mcpServers,
+          conversation,
+          initialContent: streamedContent,
+          initialPromptTokens: first.promptTokens,
+          initialCompletionTokens: first.completionTokens,
+          initialMetrics: first,
+          callTool: async (serverId, toolName, args) => {
+            const payload = await callMcpTool(serverId, toolName, args);
+            return { text: payload?.text ?? '', isError: payload?.isError };
+          },
+          signal: abortController.signal,
+          onContent: (content) => {
+            contentRef.value = content;
+            updateAssistantContent(content);
+          },
+          onReasoningDelta: (reasoningContent) => {
+            dispatch({
+              type: 'UPDATE_MESSAGE',
+              payload: { modelId: sessionModelId, sessionId, messageId: assistantMsgId, reasoningContent },
+            });
+          },
+          onActivity: updateActivity,
+        });
+        streamedContent = contentRef.value;
+        if (outcome.hitRoundLimit) {
+          streamedContent += `\n\n（本轮工具调用已达 ${MAX_TOOL_ROUNDS} 轮上限，为避免失控已停止继续调用。）`;
+          updateAssistantContent(streamedContent);
+        }
+        metrics = outcome.metrics;
+      }
 
       const genTime = (performance.now() - startTime) / 1000;
-      if (metrics.totalTokens > 0) {
+      if (metrics.promptTokens > 0 || metrics.completionTokens > 0) {
         dispatch({
           type: 'ADD_USAGE',
           payload: {
@@ -921,10 +1039,10 @@ export default function ChatPage() {
             modelColor: activeModel.themeColorSolid,
             promptTokens: metrics.promptTokens,
             completionTokens: metrics.completionTokens,
-            totalTokens: metrics.totalTokens,
+            totalTokens: metrics.promptTokens + metrics.completionTokens,
             tokensPerSec: metrics.tokensPerSec,
             firstTokenDelay: metrics.firstTokenDelay,
-            genTime: metrics.genTime,
+            genTime,
           },
         });
       }

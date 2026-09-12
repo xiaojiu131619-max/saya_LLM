@@ -53,13 +53,23 @@ v0.3.x 没有交付 ComfyUI 进程管理、工作流模型或生图路由。以�
 
 详细方案见 `docs/COMFY_IMAGE_WORKSPACE_PLAN.md`。
 
-### 2.4 延期或未开始：Agent / MCP
+### 2.4 Agent / MCP
 
-当前 `ToolsPage` 配置的是 llama.cpp 原生 server tools，不是独立的 Agent/MCP 编排系统。以下目标仍未实现：
+`ToolsPage` 同时承载两类工具：llama.cpp 原生 server tools（由服务端 `--tools` 提供），以及**用户自配的 MCP 服务器**。MCP 侧已交付：
+
+- 服务器增删改查与配置持久化（`config.json` 的 `mcp_servers`）
+- **三种传输**：stdio（本机子进程）、Streamable HTTP（2025-03-26）、HTTP+SSE（2024-11-05 旧版）
+- 连接 / 断开 / 工具发现 / 工具调用；stdio 子进程按 Windows Job Object 整树回收
+- 网络端点的 host 安全校验（仅 http/https，拒绝本机、内网与保留地址）
+- 对话内的多轮工具循环（模型请求工具 → 应用执行 → 结果回填 → 续写作答），气泡内可视化工具调用
+
+仍未实现：
 
 - Agent 会话持久化和专用日志面板
 - 工具调用依赖图、文件工具和代码执行沙箱
-- MCP 断线自动重连
+- MCP 断线自动重连（当前由状态轮询识别退出，需手动重连）
+- MCP 的 resources / prompts 能力（当前只用了 tools）
+- DNS rebinding 防护（校验后仍有一次解析窗口）
 
 ### 2.5 仍待处理的体验、测试与发布事项
 

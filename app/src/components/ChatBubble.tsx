@@ -2,22 +2,27 @@
 import { motion } from 'framer-motion';
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Copy,
   Download,
   Gauge,
   Languages,
+  Loader2,
   Pencil,
   RotateCcw,
   Trash2,
+  Wrench,
   Zap,
 } from 'lucide-react';
-import type { Message } from '@/types';
+import type { Message, ToolActivity } from '@/types';
 import { useApp } from '@/context/AppContext';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
 import { isDesktopRuntime, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { formatSessionCtxUsage } from '@/features/chat/chatUtils';
+import { formatToolArguments } from '@/features/chat/mcpTools';
 
 interface ChatBubbleProps {
   message: Message;
@@ -393,6 +398,10 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
 
+      {message.toolActivity && message.toolActivity.length > 0 && (
+        <ToolActivityPanel activities={message.toolActivity} />
+      )}
+
       <div className="min-w-0 text-[15.5px] leading-[1.9] text-[var(--text-primary)] dark:text-[var(--text-primary)]">
         <MarkdownRenderer content={message.content} />
         {message.isStreaming && (
@@ -435,6 +444,74 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
     </motion.article>
+  );
+}
+
+function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const pendingCount = activities.filter((item) => item.pending).length;
+
+  return (
+    <div className="max-w-[760px] rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+        {pendingCount > 0
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
+          : <Wrench className="h-3.5 w-3.5 text-[var(--accent)]" />}
+        <span>
+          {pendingCount > 0
+            ? `正在调用工具（${activities.length - pendingCount}/${activities.length} 完成）`
+            : `调用了 ${activities.length} 次工具`}
+        </span>
+      </div>
+
+      <div className="space-y-1.5">
+        {activities.map((item) => {
+          const expanded = expandedId === item.id;
+          const hasDetail = Boolean(item.result);
+          return (
+            <div key={item.id} className="min-w-0">
+              <button
+                type="button"
+                onClick={() => hasDetail && setExpandedId(expanded ? null : item.id)}
+                className={`flex w-full min-w-0 items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                  hasDetail ? 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]' : 'cursor-default'
+                }`}
+              >
+                {hasDetail && (
+                  expanded
+                    ? <ChevronDown className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[var(--text-tertiary)]" />
+                    : <ChevronRight className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[var(--text-tertiary)]" />
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="mono-font text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                      {item.tool}
+                    </span>
+                    <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] dark:bg-white/[0.07]">
+                      {item.server}
+                    </span>
+                    {item.pending && (
+                      <span className="text-[11px] text-[var(--accent)]">执行中…</span>
+                    )}
+                    {!item.pending && item.isError && (
+                      <span className="text-[11px] font-medium text-[var(--state-danger)]">执行失败</span>
+                    )}
+                  </span>
+                  <span className="mono-font mt-0.5 block truncate text-[11px] text-[var(--text-tertiary)]">
+                    {formatToolArguments(item.arguments)}
+                  </span>
+                </span>
+              </button>
+              {expanded && hasDetail && (
+                <pre className="mono-font mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/[0.04] px-3 py-2 text-[11.5px] leading-5 text-[var(--text-secondary)] dark:bg-black/30 dark:text-[var(--text-secondary)]">
+                  {item.result}
+                </pre>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

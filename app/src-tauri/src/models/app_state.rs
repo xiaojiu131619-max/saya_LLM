@@ -101,6 +101,10 @@ pub struct AppConfig {
     pub embedding_port: u16,
     /// dsh（DeepSeek Harness）接入配置（v0.4 新增，serde default 平滑迁移）。
     pub dsh: crate::models::dsh_types::DshConfig,
+    /// MCP（Model Context Protocol）服务器列表（v0.5 新增，serde default 平滑迁移）。
+    /// 每个条目是一个本机 stdio 子进程；对话时其工具会并入 llama.cpp 的工具集。
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::models::mcp_types::McpServerConfig>,
 }
 
 impl Default for AppConfig {
@@ -126,6 +130,7 @@ impl Default for AppConfig {
             kernel_override_path: None,
             embedding_port: default_embedding_port(),
             dsh: crate::models::dsh_types::DshConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 }

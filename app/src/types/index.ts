@@ -72,6 +72,87 @@ export interface SystemPromptPreset {
   updatedAt: number;
 }
 
+// ---------------------------------------------------------------------------
+// MCP（Model Context Protocol）服务器
+// ---------------------------------------------------------------------------
+
+export interface McpEnvVar {
+  key: string;
+  value: string;
+}
+
+/** MCP 传输方式：stdio（本机子进程）/ http（Streamable HTTP）/ sse（HTTP+SSE 旧版）。 */
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  /** 是否随对话自动连接（关闭后只能在工具页手动连接）。 */
+  enabled: boolean;
+  /** 传输方式；缺省按 stdio 处理。 */
+  transport?: McpTransport;
+  /**
+   * stdio：可执行文件（node / npx / 绝对路径）；
+   * http / sse：MCP 端点 URL（仅 http/https，且拒绝本机与内网地址）。
+   */
+  command: string;
+  args: string[];
+  env: McpEnvVar[];
+  cwd?: string | null;
+  /** 附加请求头（http / sse 用，例如 `Authorization: Bearer xxx`）。 */
+  headers?: McpEnvVar[];
+  /** 单个请求超时（毫秒），5000–600000。 */
+  timeoutMs: number;
+}
+
+export interface McpToolInfo {
+  /** 服务端原始工具名。 */
+  name: string;
+  /** 暴露给模型的完整名：`mcp__<服务器名>__<工具名>`。 */
+  qualifiedName: string;
+  description: string;
+  /** JSON Schema，直接透传给 llama.cpp 的 tools。 */
+  inputSchema: Record<string, unknown>;
+  readOnly: boolean;
+  /** 未知按破坏性处理，界面上会提示风险。 */
+  destructive: boolean;
+}
+
+/** `stopped` | `starting` | `ready` | `error` */
+export type McpServerState = 'stopped' | 'starting' | 'ready' | 'error';
+
+export interface McpServerStatus {
+  id: string;
+  name: string;
+  state: McpServerState;
+  pid?: number | null;
+  tools: McpToolInfo[];
+  error?: string | null;
+  serverInfo?: string | null;
+  lastStderr?: string | null;
+  transport?: McpTransport | null;
+}
+
+export interface McpCallResult {
+  text: string;
+  isError: boolean;
+  nonTextParts: number;
+}
+
+/**
+ * 界面使用的合并视图：配置项 + 最近一次运行状态。
+ * 配置部分持久化在 config.json；`state` / `tools` 等来自运行中的连接，
+ * 不写回磁盘（保存时用 toConfig 剥离）。
+ */
+export interface McpServerEntry extends McpServerConfig {
+  state?: McpServerState;
+  tools?: McpToolInfo[];
+  pid?: number | null;
+  error?: string | null;
+  serverInfo?: string | null;
+  lastStderr?: string | null;
+}
+
 export interface ExternalApiConfig {
   enabled: boolean;
   host: string;
@@ -213,6 +294,24 @@ export interface Message {
   timestamp: number;
   isStreaming?: boolean;
   stats?: MessageStats;
+  /** 本轮模型发起、且应用已执行完成的工具调用（用于气泡内展示）。 */
+  toolActivity?: ToolActivity[];
+}
+
+/** 一次 MCP 工具调用在界面上的记录。 */
+export interface ToolActivity {
+  id: string;
+  /** 服务器名（来自工具名中的 mcp__<服务器>__ 段）。 */
+  server: string;
+  /** 服务端原始工具名。 */
+  tool: string;
+  /** 调用参数（已解析对象）。 */
+  arguments: Record<string, unknown>;
+  /** 执行结果文本（截断后的展示副本）。 */
+  result?: string;
+  isError?: boolean;
+  /** 正在执行 / 已完成。 */
+  pending?: boolean;
 }
 
 export type ChatMessageContentPart =
@@ -292,4 +391,6 @@ export interface AppState {
   modelLaunchMemories: Record<string, ModelLaunchMemory>;
   recentModelUsage: Record<string, number>;
   closeToTray: boolean;
+  /** MCP 服务器配置（持久化在 config.json，与后端 AppConfig.mcp_servers 对应）。 */
+  mcpServers: McpServerEntry[];
 }

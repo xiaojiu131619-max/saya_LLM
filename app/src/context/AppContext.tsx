@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
-import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset } from '@/types';
+import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset, McpServerEntry, McpServerStatus, ToolActivity } from '@/types';
 import {
   checkDesktopEngine,
+  connectMcpServer,
   getApiTokenUsage,
   getDesktopConfig,
   getDesktopServerStatus,
@@ -10,6 +11,7 @@ import {
   getExternalApiKeyStatus,
   getServerApiKey,
   isDesktopRuntime,
+  listMcpServers,
   setDesktopWindowMaterial,
   createExternalApiKey,
   listenDesktopEvent,
@@ -56,7 +58,7 @@ type Action =
   | { type: 'DELETE_CHAT_SESSION'; payload: { modelId: string; sessionId: string } }
   | { type: 'RENAME_CHAT_SESSION'; payload: { modelId: string; sessionId: string; title: string } }
   | { type: 'ADD_MESSAGE'; payload: { modelId: string; sessionId: string; message: Message } }
-  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string } }
+  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[] } }
   | { type: 'SET_MESSAGE_STREAMING'; payload: { modelId: string; sessionId: string; messageId: string; streaming: boolean; stats?: Message['stats'] } }
   | { type: 'REPLACE_MESSAGE_AND_TRUNCATE_AFTER'; payload: { modelId: string; sessionId: string; messageId: string; message: Message } }
   | { type: 'DELETE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string } }
@@ -75,6 +77,8 @@ type Action =
   | { type: 'SET_API_CONFIG'; payload: Partial<ExternalApiConfig> }
   | { type: 'SET_MODEL_DIRS'; payload: string[] }
   | { type: 'SET_CLOSE_TO_TRAY'; payload: boolean }
+  | { type: 'SET_MCP_SERVERS'; payload: McpServerEntry[] }
+  | { type: 'SET_MCP_STATUSES'; payload: McpServerStatus[] }
   | { type: 'SET_APP_STATUS'; payload: string | null }
   | { type: 'SET_CHAT_CONFIG'; payload: Partial<ChatGenerationConfig> }
   | { type: 'SAVE_SYSTEM_PROMPT_PRESET'; payload: { title: string; prompt: string } }
@@ -241,6 +245,8 @@ const initialState: AppState = {
   ),
   chatSessions: sanitizeStoredSessions(storedState.chatSessions ?? {}),
   activeChatSessionIds: storedState.activeChatSessionIds ?? {},
+  // MCP 服务器配置以后端 config.json 为唯一真源，hydrate 时拉取，这里只给空初值。
+  mcpServers: [],
 };
 
 function todayKey() {
@@ -490,6 +496,7 @@ function appReducer(state: AppState, action: Action): AppState {
           ...m,
           ...(action.payload.content !== undefined ? { content: action.payload.content } : {}),
           ...(action.payload.reasoningContent !== undefined ? { reasoningContent: action.payload.reasoningContent } : {}),
+          ...(action.payload.toolActivity !== undefined ? { toolActivity: action.payload.toolActivity } : {}),
         } : m),
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
@@ -592,6 +599,28 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, modelDirs: action.payload };
     case 'SET_CLOSE_TO_TRAY':
       return { ...state, closeToTray: action.payload };
+    case 'SET_MCP_SERVERS':
+      return { ...state, mcpServers: action.payload };
+    case 'SET_MCP_STATUSES': {
+      // 运行状态按 id 合并进配置项，供工具页与聊天页读取工具清单。
+      // 只更新 payload 里出现的条目：单条更新（连接/断开）不应把
+      // 其它仍在运行的服务器错误地标回「未连接」；整表删除由 SET_MCP_SERVERS 负责。
+      const byId = new Map(action.payload.map((status) => [status.id, status]));
+      return {
+        ...state,
+        mcpServers: state.mcpServers.map((server) => {
+          const status = byId.get(server.id);
+          if (!status) return server;
+          // status.transport 可能为 null（后端未记录），此时保留配置里的值。
+          const { transport, ...rest } = status;
+          return {
+            ...server,
+            ...rest,
+            ...(transport ? { transport } : {}),
+          };
+        }),
+      };
+    }
     case 'SET_APP_STATUS':
       return { ...state, appStatus: action.payload };
     case 'SET_CHAT_CONFIG':
@@ -922,6 +951,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
           });
         }
         dispatch({ type: 'SET_SERVER_RUNNING', payload: serverRunning });
+
+        // MCP 服务器配置：以后端 config.json 为准拉取一次；
+        // 标记为「随对话自动连接」的项在这里连上，其余留给工具页手动操作。
+        void (async () => {
+          try {
+            const servers = await listMcpServers();
+            if (cancelled) return;
+            dispatch({ type: 'SET_MCP_SERVERS', payload: servers });
+            const autoConnect = servers.filter((server) => server.enabled);
+            if (autoConnect.length === 0) return;
+            const results = await Promise.all(
+              autoConnect.map((server) =>
+                connectMcpServer(server.id).catch(() => null)
+              )
+            );
+            if (cancelled) return;
+            const statuses = results.filter((status): status is McpServerStatus => Boolean(status));
+            if (statuses.length > 0) {
+              dispatch({ type: 'SET_MCP_STATUSES', payload: statuses });
+            }
+          } catch {
+            // MCP 不可用不应阻断启动流程。
+          }
+        })();
 
         if (engineInfo && !engineInfo.binary_exists) {
           // 直接打开独立的核心更新页，引导用户下载内核。

@@ -1,6 +1,7 @@
 ﻿import { AlertTriangle, Check, RotateCcw, ShieldAlert, Wrench } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import PageHeader from '@/components/PageHeader';
+import McpServersSection from '@/features/settings/McpServersSection';
 import { LLAMA_CPP_TOOLS, toolLabel, toolScopeLabel } from '@/lib/llamaTools';
 
 function riskClass(risk: string) {
@@ -40,7 +41,7 @@ export default function ToolsPage() {
           <PageHeader
             icon={Wrench}
             title="工具"
-            description="选择允许模型调用的 llama.cpp 原生工具。"
+            description="选择允许模型调用的 llama.cpp 原生工具，并接入 MCP 服务器。"
           />
         </div>
 
@@ -140,6 +141,8 @@ export default function ToolsPage() {
               })}
             </div>
           </section>
+
+          <McpServersSection />
         </div>
       </div>
     </div>

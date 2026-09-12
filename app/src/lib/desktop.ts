@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Effect, EffectState, getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, ModelInfo, ModelLoadConfig, ModelTask, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
+import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, McpCallResult, McpServerConfig, McpServerStatus, McpTransport, ModelInfo, ModelLoadConfig, ModelTask, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
 import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
@@ -324,9 +324,39 @@ export async function clearModelRunRecords(modelId: string) {
 
 export type ChatMessageContent = string | ChatMessageContentPart[];
 
+/** OpenAI 兼容的工具调用请求（回填给模型的 tools 字段）。 */
+export interface ChatToolSpec {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+/** 模型在流式响应中请求的一次工具调用。 */
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  /** 已解析的参数对象；JSON 不合法时保留原文在 rawArguments。 */
+  arguments: Record<string, unknown>;
+  rawArguments: string;
+  /** rawArguments 是否解析成了合法的 JSON 对象；false 时调用方必须回填错误，不能拿空参数真的执行。 */
+  argumentsValid: boolean;
+}
+
 export interface ChatCompletionMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: ChatMessageContent;
+  /** assistant 消息里模型请求的工具调用。 */
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  /** role = tool 时必须带上，对应发起调用的 tool_call id。 */
+  tool_call_id?: string;
+  name?: string;
 }
 
 interface ServerConfig {
@@ -401,18 +431,29 @@ interface ChatCompletionChoice {
     reasoning_content?: string;
     reasoning?: string;
     thinking?: string;
+    tool_calls?: RawToolCallDelta[];
   };
   message?: {
     content?: string;
     reasoning_content?: string;
     reasoning?: string;
     thinking?: string;
+    tool_calls?: RawToolCallDelta[];
   };
   text?: string;
   content?: string;
   reasoning_content?: string;
   reasoning?: string;
   thinking?: string;
+  finish_reason?: string;
+}
+
+/** 服务端增量下发的工具调用分片：name 只在首片出现，arguments 逐片拼接。 */
+interface RawToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
 }
 
 export interface ChatCompletionMetrics {
@@ -424,6 +465,8 @@ export interface ChatCompletionMetrics {
   genTime: number;
   ctxUsed: number;
   ctxTotal: number;
+  /** 本轮模型请求的工具调用（已按 index 合并分片）。空数组 = 没有工具调用。 */
+  toolCalls: ChatToolCall[];
 }
 
 let activeChatAbortController: AbortController | null = null;
@@ -1698,6 +1741,9 @@ export async function streamChatCompletion(options: {
   videoSupport?: VideoSupportLevel;
   apiKey?: string;
   signal?: AbortSignal;
+  /** 工具清单（llama.cpp 原生工具由服务端 --tools 提供；这里传 MCP 工具）。 */
+  tools?: ChatToolSpec[];
+  /** 工具调用结果回填后，是否强制模型继续生成（tool_choice = auto 为默认）。 */
   onToken: (token: string) => void;
   onReasoningDelta?: (reasoningContent: string) => void;
   onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; tokensPerSec?: number; firstTokenDelay?: number; genTime?: number }) => void;
@@ -1706,6 +1752,7 @@ export async function streamChatCompletion(options: {
   let firstTokenAt: number | null = null;
   let latestUsage: Partial<ChatCompletionMetrics> = {};
   let reasoningContent = '';
+  let latestToolCalls: ChatToolCall[] = [];
   const localAbortController = new AbortController();
   const { signal: abortSignal, cleanup: cleanupAbortListeners } = mergeAbortSignals(localAbortController.signal, options.signal);
   activeChatAbortController = localAbortController;
@@ -1764,6 +1811,10 @@ export async function streamChatCompletion(options: {
     temperature: options.config.temperature,
     top_p: options.config.topP,
     repeat_penalty: options.config.repeatPenalty,
+    ...(options.tools && options.tools.length > 0 ? {
+      tools: options.tools,
+      tool_choice: 'auto',
+    } : {}),
     ...(maxCompletionTokens > 0 ? {
       max_tokens: maxCompletionTokens,
       n_predict: maxCompletionTokens,
@@ -1848,7 +1899,14 @@ export async function streamChatCompletion(options: {
       firstTokenAt = performance.now();
       options.onToken(content);
     }
+    // 非流式响应的工具调用与流式路径同一套归并逻辑，不能漏。
+    const toolDeltas = toolCallsFromChoice(choice);
+    if (toolDeltas && toolDeltas.length > 0) {
+      firstTokenAt ??= performance.now();
+      latestToolCalls = mergeToolCallDeltas(latestToolCalls, toolDeltas);
+    }
     latestUsage = collectCompletionMetrics(latestUsage, json);
+    latestUsage.toolCalls = latestToolCalls;
     return finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
   }
 
@@ -1877,6 +1935,14 @@ export async function streamChatCompletion(options: {
     if (token) {
       firstTokenAt ??= performance.now();
       options.onToken(token);
+      receivedContent = true;
+    }
+
+    // 工具调用分片：不产生可显示文本，但同样算「收到了有效响应」。
+    const toolDeltas = toolCallsFromChoice(choice);
+    if (toolDeltas && toolDeltas.length > 0) {
+      firstTokenAt ??= performance.now();
+      latestToolCalls = mergeToolCallDeltas(latestToolCalls, toolDeltas);
       receivedContent = true;
     }
 
@@ -1948,6 +2014,7 @@ export async function streamChatCompletion(options: {
       : 'llama-server 没有返回可显示内容');
   }
 
+  latestUsage.toolCalls = latestToolCalls;
   return finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
   } finally {
     cleanupAbortListeners();
@@ -2039,6 +2106,7 @@ function finalizeCompletionMetrics(
     genTime,
     ctxUsed: promptTokens + completionTokens,
     ctxTotal,
+    toolCalls: latestUsage.toolCalls ?? [],
   };
 
   if (totalTokens > 0) {
@@ -2053,6 +2121,46 @@ function finalizeCompletionMetrics(
   }
 
   return metrics;
+}
+
+/**
+ * 合并服务端增量下发的工具调用分片。
+ * 首片带 id 与函数名，后续分片只补 arguments 字符串，按 index 归并。
+ */
+function mergeToolCallDeltas(
+  current: ChatToolCall[],
+  deltas: RawToolCallDelta[] | undefined,
+): ChatToolCall[] {
+  if (!deltas || deltas.length === 0) return current;
+  const next = current.map((call) => ({ ...call, arguments: { ...call.arguments } }));
+  deltas.forEach((delta, position) => {
+    const index = typeof delta.index === 'number' ? delta.index : position;
+    while (next.length <= index) {
+      next.push({ id: '', name: '', arguments: {}, rawArguments: '', argumentsValid: true });
+    }
+    const target = next[index];
+    if (delta.id) target.id = delta.id;
+    if (delta.function?.name) target.name = delta.function.name;
+    if (delta.function?.arguments) target.rawArguments += delta.function.arguments;
+  });
+  // 每次归并都对完整 rawArguments 重新解析：流式分片过程中前缀必然不是合法 JSON，
+  // 只有收完最后一片才能定论；最终 argumentsValid=false 的调用不许真的执行。
+  return next.map((call) => {
+    if (!call.rawArguments.trim()) return { ...call, argumentsValid: true };
+    try {
+      const parsed = JSON.parse(call.rawArguments);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...call, arguments: parsed, argumentsValid: true };
+      }
+      return { ...call, argumentsValid: false };
+    } catch {
+      return { ...call, argumentsValid: false };
+    }
+  });
+}
+
+function toolCallsFromChoice(choice: ChatCompletionChoice | undefined): RawToolCallDelta[] | undefined {
+  return choice?.delta?.tool_calls ?? choice?.message?.tool_calls;
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,4 +2286,101 @@ export async function dshUnbindModel() {
 export async function dshCleanupData(kind: 'sessions' | 'store') {
   if (!isDesktopRuntime()) return null;
   return invoke<string>('dsh_cleanup_data', { kind });
+}
+
+// ---------------------------------------------------------------------------
+// MCP（Model Context Protocol）服务器管理
+// ---------------------------------------------------------------------------
+
+export async function listMcpServers() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<McpServerConfig[]>('list_mcp_servers');
+}
+
+export async function saveMcpServer(server: McpServerConfig) {
+  if (!isDesktopRuntime()) return [];
+  return invoke<McpServerConfig[]>('save_mcp_server', { server });
+}
+
+export async function deleteMcpServer(serverId: string) {
+  if (!isDesktopRuntime()) return [];
+  return invoke<McpServerConfig[]>('delete_mcp_server', { serverId });
+}
+
+export async function getMcpStatuses() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<McpServerStatus[]>('get_mcp_statuses');
+}
+
+export async function connectMcpServer(serverId: string) {
+  if (!isDesktopRuntime()) return null;
+  return invoke<McpServerStatus>('connect_mcp_server', { serverId });
+}
+
+export async function disconnectMcpServer(serverId: string) {
+  if (!isDesktopRuntime()) return;
+  await invoke('disconnect_mcp_server', { serverId });
+}
+
+/** 调用 MCP 工具；toolName 必须是 `mcp__<服务器名>__<工具名>` 形式的完整名。 */
+export async function callMcpTool(serverId: string, toolName: string, args: Record<string, unknown>) {
+  if (!isDesktopRuntime()) return null;
+  return invoke<McpCallResult>('call_mcp_tool', { serverId, toolName, arguments: args });
+}
+
+/** 传输方式的中文标签（界面展示用）。 */
+export function mcpTransportLabel(transport?: McpTransport): string {
+  if (transport === 'http') return 'Streamable HTTP';
+  if (transport === 'sse') return 'HTTP + SSE';
+  return 'stdio（本机进程）';
+}
+
+/** 该传输是否走网络（决定界面显示 URL 还是命令，以及是否提示数据外发）。 */
+export function mcpTransportIsNetwork(transport?: McpTransport): boolean {
+  return transport === 'http' || transport === 'sse';
+}
+
+/**
+ * 前端预校验 MCP 端点：仅 http/https，且拒绝本机与内网地址。
+ * 与后端 mcp_endpoint 同一口径，用于在保存前给出即时提示（后端仍会再校验一次）。
+ */
+export function validateMcpEndpoint(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return '请填写 MCP 端点地址。';
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return 'MCP 端点地址无法解析，请填写完整地址（含 https://）。';
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `只支持 http / https 地址，当前是 ${parsed.protocol}`;
+  }
+  if (parsed.username || parsed.password) {
+    return '地址里不要带用户名或密码，需要鉴权请改用请求头。';
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    return '出于安全考虑，不允许把 MCP 端点指向本机（localhost）。';
+  }
+  // IPv4 / IPv6 字面量：拒绝回环、私有与保留网段。
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b] = ipv4.slice(1).map(Number);
+    const blocked = a === 127 || a === 10 || a === 0
+      || (a === 192 && b === 168)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 169 && b === 254)
+      || (a === 100 && b >= 64 && b <= 127);
+    if (blocked) {
+      return `出于安全考虑，不允许把 MCP 端点指向本机或内网地址（${host}）。`;
+    }
+  }
+  if (host.includes(':')) {
+    const lower = host.toLowerCase();
+    if (lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe8')) {
+      return `出于安全考虑，不允许把 MCP 端点指向本机或内网地址（${host}）。`;
+    }
+  }
+  return null;
 }
