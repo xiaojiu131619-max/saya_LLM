@@ -14,8 +14,15 @@ use crate::services::gguf_parser::{parse_gguf_header, GgufMetadata};
 
 static RE_PARAM: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+(?:\.\d+)?)\s*[bB]").unwrap());
 
-static RE_QUANT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(Q[0-9]_[A-Z0-9_]+|IQ[0-9]_[A-Z0-9_]+|BF16|F16|F32|AWQ)").unwrap());
+/// 量化类型识别：PTQ1_0 / TQ1_0 这类「前缀 + Qn_n」的写法必须排在通用
+/// `Q[0-9]_…` 之前，否则 `Ternary-Bonsai-2-27B-PTQ1_0` 会被截成 `Q1_0`，
+/// 界面上看起来就是普通 Q1_0 —— 而两者所需内核完全不同。
+static RE_QUANT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(PTQ[0-9]_[A-Z0-9_]+|TQ[0-9]_[A-Z0-9_]+|IQ[0-9]_[A-Z0-9_]+|Q[0-9]_[A-Z0-9_]+|BF16|F16|F32|AWQ)",
+    )
+    .unwrap()
+});
 static RE_SPLIT_GGUF: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)-(\d{5})-of-(\d{5})\.gguf$").unwrap());
 
@@ -52,7 +59,7 @@ fn cache_path(file_path: &Path) -> PathBuf {
 // 不含这两个字段，必须递增版本触发重扫。
 // v24：修正多模态嵌入模型的能力判定——embedding 任务同样保留 mmproj（供图片/视频
 // 向量），只剥离推测解码侧车；旧缓存的 embedding 模型 mmproj 被错误置空，需重扫。
-const SCANNER_VERSION: u32 = 24;
+const SCANNER_VERSION: u32 = 25;
 
 fn infer_video_support(
     name: &str,
@@ -860,19 +867,29 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         .or_else(|| gguf.as_ref().and_then(|g| g.name.clone()))
         .or_else(|| parse_param_str(&name));
 
-    let quantization = parse_quantization(&file_name).or_else(|| {
-        gguf.as_ref()
-            .and_then(|g| {
-                g.tensor_type_summary
-                    .first()
-                    .map(|(kind, _)| kind.clone())
-                    .filter(|kind| kind != "UNKNOWN")
-            })
-            .or_else(|| {
-                gguf.as_ref()
-                    .and_then(|g| g.quantization_version.map(|v| format!("v{}", v)))
-            })
+    // GGUF 张量类型是最权威的量化信号，但粒度比文件名的自定义标签粗
+    // （文件名常写成 UD-Q4_K_XL，张量类型只有 Q4_K）。两种取法各自的适用面：
+    // - 张量类型名以文件名匹配结果结尾时说明后者只是前者的截断（PTQ1_0 → Q1_0），
+    //   取更完整的张量类型名，否则内核要求会被看错；
+    // - 其余情况保留文件名里的细粒度标签。
+    let tensor_type_name = gguf.as_ref().and_then(|g| {
+        g.tensor_type_summary
+            .first()
+            .map(|(kind, _)| kind.clone())
+            .filter(|kind| kind != "UNKNOWN")
     });
+    let quantization = match (parse_quantization(&file_name), tensor_type_name) {
+        (Some(from_name), Some(from_tensor))
+            if from_tensor.len() > from_name.len() && from_tensor.ends_with(&from_name) =>
+        {
+            Some(from_tensor)
+        }
+        (Some(from_name), _) => Some(from_name),
+        (None, Some(from_tensor)) => Some(from_tensor),
+        (None, None) => gguf
+            .as_ref()
+            .and_then(|g| g.quantization_version.map(|v| format!("v{}", v))),
+    };
 
     let block_count = gguf.as_ref().map(|g| g.block_count).filter(|&c| c > 0);
     let context_length = gguf.as_ref().map(|g| g.context_length).filter(|&c| c > 0);
@@ -1134,9 +1151,39 @@ mod tests {
         file.write_all(&data).expect("write synthetic GGUF");
     }
 
+    /// 写入「主张量使用指定 ggml 类型」的最小 GGUF，用来验证量化类型的识别与
+    /// 内核兼容性判断（如分支专有的 143 = PTQ1_0）。
+    fn write_scanner_gguf_tensor_type(path: &Path, arch: &str, block_count: u32, tensor_type: u32) {
+        fn push_string(data: &mut Vec<u8>, value: &str) {
+            data.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            data.extend_from_slice(value.as_bytes());
+        }
+        let mut data = Vec::new();
+        data.extend_from_slice(b"GGUF");
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes()); // tensor count
+        data.extend_from_slice(&2u64.to_le_bytes()); // kv count
+        push_string(&mut data, "general.architecture");
+        data.extend_from_slice(&8u32.to_le_bytes());
+        push_string(&mut data, arch);
+        push_string(&mut data, &format!("{arch}.block_count"));
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&block_count.to_le_bytes());
+        // 张量：名字 + n_dims=1 + dim + type + offset
+        push_string(&mut data, "blk.0.attn_norm.weight");
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&tensor_type.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(path, data).expect("write synthetic GGUF");
+    }
+
     fn scanner_test_dir(label: &str) -> PathBuf {
-        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);        let dir = std::env::temp_dir().join(format!(
             "agent-llm-scanner-{}-{}-{}",
             std::process::id(),
             id,
@@ -1184,6 +1231,40 @@ mod tests {
         let info = parse_model_info_from_path(&main).expect("parse main model");
         assert!(info.is_dynamic_quant, "UD- 前缀应标记为动态量化");
         assert_eq!(info.quantization.as_deref(), Some("Q4_K_XL"));
+    }
+
+    #[test]
+    fn ptq1_0_quant_is_not_truncated_to_q1_0() {
+        // 分支专有量化的名字里自带「Qn_n」（PTQ1_0 / TQ1_0），通用 Q 规则会把它
+        // 截成 Q1_0，从而在界面上显示成一个内核要求完全不同的量化类型。
+        assert_eq!(
+            super::parse_quantization("Ternary-Bonsai-2-27B-PTQ1_0.gguf").as_deref(),
+            Some("PTQ1_0")
+        );
+        assert_eq!(
+            super::parse_quantization("Qwen3.5-30B-A3B-TQ1_0.gguf").as_deref(),
+            Some("TQ1_0")
+        );
+        // 既有细粒度标签不能被回退成更粗的张量类型名。
+        assert_eq!(
+            super::parse_quantization("Qwen3.5-30B-A3B-UD-Q4_K_XL.gguf").as_deref(),
+            Some("Q4_K_XL")
+        );
+    }
+
+    #[test]
+    fn tensor_type_name_replaces_truncated_filename_quant() {
+        let dir = scanner_test_dir("ptq");
+        let main = dir.join("Ternary-Bonsai-2-27B-PTQ1_0.gguf");
+        write_scanner_gguf_tensor_type(&main, "qwen35", 64, 143);
+
+        let info = parse_model_info_from_path(&main).expect("parse PTQ1_0 model");
+        assert_eq!(info.quantization.as_deref(), Some("PTQ1_0"));
+        assert_eq!(
+            info.tensor_type_summary.first().map(|(kind, _)| kind.as_str()),
+            Some("PTQ1_0"),
+            "未知类型不能停留在 UNKNOWN"
+        );
     }
 
     #[test]

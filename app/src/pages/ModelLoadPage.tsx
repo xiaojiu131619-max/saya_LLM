@@ -9,7 +9,7 @@ import { predictVramUsage, type VramPrediction } from '@/lib/vramEstimate';
 import { saveModelRunRecord, getModelRunRecords, type ModelRunRecord } from '@/lib/desktop';
 import type { ModelInfo, ModelLoadConfig } from '@/types';
 import type { LucideIcon } from 'lucide-react';
-import { DEFAULT_GPU_LAYERS_WHEN_UNKNOWN, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import { RECOMMENDED_CTX_LENGTH, maxGpuLayers, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import ModelFamilyLogo from '@/components/ModelFamilyLogo';
 import { suggestedApiName } from '@/lib/modelIdentity';
 import { MODEL_LOGO_LIBRARY, LOBEHUB_CUSTOM_PREFIX } from '@/lib/modelLogo';
@@ -219,7 +219,15 @@ export default function ModelLoadPage() {
           void listenDesktopEvent<{ message?: string }>('server:ready', () => resolve())
             .then((unlisten) => unlisteners.push(unlisten));
           void listenDesktopEvent<{ title?: string; details?: string }>('server:error', (error) => {
-            reject(new Error(error.title || error.details || 'llama-server 启动失败'));
+            // 只取 title 会把后端的可操作指引整段丢掉（例如「内核不支持该量化格式，
+            // 请到软件设置指定自编译核心」），加载页于是只剩一句「启动失败」。
+            // 标题与详情都带上；详情已包含标题时不重复。
+            const title = error.title?.trim();
+            const details = error.details?.trim();
+            const message = title && details && !details.includes(title)
+              ? `${title}：${details}`
+              : details || title || 'llama-server 启动失败';
+            reject(new Error(message));
           }).then((unlisten) => unlisteners.push(unlisten));
           void listenDesktopEvent<{ progress: number; stage: string; log: string }>('server:progress', (progress) => {
             setLoadProgressPercent(clamp(progress.progress, 0, 100));
@@ -334,7 +342,9 @@ export default function ModelLoadPage() {
         executable_path: 'resources/llama-server.exe',
         model_path: model.filePath ?? '',
         port: state.serverPort,
-        total_layers: Math.max(0, model.blockCount ?? 0),
+        // 自动调参以该值作为 ngl 起点（后端直接用 total_layers 当 -ngl 传），
+        // 必须给含输出层的满档值，否则调参始终跑在少一层的最慢配置上。
+        total_layers: maxGpuLayers(model.blockCount),
         expert_count: Math.max(0, model.expertCount ?? 0),
         max_ctx: Math.max(512, model.ctxLength || RECOMMENDED_CTX_LENGTH),
         batch_size: config.batchSize,
@@ -411,6 +421,9 @@ export default function ModelLoadPage() {
 
   const config = model.loadConfig;
   const layerCount = Math.max(0, model.blockCount ?? 0);
+  // 内核把输出层也算一层（总层数 = block_count + 1），滑块上限必须用后者，
+  // 否则「拉满」也差一层没上 GPU，生成速度成倍下降。
+  const gpuLayerMax = maxGpuLayers(model.blockCount);
   const ctxMax = Math.max(512, RECOMMENDED_CTX_LENGTH, model.ctxLength || 0, config.ctxLength || 0);
   // ctx 快捷定位节点：超过本模型容量上限的节点自动隐藏。
   const ctxTicks = [
@@ -545,11 +558,13 @@ export default function ModelLoadPage() {
                   />
                   <SliderParamRow
                     label="GPU 卸载"
-                    description={layerCount > 0 ? `模型层数 ${layerCount.toLocaleString()}` : 'GGUF 未读取到 block_count，默认尽量使用 GPU'}
+                    description={layerCount > 0
+                      ? `模型层数 ${layerCount.toLocaleString()}；内核把输出层也算一层，拉满需 ${gpuLayerMax.toLocaleString()}（含输出层）`
+                      : 'GGUF 未读取到 block_count，默认尽量使用 GPU'}
                     value={config.gpuLayers}
                     onChange={(v) => updateConfig('gpuLayers', v)}
                     min={0}
-                    max={layerCount > 0 ? layerCount : DEFAULT_GPU_LAYERS_WHEN_UNKNOWN}
+                    max={gpuLayerMax}
                     step={1}
                   />
                   <NumberParamRow

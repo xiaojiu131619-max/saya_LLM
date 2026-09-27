@@ -283,17 +283,122 @@ fn check_data_dir() -> EnvCheckItem {
     }
 }
 
+/// Vulkan 运行时（仅 AMD / Intel 路线需要）。
+///
+/// llama.cpp 的 Vulkan 内核通过系统 Vulkan loader（`vulkan-1.dll`）找驱动；loader 由
+/// 显卡驱动自带，`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` 下的 ICD 注册项指向真正的
+/// GPU 驱动。只有 loader、没有已注册的驱动时，内核会报
+/// "no Vulkan devices found" 而退回 CPU，用户却以为是内核或模型的问题。
+///
+/// NVIDIA 机器不需要这项（走 CUDA），因此仅在 host 为 Vulkan 时才产出该项。
+fn check_vulkan_runtime() -> Option<EnvCheckItem> {
+    const TITLE: &str = "Vulkan 运行时（AMD / Intel 显卡）";
+    let (backend, _) = auto_updater::detect_host_gpu_backend();
+    if backend != "Vulkan" {
+        return None;
+    }
+
+    match vulkan_icd_status() {
+        VulkanRuntime::Ready(count) => Some(EnvCheckItem::new(
+            "vulkan_runtime",
+            "ok",
+            TITLE,
+            format!("已注册 {} 个 Vulkan 驱动，可运行 Vulkan 内核。", count),
+        )),
+        VulkanRuntime::NoDriver => Some(
+            EnvCheckItem::new(
+                "vulkan_runtime",
+                "error",
+                TITLE,
+                "系统已有 Vulkan loader，但没有注册任何显卡驱动，Vulkan 内核会找不到设备而退回 CPU。"
+                    .to_string(),
+            )
+            .with_hint(
+                "请到显卡厂商官网更新显卡驱动（AMD Adrenalin / Intel 显卡驱动），安装后重新检测。",
+                None,
+                None,
+            ),
+        ),
+        VulkanRuntime::NoLoader => Some(
+            EnvCheckItem::new(
+                "vulkan_runtime",
+                "warning",
+                TITLE,
+                "未检测到系统 Vulkan 运行库（vulkan-1.dll）。缺少它时 Vulkan 内核无法使用 GPU 加速。"
+                    .to_string(),
+            )
+            .with_hint(
+                "通常随显卡驱动一起安装。请更新显卡驱动；如仍缺失，可安装 Vulkan Runtime。",
+                Some("https://vulkan.lunarg.com/sdk/home#windows"),
+                None,
+            ),
+        ),
+    }
+}
+
+enum VulkanRuntime {
+    /// 至少注册了一个 ICD。
+    Ready(usize),
+    /// loader 在，但没有已注册驱动。
+    NoDriver,
+    /// 连 loader 都没有。
+    NoLoader,
+}
+
+#[cfg(windows)]
+fn vulkan_icd_status() -> VulkanRuntime {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    // loader 在 System32（64 位进程会走重定向，直接查 System32 即可）。
+    let loader_present = std::env::var_os("SystemRoot")
+        .map(|root| Path::new(&root).join("System32").join("vulkan-1.dll"))
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+
+    let driver_count = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\Khronos\Vulkan\Drivers", KEY_READ)
+        .map(|key| {
+            key.enum_values()
+                .filter_map(Result::ok)
+                // ICD 注册项的值 0 表示启用、1 表示禁用；DWORD 0 才算可用。
+                .filter(|(_, value)| {
+                    value.vtype == winreg::enums::RegType::REG_DWORD && value.bytes == [0, 0, 0, 0]
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    if driver_count > 0 {
+        VulkanRuntime::Ready(driver_count)
+    } else if loader_present {
+        VulkanRuntime::NoDriver
+    } else {
+        VulkanRuntime::NoLoader
+    }
+}
+
+#[cfg(not(windows))]
+fn vulkan_icd_status() -> VulkanRuntime {
+    VulkanRuntime::NoLoader
+}
+
 /// 运行一次完整环境检测。包含少量子进程探测（nvidia-smi / PowerShell），
 /// 整体在秒级内完成，供首次启动与设置页手动检测调用。
 #[tauri::command]
 pub fn run_env_check(_state: State<'_, AppState>) -> Vec<EnvCheckItem> {
-    vec![
+    let mut items = vec![
         check_kernel(),
         check_vc_runtime(),
         check_gpu(),
-        check_video_runtime(),
-        check_data_dir(),
-    ]
+    ];
+    // Vulkan 运行时只对 AMD / Intel 路线有意义，按需插入。
+    if let Some(item) = check_vulkan_runtime() {
+        items.push(item);
+    }
+    items.push(check_video_runtime());
+    items.push(check_data_dir());
+    items
 }
 
 /// 读取首次启动检测标记，供前端判断是否需要自动弹窗。

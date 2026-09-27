@@ -210,6 +210,7 @@ cargo test -- --ignored
 - `README.md`：快速开始、发布包和用户功能说明。
 - `docs/DEVELOPMENT_GUIDE.md`：本地开发、构建、测试和故障排查。
 - `docs/COMFY_IMAGE_WORKSPACE_PLAN.md`：尚未实现的 ComfyUI 生图工作区计划。
+- `docs/WIN7_REPLICA_PLAN.md`：Windows 7 复刻落地计划书（版本硬边界、依赖钉版、分阶段计划与风险登记）。
 - `docs/tech-spec.md`：早期前端原型设计意图。
 - `CHANGELOG.md`：版本变更和已知限制。
 

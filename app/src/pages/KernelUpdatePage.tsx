@@ -62,10 +62,17 @@ function kernelSourceDescription(source: KernelDownloadSource) {
   return '使用内置 GitHub 镜像加速源自动尝试，失败后回退 GitHub 官方。';
 }
 
+// 后端标签：llama.cpp 各后端在 Windows 上的实际包名对应关系。
+// ROCm/HIP 需要单独标注并提示适用范围——它是 AMD 的官方路线，但只覆盖少数
+// 专业卡，普通 Radeon 与核显必须用 Vulkan，用户在列表里看到 "AMD" 容易选错。
 const backendLabelMap: Record<string, string> = {
   CUDA: 'CUDA',
   Vulkan: 'Vulkan',
+  ROCm: 'ROCm / HIP',
   CPU: 'CPU',
+  OpenVINO: 'OpenVINO',
+  OpenCL: 'OpenCL',
+  SYCL: 'SYCL',
 };
 
 function formatBytes(bytes: number) {

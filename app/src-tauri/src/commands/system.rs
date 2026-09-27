@@ -326,6 +326,28 @@ fn normalize_release_version(value: &str) -> Option<String> {
     Some(format!("b{}", digits))
 }
 
+/// 从 `--version` 输出里取官方构建号，识别 "build 11115" 形式。
+/// 只认同行里紧跟在独立的 "build" 词之后的纯数字，避免把 "0.4.1-dev" 里的片段
+/// 或 commit 哈希附近的数字误当构建号。
+fn parse_build_number(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(pos) = lower.find("build") else {
+            continue;
+        };
+        let after = &line[pos + "build".len()..];
+        let digits: String = after
+            .trim_start_matches(|ch: char| ch.is_whitespace() || ch == ':' || ch == '=')
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if digits.len() >= 3 {
+            return Some(digits);
+        }
+    }
+    None
+}
+
 fn parse_llama_server_version(output: &str) -> Option<String> {
     for token in output
         .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']'))
@@ -335,6 +357,15 @@ fn parse_llama_server_version(output: &str) -> Option<String> {
                 return Some(version);
             }
         }
+    }
+
+    // 官方构建的 --version 把版本写成 "version: 0.4.1-dev (build 11115, commit …)"，
+    // 里面没有 "b11115" 这样的 token，上面那条匹配不到。旧实现随后只认 "version:"
+    // 后面紧跟纯数字，于是整行都解析失败，最后回落到 update.log 里的旧版本号——
+    // 手工安装或自编译内核时，界面会显示一个与实际内核完全不符的版本。
+    // 这里直接找 "build <数字>" 形式。
+    if let Some(build) = parse_build_number(output) {
+        return Some(format!("b{build}"));
     }
 
     for line in output.lines() {
@@ -605,5 +636,39 @@ fn detect_supports_mica() -> bool {
             return false;
         }
         info.major_version == 10 && info.build_number >= 22621
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{parse_build_number, parse_llama_server_version};
+
+    #[test]
+    fn parses_official_build_form() {
+        // 官方 CUDA / Vulkan 构建的真实输出：版本号写作 "build 11115"，没有 b11115 token。
+        let vulkan = "0.00.000.835 I srv  llama_server: initializing ...\n\
+                      version: 0.4.1-dev (build 11115, commit d5f66492e)\n\
+                      built with Clang 20.1.8 for Windows x86_64";
+        assert_eq!(parse_llama_server_version(vulkan).as_deref(), Some("b11115"));
+
+        // 自编译/分支核心同样是这个形态。
+        let prism = "version: 0.2.0-dev (build 10709, commit 9a9394a89)\n\
+                     built with MSVC 19.44.35228.0 for Windows AMD64";
+        assert_eq!(parse_llama_server_version(prism).as_deref(), Some("b10709"));
+    }
+
+    #[test]
+    fn prefers_explicit_b_token_and_ignores_version_fragments() {
+        // 有显式 bNNNNN token 时优先用它。
+        assert_eq!(
+            parse_llama_server_version("llama-server b4282 (abc123)").as_deref(),
+            Some("b4282")
+        );
+        // "0.4.1-dev" 里的数字不能被当成构建号。
+        assert_eq!(parse_build_number("version: 0.4.1-dev"), None);
+        // build 号过短（占位或畸形）不接受。
+        assert_eq!(parse_build_number("build 12"), None);
+        // 无任何版本线索时不猜。
+        assert_eq!(parse_llama_server_version("some unrelated text"), None);
     }
 }

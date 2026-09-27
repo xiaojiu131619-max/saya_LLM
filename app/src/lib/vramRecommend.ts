@@ -3,7 +3,7 @@
 // 无硬件数据（浏览器模式）时返回 null，由调用方回退到旧的静态推荐。
 
 import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
-import { RECOMMENDED_CTX_LENGTH, recommendedGpuLayers } from '@/lib/modelDefaults';
+import { RECOMMENDED_CTX_LENGTH, maxGpuLayers, recommendedGpuLayers } from '@/lib/modelDefaults';
 import { predictVramUsage } from '@/lib/vramEstimate';
 
 const VRAM_HEADROOM = 0.90; // 与后端 Auto-Tune 的 VRAM_LIMIT 一致：最多用到 90% 显存
@@ -38,12 +38,14 @@ function scanMaxGpuLayers(
   budgetGb: number,
 ): number {
   const layerCount = Math.max(0, model.blockCount ?? 0);
+  const ceiling = maxGpuLayers(model.blockCount);
   if (layerCount <= 0) {
     return recommendedGpuLayers(model.blockCount);
   }
 
   let best = 0;
-  for (let ngl = 0; ngl <= layerCount; ngl += 1) {
+  // 停在 block_count + 1（含输出层的全覆盖档），而不是 block_count。
+  for (let ngl = 0; ngl <= ceiling; ngl += 1) {
     const prediction = predictVramUsage(
       model,
       { ...config, gpuLayers: ngl } as ModelLoadConfig,

@@ -841,6 +841,11 @@ fn ggml_type_name(value: u32) -> &'static str {
         40 => "NVFP4",
         41 => "Q1_0",
         42 => "Q2_0",
+        // 143 = PTQ1_0：PRISM 分支（Hadamard 三值量化，约 1.75 bpw）专有张量类型。
+        // 上游 llama.cpp 的类型表只到 42，官方内核读到此类型会直接
+        // "invalid ggml type 143. should be in [0, 43)" 拒绝加载；
+        // 只有带 PTQ1_0 kernel 的自编译核心（如 llama-prism）能读。
+        143 => "PTQ1_0",
         _ => "UNKNOWN",
     }
 }

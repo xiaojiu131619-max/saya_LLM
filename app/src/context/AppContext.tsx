@@ -19,7 +19,7 @@ import {
   stopDesktopServer,
   toFrontendModel,
 } from '@/lib/desktop';
-import { DEFAULT_MAX_COMPLETION_TOKENS, RECOMMENDED_CTX_LENGTH } from '@/lib/modelDefaults';
+import { DEFAULT_MAX_COMPLETION_TOKENS, RECOMMENDED_CTX_LENGTH, maxGpuLayers } from '@/lib/modelDefaults';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 
 /**
@@ -182,6 +182,47 @@ const storedState = loadStoredState();
 const storedUi = storedState.ui ?? {};
 const storedApiConfig = storedState.apiConfig ?? {};
 const storedTheme = storedUi.themePreferenceVersion === 2 ? storedUi.theme : undefined;
+
+/**
+ * GPU 卸载上限口径的一次性迁移（版本 2）：
+ * 旧版滑块上限是 block_count，而内核把输出层也算一层，满档是 block_count + 1。
+ * 恰好等于 block_count 的存量值来自旧上限、不是用户手选（旧滑块最大就是它），
+ * 抬到新满档值；其它值不动，用户主动留层在 CPU 的选择被保留。
+ *
+ * 用独立的时间戳版本号做闸门，只在首次启动迁移一次——否则每次扫描都会把用户
+ * 之后手选的 block_count 又抬上去，相当于用户的显式设置被反复覆盖。
+ */
+const GPU_LAYERS_CEILING_VERSION = 2;
+const GPU_LAYERS_CEILING_KEY = 'agent-llm.gpuLayersCeilingVersion';
+
+function readGpuLayersCeilingVersion(): number {
+  if (typeof window === 'undefined') return GPU_LAYERS_CEILING_VERSION;
+  try {
+    return Number(window.localStorage.getItem(GPU_LAYERS_CEILING_KEY) ?? 0) || 0;
+  } catch {
+    // 读不到时按已迁移处理，宁可少改用户配置。
+    return GPU_LAYERS_CEILING_VERSION;
+  }
+}
+
+const needsGpuLayersCeilingMigration = readGpuLayersCeilingVersion() < GPU_LAYERS_CEILING_VERSION;
+
+if (needsGpuLayersCeilingMigration && typeof window !== 'undefined') {
+  try {
+    window.localStorage.setItem(GPU_LAYERS_CEILING_KEY, String(GPU_LAYERS_CEILING_VERSION));
+  } catch {
+    // best-effort：写不进标记也不会影响本次迁移结果。
+  }
+}
+
+function storedLoadConfigFor(model: ModelInfo): ModelLoadConfig | undefined {
+  const stored = storedState.modelLoadConfigs?.[model.id];
+  if (!stored) return undefined;
+  return needsGpuLayersCeilingMigration
+    ? migrateGpuLayersToCeiling(model.blockCount, stored)
+    : stored;
+}
+
 // themeMode 版本 3 起单独持久化；旧数据里只有 manual flag（=1 表示显式选过主题），
 // 此时把当时的 theme 视为用户的显式选择，否则默认跟随系统。
 const storedThemeMode = (mode: string | undefined, fallback: ThemeMode): ThemeMode =>
@@ -300,6 +341,48 @@ function averageTokensPerSec(usage?: ModelUsageStats) {
   return usage.totalTokensPerSec / usage.responseCount;
 }
 
+/**
+ * 一次性迁移：旧版把所有模型的「拉满」档位存成 block_count，而内核的满档是
+ * block_count + 1——差这一层会让它留在 CPU，GPU 计算图被迫与 CPU 往返同步，
+ * 生成速度成倍下降（27B 三值量化实测 8.6 → 57.9 t/s）。
+ * 恰好等于 block_count 的存量值来自旧上限而非用户手选（旧滑块最大就是它），
+ * 因此抬到新的满档值；其它值一律保持不动，不覆盖用户的选择。
+ */
+function migrateGpuLayersToCeiling(
+  blockCount: number | null | undefined,
+  config: ModelLoadConfig,
+): ModelLoadConfig {
+  const layers = Math.max(0, Number(blockCount ?? 0));
+  if (layers <= 0) return config;
+  if (Math.round(Number(config.gpuLayers ?? 0)) !== layers) return config;
+  return { ...config, gpuLayers: maxGpuLayers(layers) };
+}
+
+/**
+ * 同上的迁移，作用在「记忆参数快速启动」保存的那份配置上——快速启动读的是记忆
+ * 配置而非详情页配置，漏掉它会让用户点一下又退回慢档。
+ */
+function migrateLaunchMemoryGpuLayers(
+  models: ModelInfo[],
+  memories: Record<string, ModelLaunchMemory> | undefined,
+): Record<string, ModelLaunchMemory> | undefined {
+  if (!memories) return memories;
+  const layersById = new Map(
+    models.map((model) => [model.id, Math.max(0, Number(model.blockCount ?? 0))]),
+  );
+  let changed = false;
+  const next: Record<string, ModelLaunchMemory> = {};
+  for (const [modelId, memory] of Object.entries(memories)) {
+    const layers = layersById.get(modelId) ?? 0;
+    const migrated = layers > 0 && Math.round(Number(memory.config?.gpuLayers ?? 0)) === layers
+      ? { ...memory, config: { ...memory.config, gpuLayers: maxGpuLayers(layers) } }
+      : memory;
+    if (migrated !== memory) changed = true;
+    next[modelId] = migrated;
+  }
+  return changed ? next : memories;
+}
+
 function mergeModels(current: ModelInfo[], incoming: ModelInfo[]) {
   if (incoming.length === 0) return current.filter((model) => model.source !== 'local');
   const incomingIds = new Set(incoming.map((model) => model.id));
@@ -312,7 +395,7 @@ function mergeModels(current: ModelInfo[], incoming: ModelInfo[]) {
     const storedColor = storedState.modelThemeColors?.[model.id];
     const groupColor = currentGroupColors.get(groupKey) ?? storedState.modelThemeGroups?.[groupKey];
     const themeColorSolid = existing?.themeColorSolid ?? storedColor ?? groupColor;
-    const storedLoadConfig = storedState.modelLoadConfigs?.[model.id];
+    const storedLoadConfig = storedLoadConfigFor(model);
     const avgTokensPerSec = existing?.avgTokensPerSec ?? averageTokensPerSec(storedState.usageByModel?.[model.id]);
     const apiName = existing?.apiName ?? storedState.modelApiNames?.[model.id] ?? model.apiName;
     const customLogo = existing?.customLogo ?? storedState.modelCustomLogos?.[model.id] ?? model.customLogo;
@@ -579,7 +662,15 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, models: state.models.map((m) => m.id === action.payload.modelId ? { ...m, status: action.payload.status } : m) };
     }
     case 'UPSERT_MODELS':
-      return { ...state, models: mergeModels(state.models, action.payload) };
+      return {
+        ...state,
+        models: mergeModels(state.models, action.payload),
+        // 记忆参数（快速启动）里的同口径迁移也要走一次，否则用户点「快速启动」
+        // 又会用回少一层的慢档；仅在本次启动尚未迁移时执行。
+        modelLaunchMemories: needsGpuLayersCeilingMigration
+          ? (migrateLaunchMemoryGpuLayers(action.payload, state.modelLaunchMemories) ?? {})
+          : state.modelLaunchMemories,
+      };
     case 'PRUNE_USAGE': {
       const keepIds = new Set(action.payload);
       const nextUsageByModel = Object.fromEntries(

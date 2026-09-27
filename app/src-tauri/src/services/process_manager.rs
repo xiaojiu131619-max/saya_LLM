@@ -614,6 +614,30 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 进程 exe 是否位于本应用的 resources 目录树内（内置核心与版本化核心都在这里）。
+/// 用于把「本应用自己留下的 llama-server」与用户自行启动的实例区分开：只有前者
+/// 才会被自动回收，用户自己构建/启动的进程不受影响。
+fn is_app_managed_llama_exe(path: &Path) -> bool {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return false;
+    };
+    let mut resources_roots: Vec<PathBuf> = vec![exe_dir.join("resources")];
+    if let Some(parent) = exe_dir.parent() {
+        resources_roots.push(parent.join("resources"));
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    resources_roots.into_iter().any(|root| {
+        root.canonicalize()
+            .map(|canonical_root| canonical.starts_with(canonical_root))
+            .unwrap_or(false)
+    })
+}
+
 /// 当前由本应用管理的 llama 进程 PID 集合（对话服务 + 向量服务）。
 /// 供孤儿清扫排除正在运行的实例：两个服务共用同一 exe，仅按路径清扫会误杀
 /// 另一个正在运行的进程。
@@ -632,8 +656,13 @@ pub(crate) fn managed_llama_pids() -> Vec<u32> {
     pids
 }
 
-/// 清扫与目标 exe 同路径的遗留 llama-server，但跳过 `keep_pids` 中正在运行的实例。
+/// 清扫遗留的 llama-server，但跳过 `keep_pids` 中正在运行的实例。
 /// 对话服务与向量服务共用同一个 llama-server.exe，启动任一方时都不能杀掉另一方。
+///
+/// 回收范围比「与目标 exe 同路径」更宽：只要 exe 在本应用 resources 目录树内，
+/// 即使来自另一个内核目录（如切换版本化核心 / 自编译核心后残留的实例）也会被回收。
+/// 这类残留进程会一直占着显存，导致下一次加载因可用显存不足而失败——而它又不会
+/// 占用同一个端口，用户在日志里看不出任何异常。
 pub(crate) fn stop_stale_servers_for_exe_excluding(exe: &str, keep_pids: &[u32]) {
     let exe_path = Path::new(exe);
     let mut system = System::new_all();
@@ -646,7 +675,8 @@ pub(crate) fn stop_stale_servers_for_exe_excluding(exe: &str, keep_pids: &[u32])
             continue;
         }
         if let Some(process_exe) = process.exe() {
-            if same_path(process_exe, exe_path) {
+            // 用户自行启动的实例（build 目录等本应用目录之外）不动，避免误杀。
+            if same_path(process_exe, exe_path) || is_app_managed_llama_exe(process_exe) {
                 eprintln!(
                     "[server] stopping stale llama-server pid={:?} path={}",
                     process.pid(),
@@ -664,6 +694,7 @@ pub(crate) fn stop_stale_servers_for_exe_excluding(exe: &str, keep_pids: &[u32])
             "[server] stopped {} stale llama-server process(es)",
             stopped
         );
+        // 给驱动一点时间回收显存，避免紧接着的分配仍看到旧的占用。
         std::thread::sleep(Duration::from_millis(400));
     }
 }
@@ -937,6 +968,27 @@ fn detect_error(line: &str) -> Option<ServerError> {
                 "降低 GPU 卸载层数".into(),
                 "减少上下文长度".into(),
                 "使用更小的量化模型".into(),
+            ],
+        });
+    }
+
+    // 张量类型不被当前内核识别：官方内核只认自家类型表（如 [0, 43)），
+    // 分支专有量化（PRISM PTQ1_0 等）会直接报
+    // "tensor 'x' has invalid ggml type N. should be in [0, M)" 并退出。
+    // 必须排在下面的「模型格式错误」之前——否则会被笼统归成文件损坏，
+    // 把用户的排查方向引到重建/重新下载模型上。
+    if line_lower.contains("invalid ggml type") {
+        return Some(ServerError {
+            error_type: "quant".into(),
+            title: "当前内核不支持该模型的量化格式".into(),
+            details: format!(
+                "{}\n该模型使用了当前 llama-server 内核不认识的张量类型（例如 PRISM PTQ1_0 三值量化）。请在「软件设置 → 自编译核心」中指定支持该格式的自编译 llama-server.exe 后重新加载。",
+                line
+            ),
+            suggestions: vec![
+                "在「软件设置 → 自编译核心」指定支持该量化格式的自编译内核（如 llama-prism 构建）后重试。".into(),
+                "或改用官方内核支持的量化版本（Q4_K_M、Q6_K 等）重新下载该模型。".into(),
+                "模型文件本身完整时不建议重新下载——先确认内核分支是否匹配。".into(),
             ],
         });
     }
@@ -1610,6 +1662,182 @@ fn apply_mmap_mlock_args(cmd: &mut Command, exe: &str, config: &ServerConfig) {
     }
 }
 
+/// 分支专有量化 → 内核里必须存在的标识字符串。
+/// 这类张量类型不在上游 llama.cpp 的类型表里（官方内核读到会直接以
+/// "invalid ggml type N. should be in [0, M)" 退出），只有对应的分支构建
+/// （如 PRISM）带解码 kernel。标识串取自内核二进制里实际存在的类型名，
+/// 缺失即可判定该内核读不了这种模型。
+const BRANCH_QUANT_MARKERS: &[(&str, &[u8])] = &[("PTQ1_0", b"PTQ1_0")];
+
+/// 量化兼容性预检：模型的主张量类型若是分支专有量化，先确认当前内核带对应
+/// kernel，否则提前报错。放在启动前是为了给出可操作指引——让 llama-server
+/// 自己报的话只会得到一句 invalid ggml type，用户很难判断该换内核还是换模型。
+fn validate_quant_support(exe: &str, config: &ServerConfig) -> Result<()> {
+    let model_path = Path::new(&config.model_path);
+    if !model_path.is_file() {
+        return Ok(());
+    }
+    let Ok(metadata) = parse_gguf_header(model_path) else {
+        // 解析失败交给 llama-server 自己报，避免在预检里重复实现 GGUF 校验。
+        return Ok(());
+    };
+    let dominant = metadata
+        .tensor_type_summary
+        .iter()
+        .find(|(kind, _)| BRANCH_QUANT_MARKERS.iter().any(|(name, _)| kind == name))
+        .map(|(kind, _)| kind.as_str());
+    let Some(quant) = dominant else {
+        return Ok(());
+    };
+    let Some((_, marker)) = BRANCH_QUANT_MARKERS.iter().find(|(name, _)| *name == quant) else {
+        return Ok(());
+    };
+
+    let exe_path = Path::new(exe);
+    let candidates = [
+        exe_path.with_file_name("ggml-cuda.dll"),
+        exe_path.with_file_name("ggml.dll"),
+        exe_path.with_file_name("ggml-base.dll"),
+        exe_path.with_file_name("llama.dll"),
+        exe_path.to_path_buf(),
+    ];
+    if any_file_contains(&candidates, &[*marker]) {
+        return Ok(());
+    }
+
+    bail!(
+        "当前内核不支持该模型的量化格式（{}）：\n模型 {} 使用分支专有张量类型 {}，当前 llama-server 内核（{}）不含对应解码 kernel，官方内核读到会以 “invalid ggml type” 退出。\n请在「软件设置 → 自编译核心」指定支持该格式的自编译 llama-server.exe 后重新加载。",
+        quant,
+        model_path.display(),
+        quant,
+        exe
+    )
+}
+
+/// 内核推理后端识别：看内核目录里带了哪个 ggml 后端动态库。
+///
+/// llama.cpp 的各后端在 Windows 上是独立 DLL（`ggml-cuda.dll` / `ggml-vulkan.dll` …），
+/// 文件名本身就是最可靠的声明——比解析 `--list-devices` 更早可用，且能识别
+/// 「装了 CUDA 包但机器是 AMD 卡」这类错配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelBackend {
+    Cuda,
+    Vulkan,
+    Hip,
+    Cpu,
+    Unknown,
+}
+
+impl KernelBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            KernelBackend::Cuda => "CUDA",
+            KernelBackend::Vulkan => "Vulkan",
+            KernelBackend::Hip => "HIP/ROCm",
+            KernelBackend::Cpu => "CPU",
+            KernelBackend::Unknown => "未知",
+        }
+    }
+}
+
+/// 判断内核可执行文件所属的加速后端。
+///
+/// 优先按同目录的后端 DLL 判断；其次是 exe 自身二进制里的后端标识
+/// （覆盖单文件静态链接的构建，例如用户自编译时把后端编进 exe）。
+pub fn detect_kernel_backend(exe: &str) -> KernelBackend {
+    let exe_path = Path::new(exe);
+    let dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+    // DLL 名不区分大小写地判断存在性。
+    let has_dll = |needle: &str| -> bool {
+        std::fs::read_dir(dir).ok().is_some_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(needle)
+            })
+        })
+    };
+
+    if has_dll("ggml-vulkan") {
+        return KernelBackend::Vulkan;
+    }
+    if has_dll("ggml-cuda") {
+        return KernelBackend::Cuda;
+    }
+    if has_dll("ggml-hip") || has_dll("ggml-rocm") {
+        return KernelBackend::Hip;
+    }
+
+    // 没有后端 DLL：可能是静态链接，扫 exe 与常见伴随库里的后端标识。
+    let markers: &[(&[u8], KernelBackend)] = &[
+        (b"ggml-vulkan", KernelBackend::Vulkan),
+        (b"ggml-cuda", KernelBackend::Cuda),
+        (b"ggml-hip", KernelBackend::Hip),
+    ];
+    for (marker, backend) in markers {
+        let candidates = [
+            exe_path.to_path_buf(),
+            exe_path.with_file_name("ggml.dll"),
+            exe_path.with_file_name("llama.dll"),
+        ];
+        if any_file_contains(&candidates, &[*marker]) {
+            return *backend;
+        }
+    }
+
+    // 一个后端都没有：至少确认它是不是纯 CPU 构建。
+    if has_dll("ggml-cpu") {
+        return KernelBackend::Cpu;
+    }
+    KernelBackend::Unknown
+}
+
+/// 后端错配判定的纯函数部分（便于单测，不依赖子进程）。
+///
+/// 返回 Some(错误信息) 表示应阻断启动。只拦「方向明确相反」的组合：
+/// CUDA 内核 + 无 CUDA 设备 + 有 Vulkan 设备 = AMD/Intel 机器装了 CUDA 包，
+/// GPU 必然用不上。NVIDIA 卡配 Vulkan 内核可以正常跑（只是通常慢些），
+/// 因此放行，避免为了速度偏好阻断用户的可行配置。
+fn backend_mismatch_reason(
+    backend: KernelBackend,
+    has_cuda_device: bool,
+    has_vulkan_device: bool,
+) -> Option<String> {
+    if backend == KernelBackend::Cuda && !has_cuda_device && has_vulkan_device {
+        return Some(
+            "当前内核是 CUDA 版，但本机没有 CUDA 设备、只有 Vulkan 设备：\nAMD / Intel 显卡无法使用 CUDA 内核，请到「核心更新」下载 Vulkan 包后重新加载。"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// 显卡与内核后端的匹配性预检。
+///
+/// 目的是把「加载时莫名失败/只跑 CPU」提前变成一句能照做的中文指引。
+fn validate_backend_support(exe: &str, config: &ServerConfig) -> Result<()> {
+    if config.no_cuda {
+        // 用户显式选择 CPU 模式，不做任何后端校验。
+        return Ok(());
+    }
+    let backend = detect_kernel_backend(exe);
+    let candidates = list_runtime_devices(exe);
+    let has_vulkan_device = candidates
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("vulkan"));
+    let has_cuda_device = candidates
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("cuda"));
+
+    if let Some(reason) = backend_mismatch_reason(backend, has_cuda_device, has_vulkan_device) {
+        bail!("{}\n内核路径：{}\n设备列表：{}", reason, exe, candidates.join(" / "));
+    }
+
+    Ok(())
+}
+
 /// DSpark/DFlash 侧车启动前校验：文件存在 + 内核带对应 --spec-type 能力。
 /// 与 MTP 校验同样采用显式失败：不支持时阻止启动并给出中文指引，
 /// 不做静默降级（用户显式选择的参数不能被悄悄丢弃）。
@@ -1799,6 +2027,8 @@ fn resolve_offload_device(exe: &str, requested: Option<&str>) -> Option<String> 
 fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
     validate_mtp_config(exe, config)?;
     validate_drafter_config(exe, config)?;
+    validate_quant_support(exe, config)?;
+    validate_backend_support(exe, config)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
     let selected_device = if config.no_cuda {
@@ -2867,6 +3097,216 @@ mod tests {
     fn detect_error_identifies_vulkan_failure() {
         let error = super::detect_error("ggml-vulkan: failed to create device");
         assert_eq!(error.unwrap().error_type, "vulkan");
+    }
+
+    /// 写一个带指定张量类型的最小 GGUF（只需解析器能读出 tensor_type_summary）。
+    fn write_quant_test_gguf(path: &Path, tensor_type: u32) {
+        fn push_string(data: &mut Vec<u8>, value: &str) {
+            data.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            data.extend_from_slice(value.as_bytes());
+        }
+        let mut data = Vec::new();
+        data.extend_from_slice(b"GGUF");
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes()); // 1 个张量
+        data.extend_from_slice(&2u64.to_le_bytes()); // 2 个 KV
+        push_string(&mut data, "general.architecture");
+        data.extend_from_slice(&8u32.to_le_bytes());
+        push_string(&mut data, "qwen35");
+        push_string(&mut data, "qwen35.block_count");
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&64u32.to_le_bytes());
+        push_string(&mut data, "blk.0.attn_norm.weight");
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&tensor_type.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(path, data).expect("write quant test gguf");
+    }
+
+    fn quant_test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-quant-{}-{}",
+            std::process::id(),
+            label
+        ));
+        std::fs::create_dir_all(&dir).expect("create quant test dir");
+        dir
+    }
+
+    #[test]
+    fn backend_mismatch_only_blocks_impossible_combinations() {
+        use super::KernelBackend;
+        // AMD/Intel 机器 + CUDA 内核：CUDA 只认 NVIDIA 设备，必然用不上 GPU -> 阻断。
+        let blocked = super::backend_mismatch_reason(KernelBackend::Cuda, false, true);
+        assert!(blocked.is_some(), "CUDA 内核 + 只有 Vulkan 设备应被拦下");
+        let msg = blocked.unwrap();
+        assert!(msg.contains("Vulkan"), "指引应提到 Vulkan 包：{msg}");
+        assert!(msg.contains("AMD"), "指引应点明适用机型：{msg}");
+
+        // NVIDIA 卡 + Vulkan 内核：能正常跑，只是通常慢些 -> 放行，不阻断可行配置。
+        assert!(
+            super::backend_mismatch_reason(KernelBackend::Vulkan, true, true).is_none(),
+            "NVIDIA 卡用 Vulkan 内核应放行"
+        );
+
+        // 正确的匹配组合 -> 放行。
+        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, true, false).is_none());
+        assert!(super::backend_mismatch_reason(KernelBackend::Vulkan, false, true).is_none());
+
+        // 设备列表为空（探测失败）时不阻断，避免误伤。
+        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, false, false).is_none());
+        // 纯 CPU 内核 + 显卡存在：不阻断（用户可能只是想先用 CPU）。
+        assert!(super::backend_mismatch_reason(KernelBackend::Cpu, false, true).is_none());
+    }
+
+    #[test]
+    fn detect_kernel_backend_reads_backend_dll() {
+        let dir = quant_test_dir("backend");
+        // CUDA 内核：目录里有 ggml-cuda.dll。
+        let cuda_dir = dir.join("cuda");
+        std::fs::create_dir_all(&cuda_dir).unwrap();
+        let cuda_exe = cuda_dir.join("llama-server.exe");
+        std::fs::write(&cuda_exe, b"stub").unwrap();
+        std::fs::write(cuda_dir.join("ggml-cuda.dll"), b"x").unwrap();
+        assert_eq!(
+            super::detect_kernel_backend(&cuda_exe.to_string_lossy()),
+            super::KernelBackend::Cuda
+        );
+
+        // Vulkan 内核：目录里有 ggml-vulkan.dll。
+        let vk_dir = dir.join("vulkan");
+        std::fs::create_dir_all(&vk_dir).unwrap();
+        let vk_exe = vk_dir.join("llama-server.exe");
+        std::fs::write(&vk_exe, b"stub").unwrap();
+        std::fs::write(vk_dir.join("ggml-vulkan.dll"), b"x").unwrap();
+        assert_eq!(
+            super::detect_kernel_backend(&vk_exe.to_string_lossy()),
+            super::KernelBackend::Vulkan
+        );
+
+        // 纯 CPU 内核。
+        let cpu_dir = dir.join("cpu");
+        std::fs::create_dir_all(&cpu_dir).unwrap();
+        let cpu_exe = cpu_dir.join("llama-server.exe");
+        std::fs::write(&cpu_exe, b"stub").unwrap();
+        std::fs::write(cpu_dir.join("ggml-cpu.dll"), b"x").unwrap();
+        assert_eq!(
+            super::detect_kernel_backend(&cpu_exe.to_string_lossy()),
+            super::KernelBackend::Cpu
+        );
+
+        // 静态链接：没有后端 DLL，但 exe 自身含后端标识。
+        let static_dir = dir.join("static");
+        std::fs::create_dir_all(&static_dir).unwrap();
+        let static_exe = static_dir.join("llama-server.exe");
+        std::fs::write(&static_exe, b"... ggml-vulkan ...").unwrap();
+        assert_eq!(
+            super::detect_kernel_backend(&static_exe.to_string_lossy()),
+            super::KernelBackend::Vulkan
+        );
+    }
+
+    #[test]
+    fn validate_quant_support_blocks_official_kernel_on_ptq1_0() {
+        let dir = quant_test_dir("block");
+        let model = dir.join("Ternary-Bonsai-2-27B-PTQ1_0.gguf");
+        write_quant_test_gguf(&model, 143);
+        // 官方内核：二进制里没有 PTQ1_0 kernel。
+        let kernel_dir = dir.join("official");
+        std::fs::create_dir_all(&kernel_dir).unwrap();
+        let exe = kernel_dir.join("llama-server.exe");
+        std::fs::write(&exe, b"build 10883 official ggml types [0, 43)").unwrap();
+        std::fs::write(kernel_dir.join("llama.dll"), b"no branch kernels here").unwrap();
+        std::fs::write(kernel_dir.join("ggml-cuda.dll"), b"cuda kernels").unwrap();
+
+        let mut config = ServerConfig::default();
+        config.model_path = model.to_string_lossy().to_string();
+        let error = super::validate_quant_support(&exe.to_string_lossy(), &config)
+            .expect_err("官方内核应被预检拦下");
+        let message = error.to_string();
+        assert!(message.contains("PTQ1_0"), "错误应点明量化类型: {message}");
+        assert!(message.contains("自编译核心"), "错误应给出指引: {message}");
+    }
+
+    #[test]
+    fn validate_quant_support_allows_branch_kernel_and_plain_quants() {
+        let dir = quant_test_dir("allow");
+        let model = dir.join("Ternary-Bonsai-2-27B-PTQ1_0.gguf");
+        write_quant_test_gguf(&model, 143);
+        // PRISM 内核：二进制里带 PTQ1_0 标识。
+        let kernel_dir = dir.join("prism");
+        std::fs::create_dir_all(&kernel_dir).unwrap();
+        let exe = kernel_dir.join("llama-server.exe");
+        std::fs::write(&exe, b"prism build").unwrap();
+        std::fs::write(kernel_dir.join("llama.dll"), b"PTQ1_0 TQ1_0").unwrap();
+
+        let mut config = ServerConfig::default();
+        config.model_path = model.to_string_lossy().to_string();
+        assert!(
+            super::validate_quant_support(&exe.to_string_lossy(), &config).is_ok(),
+            "带对应 kernel 的自编译内核应放行"
+        );
+
+        // 普通量化（type 0 = F32）不该被量化预检拦住哪怕内核是官方的。
+        let plain = dir.join("plain-f32.gguf");
+        write_quant_test_gguf(&plain, 0);
+        let official_dir = dir.join("official2");
+        std::fs::create_dir_all(&official_dir).unwrap();
+        let official_exe = official_dir.join("llama-server.exe");
+        std::fs::write(&official_exe, b"official").unwrap();
+        let mut plain_config = ServerConfig::default();
+        plain_config.model_path = plain.to_string_lossy().to_string();
+        assert!(
+            super::validate_quant_support(&official_exe.to_string_lossy(), &plain_config).is_ok(),
+            "普通量化不应触发分支量化预检"
+        );
+    }
+
+    #[test]
+    fn app_managed_detection_is_scoped_to_resources_tree() {
+        // 本应用目录之外（用户自有构建）的 exe 不能被判定为托管，
+        // 否则自动回收会误杀用户自己启动的实例。
+        let outside = std::env::temp_dir()
+            .join("agent-llm-not-managed")
+            .join("build")
+            .join("llama-server.exe");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"user build").unwrap();
+        assert!(!super::is_app_managed_llama_exe(&outside));
+
+        // resources 树内（内置核心 / 版本化核心 / 自编译核心所在处）判定为托管。
+        let resources = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("resources");
+        let case_dir = resources.join("kernels").join("test-managed-scope");
+        std::fs::create_dir_all(&case_dir).unwrap();
+        let managed = case_dir.join("llama-server.exe");
+        std::fs::write(&managed, b"stub").unwrap();
+        assert!(super::is_app_managed_llama_exe(&managed));
+
+        // 只清掉本用例创建的子树；remove_dir 在目录非空时会失败，
+        // 因此不会误删测试环境里可能已存在的 resources 内容。
+        std::fs::remove_dir_all(&case_dir).ok();
+        std::fs::remove_dir(resources.join("kernels")).ok();
+        std::fs::remove_dir(&resources).ok();
+    }
+
+    #[test]
+    fn detect_error_identifies_unsupported_quant_type() {
+        // 官方内核读到 PRISM PTQ1_0（type 143）时的真实报错行。
+        let log = "0.00.199.991 E gguf_init_from_reader: tensor 'output.weight' has invalid ggml type 143. should be in [0, 43)";
+        let error = super::detect_error(log).expect("should classify");
+        assert_eq!(error.error_type, "quant");
+        // 不能退化成「模型格式错误」，否则用户会去重新下载模型而不是换内核。
+        assert_ne!(error.title, "模型格式错误");
+        assert!(error.details.contains("invalid ggml type 143"));
+        assert!(error.details.contains("自编译核心"));
     }
 
     #[test]

@@ -123,8 +123,9 @@ export default function ChatPage() {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
+  // 消息列表的内容容器（高度由虚拟列表的占位元素驱动）。用它的尺寸变化来贴底。
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reasoningMenuRef = useRef<HTMLDivElement>(null);
@@ -136,6 +137,9 @@ export default function ChatPage() {
   // 最近一次程序滚动（scrollToIndex/跳底）的时间戳：滚动事件回调里用它区分
   // 「我们自己滚的」和「用户滚的」，避免测量修正把用户刚解除的吸附又打开。
   const programmaticScrollAtRef = useRef(0);
+  // 最近一次由我们直接写入的 scrollTop 值。内容收缩会让写入值比上次小，
+  // 用值比对（而非时间窗）排除这类伪「用户上滑」，同时不影响用户拖动滚动条。
+  const programmaticScrollTopRef = useRef(-1);
 
   const activeModel = state.models.find((m) => m.id === state.activeModelId);
   const activeVideoSupport = modelVideoSupport(activeModel);
@@ -192,6 +196,7 @@ export default function ChatPage() {
     ? Math.min(100, Math.max(0, (systemStats.vramUsed / systemStats.vramTotal) * 100))
     : undefined;
   const modelMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
+  const hasMessageRows = modelMessages.length > 0;
   // 本地会话累计水位：按消息顺序逐条粗估 token（气泡与服务状态面板共用这一口径）。
   const sessionCtxTotals = useMemo(() => {
     let acc = 0;
@@ -240,6 +245,24 @@ export default function ChatPage() {
     },
   });
 
+  // 每次渲染读取当前总高：虚拟列表测量完变高的行会触发重渲染，这个值随之改变，
+  // 从而驱动下面的贴底 layout effect 在绘制前重新对齐。必须在渲染期间读取才有意义，
+  // 不能放进 effect 里取「上一次」的值。
+  const totalSize = hasMessageRows ? virtualizer.getTotalSize() : 0;
+
+  // 虚拟列表默认会在「条目变高且其起点在视口上方」时自行改写滚动位置，
+  // 与我们的贴底逻辑叠加——同一次增高被修正两遍，表现为气泡被顶一下、整个画面抖动。
+  // 贴底期间一律不交给库内处理，由我们的 pin 独占。
+  // 未贴底（正在回看历史）时只补偿「完全位于视口上方」的条目：它们变高会把下方
+  // 内容整体推走，补偿才能让正在读的位置保持不动。正在读的那条（跨视口顶边）以及
+  // 底部仍在增长的流式条目一律不补偿，因此生成继续时视口不会自己移动。
+  // 该选项只存在于 Virtualizer 实例上，不在构造参数里，故在此直接赋值。
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) => {
+    if (shouldStickToBottomRef.current) return false;
+    const viewportTop = lastScrollTopRef.current;
+    return item.start + item.size <= viewportTop;
+  };
+
   const filteredSessions = useMemo(() => {
     const query = sessionSearch.trim().toLowerCase();
     return query
@@ -256,27 +279,10 @@ export default function ChatPage() {
     return Array.from(groups.entries());
   }, [filteredSessions]);
 
-  // 使用 IntersectionObserver 检测用户是否在底部
-  useEffect(() => {
-    const endEl = messagesEndRef.current;
-    if (!endEl) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        shouldStickToBottomRef.current = entry.isIntersecting;
-      },
-      { root: messagesViewportRef.current, threshold: 0.1 }
-    );
-    observer.observe(endEl);
-    return () => observer.disconnect();
-  }, []);
-
-  const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
-    if (!shouldStickToBottomRef.current) return;
-    const count = virtualizer.options.count;
-    if (count === 0) return;
-    programmaticScrollAtRef.current = Date.now();
-    virtualizer.scrollToIndex(count - 1, { align: 'end', behavior });
-  }, [virtualizer]);
+  // 「是否贴底」只由真实滚动位置决定（见 handleMessagesScroll），
+  // 这里刻意不再用 IntersectionObserver：底部哨兵在带大内边距的容器里会长时间
+  // 处于「可见」区间，把用户已经上滑离开的意图又改回贴底，于是生成一继续就把
+  // 视口拽走。判定权收归滚动手势，避免与用户意图互相覆盖。
 
   // 思考框展开/收起 = 用户明确要停留阅读，立即脱离自动滚动；
   // 否则流式输出会在下一次内容变化时把视口重新拽到最底部，导致无法折叠。
@@ -288,55 +294,72 @@ export default function ChatPage() {
     return () => window.removeEventListener('agent-llm:thought-toggle', release);
   }, []);
 
-  // 自动滚动节流：100ms 内最多滚一次，但必须保证「最后一次变化」也会滚动（尾随触发）。
-  // 早先的实现用一个布尔闭锁 + cleanup 里 clearTimeout，流式输出时依赖每几毫秒变一次，
-  // cleanup 会清掉唯一负责复位闭锁的 timer，而 effect 又因闭锁为 true 直接 return，
-  // 于是闭锁永久为 true，此后该 effect 再也不会滚动。
-  const scrollThrottleRef = useRef<{ lastRunAt: number; timer: number | null }>({
-    lastRunAt: 0,
-    timer: null,
-  });
-
   useEffect(() => {
-    const throttle = scrollThrottleRef.current;
     const controllers = abortControllersRef.current;
     return () => {
-      if (throttle.timer !== null) {
-        window.clearTimeout(throttle.timer);
-        throttle.timer = null;
-      }
       // 卸载时中止所有在途请求，避免流继续往已销毁的组件派发。
       controllers.forEach((controller) => controller.abort());
       controllers.clear();
     };
   }, []);
 
+  // 内容变化后的贴底：只在用户确实处于底部时才跟随，并直接写 scrollTop。
+  //
+  // 时机是这里的关键。流式输出时列表总高由虚拟列表的占位元素决定，而占位高度要等
+  // 虚拟列表把变高的行重新测量、触发一次 React 重渲染才会更新——所以「内容真的变高」
+  // 发生在重渲染之后，只监听文字变化是不够的。因此把 totalSize 也作为依赖：重渲染一
+  // 带上新的总高，这个 layout effect 就在浏览器绘制前运行，此时 scrollHeight 已是最终值，
+  // 写入的贴底目标一步到位，中间态不会被看到。
+  // 反之若用 setTimeout 推迟（原为 100ms 节流），写入落到绘制之后，内容已经长高、
+  // 视口还停在原处，就会露出 30~40px 空档——用户看到的「每次新起一行都被顶一下」正是它。
+  //
+  // 未贴底时绝不触碰视口，只更新「回到底部」按钮的显隐。
   useLayoutEffect(() => {
-    const SCROLL_THROTTLE_MS = 100;
-    const throttle = scrollThrottleRef.current;
-    const elapsed = Date.now() - throttle.lastRunAt;
-
-    if (elapsed >= SCROLL_THROTTLE_MS) {
-      throttle.lastRunAt = Date.now();
-      scrollToBottom('auto');
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    if (shouldStickToBottomRef.current) {
+      programmaticScrollAtRef.current = Date.now();
+      viewport.scrollTop = viewport.scrollHeight;
+      programmaticScrollTopRef.current = viewport.scrollTop;
+      setShowJumpToBottom(false);
       return;
     }
+    const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    setShowJumpToBottom(distanceToBottom > AUTO_SCROLL_MAGNET_PX);
+  }, [modelMessages.length, lastMessageContent, lastMessageReasoningContent, lastMessageStreaming, totalSize]);
 
-    if (throttle.timer !== null) {
-      window.clearTimeout(throttle.timer);
-    }
-    throttle.timer = window.setTimeout(() => {
-      throttle.timer = null;
-      throttle.lastRunAt = Date.now();
-      scrollToBottom('auto');
-    }, SCROLL_THROTTLE_MS - elapsed);
-  }, [modelMessages.length, lastMessageContent, lastMessageReasoningContent, lastMessageStreaming, scrollToBottom]);
+  // 兜底：内容容器尺寸变化时再补一次贴底。虚拟列表的测量与重渲染之间若有零星时序
+  // 缝隙（例如首帧、字体回流），这一步能兜住；正常流式路径由上面的 layout effect 完成。
+  // 用户上滑脱离后本回调不再触碰视口。
+  // 依赖 hasMessageRows：空会话时内容容器还没渲染（走的是空状态分支），
+  // 必须等它挂载后再观察。
+  useEffect(() => {
+    const viewport = messagesViewportRef.current;
+    const content = messagesContentRef.current;
+    if (!viewport || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (!shouldStickToBottomRef.current) return;
+      programmaticScrollAtRef.current = Date.now();
+      viewport.scrollTop = viewport.scrollHeight;
+      programmaticScrollTopRef.current = viewport.scrollTop;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [hasMessageRows]);
 
+  // 切会话时一次性贴底（直接写 scrollTop，与流式路径同一套幂等语义）。
   useLayoutEffect(() => {
     shouldStickToBottomRef.current = true;
     lastScrollTopRef.current = 0;
-    scrollToBottom('auto');
-  }, [activeSession?.id, scrollToBottom]);
+    // 会话刚切换、内容还没渲染出来，旧会话的写入值不能拿去比对。
+    programmaticScrollTopRef.current = -1;
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    programmaticScrollAtRef.current = Date.now();
+    viewport.scrollTop = viewport.scrollHeight;
+    programmaticScrollTopRef.current = viewport.scrollTop;
+    setShowJumpToBottom(false);
+  }, [activeSession?.id]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -376,6 +399,18 @@ export default function ChatPage() {
     const viewport = messagesViewportRef.current;
     if (!viewport) return;
     const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    // 程序滚动（贴底 pin / 跳底）自己触发的 scroll 事件不能算作「用户向上滚」：
+    // 内容收缩几像素（例如生成结束移除「输出中」）时我们写下的新 scrollTop 会比
+    // 上一次小，若不排掉就会被误判成用户离开底部，凭空冒出「回到底部」按钮。
+    // 只比对「是不是我们刚写下的那个值」：用户拖动滚动条会得到一个不同的偏移，
+    // 依然能被正确识别为手动滚动（用时间窗会把流式期间的拖动也一起吞掉）。
+    // -1 是「本会话还没有过程序滚动」的哨兵，此时不参与比对。
+    if (programmaticScrollTopRef.current >= 0
+      && Math.abs(viewport.scrollTop - programmaticScrollTopRef.current) <= SCROLL_RELEASE_DELTA_PX) {
+      lastScrollTopRef.current = viewport.scrollTop;
+      setShowJumpToBottom(distanceToBottom > AUTO_SCROLL_MAGNET_PX);
+      return;
+    }
     if (viewport.scrollTop < lastScrollTopRef.current - SCROLL_RELEASE_DELTA_PX) {
       // 用户向上滚：立刻脱离自动滚动，滚轮/触摸/键盘的释放监听与此处互为兜底。
       shouldStickToBottomRef.current = false;
@@ -393,6 +428,9 @@ export default function ChatPage() {
   const jumpToBottom = useCallback(() => {
     shouldStickToBottomRef.current = true;
     programmaticScrollAtRef.current = Date.now();
+    // 平滑滚动期间由库逐帧改 scrollTop，不归 pin 管：哨兵置 -1 让滚动事件
+    // 走正常判定，用户此刻的任何手动滚动都仍然优先。
+    programmaticScrollTopRef.current = -1;
     virtualizer.scrollToIndex(modelMessages.length - 1, { align: 'end', behavior: 'smooth' });
     setShowJumpToBottom(false);
   }, [modelMessages.length, virtualizer]);
@@ -401,6 +439,8 @@ export default function ChatPage() {
     const index = modelMessages.findIndex((msg) => msg.id === messageId);
     if (index < 0) return;
     shouldStickToBottomRef.current = false;
+    // 同上：跳转后即使生成在继续，也不能因为底部涨高就把视口拽回底部。
+    programmaticScrollTopRef.current = -1;
     virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
     setShowJumpToBottom(true);
   }, [modelMessages, virtualizer]);
@@ -1414,7 +1454,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               ) : (
-                <div style={{ position: 'relative', width: '100%', maxWidth: wideViewport ? 896 : 768, margin: '0 auto', minWidth: 0 }}>
+                <div ref={messagesContentRef} style={{ position: 'relative', width: '100%', maxWidth: wideViewport ? 896 : 768, margin: '0 auto', minWidth: 0 }}>
                   <div style={{ height: virtualizer.getTotalSize() }} />
                   {virtualizer.getVirtualItems().map((virtualRow) => {
                     const msg = modelMessages[virtualRow.index];
@@ -1445,7 +1485,6 @@ export default function ChatPage() {
                       </div>
                     );
                   })}
-                  <div ref={messagesEndRef} />
                 </div>
               )}
             </div>

@@ -327,12 +327,38 @@ pub(crate) fn is_real_display_adapter(name: &str) -> bool {
         && !lower.contains("parsec")
 }
 
+/// 本机 host 端的推理后端判定：返回 (后端名, 代表显卡名)。
+///
+/// 厂商判定优先用 DXGI 的 PCI Vendor ID（显卡名称不可靠：OEM 定制名、中文描述、
+/// 无品牌标识的核显都能骗过子串匹配）。VendorId 拿不到时才回退到名称匹配。
+///
+/// 后端归属：NVIDIA → CUDA；AMD / Intel → Vulkan。AMD 在 Windows 上没有可用的
+/// HIP/ROCm 通用路线（官方 rocm 包只覆盖 Linux 与特定专业卡），Vulkan 才是 AMD
+/// 用户在 Windows 上的正确选择。
 pub(crate) fn detect_host_gpu_backend() -> (String, Option<String>) {
+    // 1) DXGI VendorId：最可靠，且能正确识别核显。
+    let vendors = crate::services::gpu_monitor::detect_display_vendors();
+    if !vendors.is_empty() {
+        // 有独显时优先按独显判定：混合机型（Intel 核显 + AMD/NVIDIA 独显）里
+        // 核显往往排在前面，但推理实际跑在独显上。
+        let pick = vendors
+            .iter()
+            .find(|(vendor, _)| *vendor == crate::services::gpu_monitor::GpuVendor::Nvidia)
+            .or_else(|| vendors.iter().find(|(vendor, _)| *vendor == crate::services::gpu_monitor::GpuVendor::Amd))
+            .or_else(|| vendors.iter().find(|(vendor, _)| *vendor == crate::services::gpu_monitor::GpuVendor::Intel))
+            .or_else(|| vendors.first());
+        if let Some((vendor, name)) = pick {
+            return (vendor.preferred_backend().to_string(), Some(name.clone()));
+        }
+    }
+
+    // 2) nvidia-smi：NVML 可用但没有 DXGI 适配器时的兜底。
     let nvidia_names = detect_nvidia_gpu_names();
     if let Some(name) = nvidia_names.first() {
         return ("CUDA".to_string(), Some(name.clone()));
     }
 
+    // 3) 名称匹配兜底（非 Windows 或 DXGI 失败）。
     let controllers = detect_video_controller_names();
     if let Some(name) = controllers
         .iter()
@@ -483,8 +509,10 @@ fn asset_backend(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.contains("cuda") {
         "CUDA"
-    } else if lower.contains("hip") || lower.contains("radeon") {
-        "HIP"
+    } else if lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon") {
+        // AMD 的 Windows 官方包是 ROCm/HIP 构建（llama-*-bin-win-rocm-*.zip）。
+        // 它只覆盖部分专业卡，不适用于普通 Radeon 与核显——那些必须用 Vulkan。
+        "ROCm"
     } else if lower.contains("vulkan") || lower.contains("kompute") {
         "Vulkan"
     } else if lower.contains("openvino") {
@@ -544,6 +572,9 @@ fn package_asset_score(
     blackwell: bool,
 ) -> (u8, u32, u32, String) {
     let lower = name.to_ascii_lowercase();
+    // AMD 的 Windows ROCm/HIP 包只覆盖少数专业卡，不适用于普通 Radeon 与核显。
+    // 无论 host 是什么，都排到纯 CPU 之后，避免 AMD 用户被推荐到装不上的包。
+    let is_rocm = lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon");
     match host_backend {
         "CUDA" => {
             if lower.contains("cuda") {
@@ -567,7 +598,8 @@ fn package_asset_score(
             if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
                 return (4, 0, 0, lower);
             }
-            if lower.contains("cuda") {
+            // Vulkan host（AMD / Intel）：CUDA 与 ROCm 都不能用，明确排到最后。
+            if lower.contains("cuda") || is_rocm {
                 return (6, 0, 0, lower);
             }
         }
@@ -578,7 +610,7 @@ fn package_asset_score(
             if lower.contains("vulkan") {
                 return (5, 0, 0, lower);
             }
-            if lower.contains("cuda") {
+            if lower.contains("cuda") || is_rocm {
                 return (6, 0, 0, lower);
             }
         }
@@ -1638,5 +1670,61 @@ mod tests {
         assert!(info.cuda_matched);
         let cpu_asset = info.assets.iter().find(|a| a.name.contains("cpu")).expect("应有 CPU 包");
         assert!(!cpu_asset.matches_host);
+    }
+
+    #[test]
+    fn amd_host_picks_vulkan_and_rejects_rocm() {
+        // AMD / Intel 走 Vulkan：官方包的命名是 llama-*-bin-win-vulkan-x64.zip。
+        assert!(super::host_matched_asset(
+            "llama-b11115-bin-win-vulkan-x64.zip",
+            None,
+            "Vulkan",
+            false
+        ));
+        // AMD 的 ROCm 包不能算 host-matched——普通 Radeon / 核显装不上。
+        assert!(!super::host_matched_asset(
+            "llama-b11115-bin-win-rocm-10.0-x64.zip",
+            None,
+            "Vulkan",
+            false
+        ));
+        // CUDA 包同样不匹配。
+        assert!(!super::host_matched_asset(
+            "llama-b11115-bin-win-cuda-12.4-x64.zip",
+            None,
+            "Vulkan",
+            false
+        ));
+
+        // 评分排序：Vulkan < CPU < CUDA/ROCm。ROCm 必须排在纯 CPU 之后，
+        // 否则 AMD 用户会被推荐到装不上的专业卡包。
+        let vulkan = super::package_asset_score(
+            "llama-b11115-bin-win-vulkan-x64.zip", None, "Vulkan", false).0;
+        let cpu = super::package_asset_score(
+            "llama-b11115-bin-win-cpu-x64.zip", None, "Vulkan", false).0;
+        let rocm = super::package_asset_score(
+            "llama-b11115-bin-win-rocm-10.0-x64.zip", None, "Vulkan", false).0;
+        let cuda = super::package_asset_score(
+            "llama-b11115-bin-win-cuda-12.4-x64.zip", None, "Vulkan", false).0;
+        assert!(vulkan < cpu, "Vulkan 应优于 CPU：{vulkan} vs {cpu}");
+        assert!(cpu < rocm, "ROCm 应排在 CPU 之后：{cpu} vs {rocm}");
+        assert!(cpu < cuda, "CUDA 应排在 CPU 之后：{cpu} vs {cuda}");
+    }
+
+    #[test]
+    fn asset_backend_labels_amd_rocm_distinctly() {
+        // ROCm 必须与 Vulkan 区分开，否则 AMD 用户会在列表里选错包。
+        assert_eq!(
+            super::asset_backend("llama-b11115-bin-win-rocm-10.0-x64.zip"),
+            "ROCm"
+        );
+        assert_eq!(
+            super::asset_backend("llama-b11115-bin-win-vulkan-x64.zip"),
+            "Vulkan"
+        );
+        assert_eq!(
+            super::asset_backend("llama-b11115-bin-win-cuda-12.4-x64.zip"),
+            "CUDA"
+        );
     }
 }
