@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'embedding';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'embedding' | 'fast27b';
 export type ThemeType = 'dark' | 'light';
 // 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
 export type ThemeMode = 'system' | ThemeType;
@@ -11,6 +11,25 @@ export type ModelType = 'dense' | 'moe';
 export type ModelTask = 'chat' | 'embedding' | 'rerank';
 export type ModelStatus = 'loaded' | 'standby' | 'downloading' | 'loading' | 'error';
 export type ReasoningMode = 'off' | 'auto' | 'think' | 'deep';
+/** 思考挡位：模型对话模板真正认识的 reasoning_effort 取值（按强度升序）。 */
+export type ReasoningEffortGear = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
+/**
+ * 模型思考挡位档案：按对话模板（GGUF 的 tokenizer.chat_template 或用户自定义模板）
+ * 自动识别该模型支持哪些思考挡位，界面「思考强度」据此翻译成模型认的参数。
+ */
+export interface ReasoningProfile {
+  /** 模板是否认识 enable_thinking（能否真正关闭思考）。 */
+  canDisable: boolean;
+  /** 模板支持的 reasoning_effort 挡位；空 = 该模型没有离散挡位，深浅只能靠思考预算。 */
+  efforts: ReasoningEffortGear[];
+  /** 模板里用到的思考相关变量名（界面说明与排障用）。 */
+  knobs: string[];
+  /** 识别依据：template=对话模板原文，architecture/name=兜底推断，none=无证据。 */
+  source: 'template' | 'architecture' | 'name' | 'none';
+  /** 一句话识别结论，直接展示给用户。 */
+  summary: string;
+}
 
 export interface ModelLoadConfig {
   ctxLength: number;
@@ -264,6 +283,8 @@ export interface ModelInfo {
   supportsThinking?: boolean;
   supportsTools?: boolean;
   supportsReasoning?: boolean;
+  /** 思考挡位档案：模型支持的 reasoning 挡位（自动识别）。 */
+  reasoningProfile?: ReasoningProfile;
   supportsMtp?: boolean;
   /// 任务类型（chat / embedding / rerank）：向量与重排模型走独立服务进程。
   modelTask?: ModelTask;
@@ -362,6 +383,12 @@ export interface SystemStats {
 
 export interface AppState {
   currentView: ViewType;
+  /** 对话后端：main = 主 llama-server；fast27b = fast-27b 引擎（自带 OpenAI API）。 */
+  chatEngine: ChatEngineId;
+  /** Agent 页 WebUI 标签的后端：与对话页的后端选择彼此独立（fast-27b 由同源桥提供官方页面）。 */
+  webuiEngine: WebUiEngineId;
+  /** Agent 页当前标签（dsh / WebUI 之间互相跳转用）。 */
+  agentTab: AgentTabId;
   theme: ThemeType;
   // 主题模式（浅色/深色/跟随系统）与生效主题 theme 分离存储。
   themeMode: ThemeMode;
@@ -394,3 +421,12 @@ export interface AppState {
   /** MCP 服务器配置（持久化在 config.json，与后端 AppConfig.mcp_servers 对应）。 */
   mcpServers: McpServerEntry[];
 }
+
+/** 自带对话的后端选择：主模型或 fast-27b 引擎。 */
+export type ChatEngineId = 'main' | 'fast27b';
+
+/** WebUI 标签的后端选择：主模型 / fast-27b（fast-27b 走应用提供的同源桥）。 */
+export type WebUiEngineId = 'main' | 'fast27b';
+
+/** Agent 页标签（跨面板跳转用；放在全局状态里，fast-27b 面板按钮可直接切到 WebUI 标签）。 */
+export type AgentTabId = 'dsh' | 'webui';

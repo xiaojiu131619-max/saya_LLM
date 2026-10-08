@@ -124,7 +124,7 @@ Rust 端新增 crate 前请确认：
 
 - `app/package.json` 或 `app/src-tauri/Cargo.toml`
 - `CHANGELOG.md` 中标注「依赖」条目
-- 必要时更新 `docs/DEVELOPMENT_GUIDE.md` 中的相关说明
+- 必要时更新 `docs/guides/DEVELOPMENT_GUIDE.md` 中的相关说明
 
 ## 发版流程
 
@@ -149,6 +149,6 @@ Rust 端新增 crate 前请确认：
 
 ## 安全
 
-发现安全漏洞请私下联系维护者（见 `docs/DEVELOPMENT_GUIDE.md`「联系与维护」），不要公开 Issue。
+发现安全漏洞请私下联系维护者（见 `docs/guides/DEVELOPMENT_GUIDE.md`「联系与维护」），不要公开 Issue。
 
 [Keep a Changelog]: https://keepachangelog.com/zh-CN/1.1.0/

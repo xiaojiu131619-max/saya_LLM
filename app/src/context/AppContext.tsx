@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
-import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset, McpServerEntry, McpServerStatus, ToolActivity } from '@/types';
+import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset, McpServerEntry, McpServerStatus, ToolActivity, ChatEngineId, WebUiEngineId, AgentTabId } from '@/types';
 import {
   checkDesktopEngine,
   connectMcpServer,
@@ -40,6 +40,9 @@ const THEME_MANUAL_FLAG = 'agent-llm-theme-manual';
 
 type Action =
   | { type: 'SET_VIEW'; payload: ViewType }
+  | { type: 'SET_CHAT_ENGINE'; payload: ChatEngineId }
+  | { type: 'SET_WEBUI_ENGINE'; payload: WebUiEngineId }
+  | { type: 'SET_AGENT_TAB'; payload: AgentTabId }
   | { type: 'SET_THEME'; payload: ThemeType }
   | { type: 'TOGGLE_THEME' }
   | { type: 'SET_THEME_MODE'; payload: ThemeMode }
@@ -288,6 +291,12 @@ const initialState: AppState = {
   activeChatSessionIds: storedState.activeChatSessionIds ?? {},
   // MCP 服务器配置以后端 config.json 为唯一真源，hydrate 时拉取，这里只给空初值。
   mcpServers: [],
+  // 自带对话的后端选择（会话级，不持久化）：main = 主 llama-server。
+  chatEngine: 'main',
+  // Agent 页 WebUI 标签的后端选择（会话级）：与对话页的后端各自独立。
+  webuiEngine: 'main',
+  // Agent 页标签（会话级）：默认 dsh 主框架。
+  agentTab: 'dsh',
 };
 
 function todayKey() {
@@ -446,6 +455,12 @@ function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'SET_VIEW':
       return { ...state, currentView: action.payload };
+    case 'SET_CHAT_ENGINE':
+      return { ...state, chatEngine: action.payload };
+    case 'SET_WEBUI_ENGINE':
+      return { ...state, webuiEngine: action.payload };
+    case 'SET_AGENT_TAB':
+      return { ...state, agentTab: action.payload };
     case 'SET_THEME':
       return { ...state, theme: action.payload };
     case 'TOGGLE_THEME': {

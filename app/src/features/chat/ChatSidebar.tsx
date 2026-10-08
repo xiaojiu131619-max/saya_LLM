@@ -15,6 +15,8 @@ import type { ChatSession, ModelInfo, ThemeType } from '@/types';
 interface ChatSidebarProps {
   activeModel?: ModelInfo;
   canChat: boolean;
+  /** 非空 = 当前对话走 fast-27b 引擎后端：模型卡整体切换为引擎展示。 */
+  engineTarget?: { label: string; statusText: string; running: boolean; avatar: string };
   collapsed: boolean;
   collapseLocked?: boolean;
   selectionMode: boolean;
@@ -43,6 +45,7 @@ interface ChatSidebarProps {
 export default function ChatSidebar({
   activeModel,
   canChat,
+  engineTarget,
   collapsed,
   collapseLocked = false,
   selectionMode,
@@ -68,8 +71,12 @@ export default function ChatSidebar({
   vramPercent,
 }: ChatSidebarProps) {
   const expandedTransition = { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const };
-  const modelStatusLabel = canChat ? '可用' : activeModel ? '已加载' : '未加载';
-  const modelStatusDotClass = canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
+  const modelStatusLabel = engineTarget
+    ? (engineTarget.running ? '引擎可用' : '引擎未启动')
+    : canChat ? '可用' : activeModel ? '已加载' : '未加载';
+  const modelStatusDotClass = engineTarget
+    ? (engineTarget.running ? 'bg-[var(--state-success)]' : 'bg-[var(--state-warning)]')
+    : canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
   const selectionActionLabel = selectionMode
     ? selectedSessionIds.size > 0
       ? `删除已选的 ${selectedSessionIds.size} 个对话`
@@ -107,14 +114,16 @@ export default function ChatSidebar({
             title="切换到模型管理"
             aria-label="切换到模型管理"
           >
-            {collapsed ? (activeModel?.family?.[0]?.toUpperCase() || 'L') : (activeModel?.family?.slice(0, 2).toUpperCase() || 'LL')}
+            {collapsed
+              ? (engineTarget?.avatar ?? activeModel?.family?.[0]?.toUpperCase() ?? 'L')
+              : (engineTarget?.avatar ?? activeModel?.family?.slice(0, 2).toUpperCase() ?? 'LL')}
           </button>
           <AnimatePresence initial={false}>
             {!collapsed && (
               <motion.div {...expandedMotion} className="min-w-0">
                 <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">本地对话</div>
                 <div className="truncate text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-                  {canChat ? activeModel?.name ?? '模型已连接' : '模型未连接'}
+                  {engineTarget?.label ?? (canChat ? activeModel?.name ?? '模型已连接' : '模型未连接')}
                 </div>
               </motion.div>
             )}
@@ -173,38 +182,40 @@ export default function ChatSidebar({
       </div>
 
       <div className={`min-h-0 flex-1 overflow-y-auto pb-3 transition-[padding] duration-200 ${collapsed ? 'px-2.5' : 'px-2'}`}>
-        <AnimatePresence initial={false}>
-          {!collapsed && <motion.div {...expandedMotion} className="mb-2 px-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">会话</motion.div>}
-        </AnimatePresence>
-        {sessionGroups.length === 0 ? (
-          <div className={`text-center text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)] ${collapsed ? 'mx-auto grid h-11 w-11 place-items-center px-0 py-0' : 'px-3 py-8'}`}>
-            {collapsed ? '空' : '暂无对话'}
-          </div>
-        ) : (
-          <div className={collapsed ? 'space-y-1.5' : 'space-y-4'}>
-            {sessionGroups.map(([label, sessions]) => (
-              <div key={label} className={collapsed ? 'space-y-1.5' : ''}>
-                <AnimatePresence initial={false}>
-                  {!collapsed && <motion.div {...expandedMotion} className="mb-1 px-2 text-xs font-semibold text-[var(--accent)] dark:text-[var(--accent)]">{label}</motion.div>}
-                </AnimatePresence>
-                <div className="space-y-1">
-                  {sessions.map((session) => (
-                    <SessionRow
-                      key={session.id}
-                      session={session}
-                      selected={session.id === activeSessionId}
-                      checked={selectedSessionIds.has(session.id)}
-                      collapsed={collapsed}
-                      selectionMode={selectionMode}
-                      onSelect={onSelectSession}
-                      onDelete={onDeleteSession}
-                      onExport={onExportSession}
-                    />
-                  ))}
-                </div>
+        {!collapsed && (
+          <>
+            <AnimatePresence initial={false}>
+              <motion.div {...expandedMotion} className="mb-2 px-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">会话</motion.div>
+            </AnimatePresence>
+            {sessionGroups.length === 0 ? (
+              <div className="px-3 py-8 text-center text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">暂无对话</div>
+            ) : (
+              <div className="space-y-4">
+                {sessionGroups.map(([label, sessions]) => (
+                  <div key={label}>
+                    <AnimatePresence initial={false}>
+                      <motion.div {...expandedMotion} className="mb-1 px-2 text-xs font-semibold text-[var(--accent)] dark:text-[var(--accent)]">{label}</motion.div>
+                    </AnimatePresence>
+                    <div className="space-y-1">
+                      {sessions.map((session) => (
+                        <SessionRow
+                          key={session.id}
+                          session={session}
+                          selected={session.id === activeSessionId}
+                          checked={selectedSessionIds.has(session.id)}
+                          collapsed={false}
+                          selectionMode={selectionMode}
+                          onSelect={onSelectSession}
+                          onDelete={onDeleteSession}
+                          onExport={onExportSession}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
 
@@ -215,7 +226,7 @@ export default function ChatSidebar({
           className={`mb-2 min-w-0 rounded-lg bg-black/[0.035] text-left transition-colors hover:bg-black/[0.06] dark:bg-white/[0.035] dark:hover:bg-white/[0.065] ${
             collapsed ? 'flex h-12 w-full flex-col items-center justify-center gap-1 px-1 py-1 text-center' : 'w-full px-3 py-2.5'
           }`}
-          title={activeModel ? '打开模型加载界面' : '打开模型管理'}
+          title={engineTarget ? '对话后端为 fast-27b 引擎（可在 fast-27b 页启停）' : activeModel ? '打开模型加载界面' : '打开模型管理'}
         >
           {collapsed ? (
             <>
@@ -224,12 +235,12 @@ export default function ChatSidebar({
             </>
           ) : (
             <>
-              <div className="truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{activeModel?.name ?? '未加载模型'}</div>
+              <div className="truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{engineTarget?.label ?? activeModel?.name ?? '未加载模型'}</div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
                 <span className={`h-2 w-2 rounded-full ${modelStatusDotClass}`} />
-                {canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
+                {engineTarget ? engineTarget.statusText : canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
               </div>
-              {(ctxPercent !== undefined || vramPercent !== undefined) && (
+              {!engineTarget && (ctxPercent !== undefined || vramPercent !== undefined) && (
                 <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
                   <UsageChip label="ctx" percent={ctxPercent} />
                   <UsageChip label="显存" percent={vramPercent} />

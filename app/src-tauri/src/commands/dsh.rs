@@ -171,7 +171,8 @@ pub fn dsh_reveal_dir(kind: String) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// 解析 Node 与启动参数并拉起 dsh 旁路进程（dsh_start 与模型接入共用）。
-fn spawn_dsh_with_events(state: &State<'_, AppState>, app: &AppHandle) -> Result<(), String> {
+/// fast-27b 面板的绑定/解绑重启 dsh 也复用本函数。
+pub(crate) fn spawn_dsh_with_events(state: &State<'_, AppState>, app: &AppHandle) -> Result<(), String> {
     let dsh_config = dsh_config_from_state(state);
     let proxy = proxy_from_state(state);
 

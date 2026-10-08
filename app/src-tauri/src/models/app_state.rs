@@ -105,6 +105,9 @@ pub struct AppConfig {
     /// 每个条目是一个本机 stdio 子进程；对话时其工具会并入 llama.cpp 的工具集。
     #[serde(default)]
     pub mcp_servers: Vec<crate::models::mcp_types::McpServerConfig>,
+    /// fast-27b 引擎接入配置（serde default 平滑迁移）。
+    #[serde(default)]
+    pub fast27b: Fast27bConfig,
 }
 
 impl Default for AppConfig {
@@ -131,12 +134,217 @@ impl Default for AppConfig {
             embedding_port: default_embedding_port(),
             dsh: crate::models::dsh_types::DshConfig::default(),
             mcp_servers: Vec::new(),
+            fast27b: Fast27bConfig::default(),
         }
     }
 }
 
 fn default_embedding_port() -> u16 {
     8081
+}
+
+/// fast-27b 的模型类型。旧配置未记录类型时，按模型文件名兼容识别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fast27bModel {
+    Heretic,
+    Swift,
+}
+
+impl Fast27bModel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Heretic => "Heretic 27B",
+            Self::Swift => "Swift 27B",
+        }
+    }
+
+    /// BAT 启动器中的草稿方案。Heretic 不启用草稿头，Swift 使用 MTP。
+    pub fn spec(self) -> &'static str {
+        match self {
+            Self::Heretic => "none",
+            Self::Swift => "mtp",
+        }
+    }
+
+    fn filenames(self) -> &'static [&'static str] {
+        match self {
+            Self::Heretic => &["Ternary-Bonsai-2-27B-Heretic.ninfer"],
+            Self::Swift => &[
+                "bonsai2_27b_swift_pq2.v3.ninfer",
+                "bonsai2_27b_swift_pq2.ninfer",
+            ],
+        }
+    }
+}
+
+/// fast-27b 引擎（Swift / Heretic 27B）接入配置。
+/// 默认值与 D:\Projects\fast-llm 下的 BAT 启动器保持一致；api_key 为本地明文（仅本机/局域网使用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fast27bConfig {
+    /// 是否启用（停用后页面显示停用态，禁止启动引擎）。
+    pub enabled: bool,
+    /// ninfer-serve-86.exe 绝对路径。
+    pub engine_path: String,
+    /// .ninfer 模型权重文件绝对路径。
+    pub model_path: String,
+    /// 模型类型；None 兼容只有 model_path 的旧配置。
+    pub selected_model: Option<Fast27bModel>,
+    /// 分别保存两个模型的自定义路径，切换时不覆盖另一个模型的路径。
+    pub swift_model_path: String,
+    pub heretic_model_path: String,
+    /// 服务端口。
+    pub port: u16,
+    /// true = 0.0.0.0（对局域网开放）；false = 仅 127.0.0.1。
+    pub lan: bool,
+    /// API Key（OpenAI 兼容接口 Bearer 鉴权，本地明文存储）。
+    pub api_key: String,
+    /// 上下文窗口（--max-context）。
+    pub context_window: u32,
+    /// 推测解码草稿长度（--draft-tokens）。
+    pub draft_tokens: u32,
+    /// 引擎默认输出上限（--default-max-tokens）；0 = 不传，交回引擎自身默认值。
+    pub default_max_tokens: u32,
+    /// 官方 llama.cpp webui 同源桥端口（引擎没有网页界面，桥负责提供页面并抹平协议差异）。
+    pub bridge_port: u16,
+    /// 引擎就绪后自动打开 dsh Web UI。
+    pub auto_open_dsh_web: bool,
+}
+
+impl Default for Fast27bConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            engine_path: String::from(
+                r"D:\Projects\fast-llm\engine\infer-engine-sm86-20261002\engine\ninfer-serve-86.exe",
+            ),
+            model_path: String::from(
+                r"D:\Projects\fast-llm\model\Ternary-Bonsai-2-27B-Heretic.ninfer",
+            ),
+            selected_model: None,
+            swift_model_path: String::new(),
+            heretic_model_path: String::new(),
+            port: 8094,
+            lan: false,
+            api_key: String::from("JuAX7OVIUYEeIQ1nYoNbWvlhqBQXKvZx"),
+            context_window: 262144,
+            draft_tokens: 4,
+            default_max_tokens: 32768,
+            bridge_port: 8095,
+            auto_open_dsh_web: true,
+        }
+    }
+}
+
+impl Fast27bConfig {
+    pub fn selected_model(&self) -> Fast27bModel {
+        self.selected_model.unwrap_or_else(|| {
+            if self.model_path.to_ascii_lowercase().contains("swift") {
+                Fast27bModel::Swift
+            } else {
+                Fast27bModel::Heretic
+            }
+        })
+    }
+
+    /// 当前路径及显式保存的路径优先；未配置的模型仅探测本地文件，不下载、不改参数。
+    pub fn model_path_for(&self, model: Fast27bModel) -> String {
+        if model == self.selected_model() {
+            return self.model_path.clone();
+        }
+        let saved = match model {
+            Fast27bModel::Heretic => &self.heretic_model_path,
+            Fast27bModel::Swift => &self.swift_model_path,
+        };
+        if !saved.trim().is_empty() {
+            return saved.clone();
+        }
+        let current = PathBuf::from(&self.model_path);
+        let engine = PathBuf::from(&self.engine_path);
+        let mut directories = Vec::new();
+        if let Some(parent) = current.parent() {
+            directories.push(parent.to_path_buf());
+        }
+        if let Some(root) = engine.parent().and_then(|parent| parent.parent()) {
+            directories.push(root.join("model"));
+        }
+        // 本机已有的 fast-llm 模型库；仍优先使用当前配置旁的离线资源。
+        directories.push(PathBuf::from(r"D:\Projects\fast-llm\model"));
+        let candidates: Vec<_> = directories
+            .iter()
+            .flat_map(|directory| {
+                model
+                    .filenames()
+                    .iter()
+                    .map(move |name| directory.join(name))
+            })
+            .collect();
+        candidates
+            .iter()
+            .find(|path| path.is_file())
+            .or_else(|| candidates.first())
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod fast27b_config_tests {
+    use super::*;
+
+    #[test]
+    fn old_config_preserves_paths_and_parameters() {
+        let config: Fast27bConfig = serde_json::from_str(
+            r#"{"model_path":"custom/Heretic.ninfer","context_window":65536,"draft_tokens":2,"default_max_tokens":4096}"#,
+        ).unwrap();
+        assert_eq!(config.selected_model(), Fast27bModel::Heretic);
+        assert_eq!(
+            config.model_path_for(Fast27bModel::Heretic),
+            "custom/Heretic.ninfer"
+        );
+        assert_eq!(
+            (
+                config.context_window,
+                config.draft_tokens,
+                config.default_max_tokens
+            ),
+            (65536, 2, 4096)
+        );
+        assert_eq!(config.port, 8094);
+    }
+
+    #[test]
+    fn switching_keeps_both_custom_paths_and_explicit_variant() {
+        let config = Fast27bConfig {
+            model_path: "custom/renamed.ninfer".into(),
+            selected_model: Some(Fast27bModel::Swift),
+            swift_model_path: "custom/renamed.ninfer".into(),
+            heretic_model_path: "custom/heretic-old.ninfer".into(),
+            ..Fast27bConfig::default()
+        };
+        assert_eq!(config.selected_model(), Fast27bModel::Swift);
+        assert_eq!(
+            config.model_path_for(Fast27bModel::Swift),
+            "custom/renamed.ninfer"
+        );
+        assert_eq!(
+            config.model_path_for(Fast27bModel::Heretic),
+            "custom/heretic-old.ninfer"
+        );
+        let roundtrip: Fast27bConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.selected_model(), Fast27bModel::Swift);
+    }
+
+    #[test]
+    fn old_swift_path_is_recognized() {
+        let config = Fast27bConfig {
+            model_path: "models/bonsai2_27b_swift_pq2.v3.ninfer".into(),
+            ..Fast27bConfig::default()
+        };
+        assert_eq!(config.selected_model(), Fast27bModel::Swift);
+    }
 }
 
 pub struct AppState {

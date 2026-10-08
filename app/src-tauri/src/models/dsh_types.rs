@@ -1,6 +1,6 @@
 //! dsh（DeepSeek Harness）接入的类型定义。
 //! 覆盖：应用配置中的 dsh 段、安装/运行状态、环境检测项。
-//! 依据 docs/DSH_SPIKE_RECORD.md 的 Phase 0 定稿结论。
+//! 依据 docs/plans/DSH_SPIKE_RECORD.md 的 Phase 0 定稿结论。
 
 use std::path::PathBuf;
 

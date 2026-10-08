@@ -1,6 +1,6 @@
 //! dsh（DeepSeek Harness）托管安装服务。
 //!
-//! 职责（对应计划书 F2/F3，Phase 0 结论见 docs/DSH_SPIKE_RECORD.md）：
+//! 职责（对应计划书 F2/F3，Phase 0 结论见 docs/plans/DSH_SPIKE_RECORD.md）：
 //! 1. Node.js 便携版托管安装：从 nodejs.org 官方 dist 下载 zip，
 //!    SHASUMS256.txt 校验后解压到 `runtimes/node-v<版本>-win-x64/`；
 //! 2. `@deepseek-ai/dsh` 包托管安装：用托管 Node 的 npm-cli 安装到

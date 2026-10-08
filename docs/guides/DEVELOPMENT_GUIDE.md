@@ -390,7 +390,7 @@ cargo test -- --ignored
 
 - `README.md`：根目录的启动、构建和使用说明。
 - `tech-spec.md`：早期前端原型设计意图。
-- `docs/TECHNICAL_REPORT.md`：架构、数据流、模块清单。
+- `docs/guides/TECHNICAL_REPORT.md`：架构、数据流、模块清单。
 
 ## 12. 联系与维护
 

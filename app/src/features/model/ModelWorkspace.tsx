@@ -11,6 +11,7 @@ import {
   Terminal,
   Wifi,
   WifiOff,
+  Zap,
 } from 'lucide-react';
 import ThemeToggleButton from '@/components/ThemeToggleButton';
 import { useApp } from '@/context/AppContext';
@@ -18,6 +19,7 @@ import { useSystemStats } from '@/hooks/useSystemStats';
 import AgentPage from '@/pages/AgentPage';
 import ApiStatusPage from '@/features/apiStatus/ApiStatusPage';
 import EmbeddingWorkspace from '@/features/embedding/EmbeddingWorkspace';
+import Fast27bPage from '@/pages/Fast27bPage';
 import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
@@ -75,10 +77,11 @@ export default function ModelWorkspace() {
   const [apiRuntimeStats, setApiRuntimeStats] = useState<MessageStats | undefined>();
   const detailOpen = state.currentView === 'modelLoad';
   const llamaLogsOpen = state.currentView === 'llamaLogs';
-  // API 状态、Agent 与 llama 日志同级：保留左侧边栏，在右侧内容区展示。
+  // API 状态、Agent、向量服务、fast-27b 同级：保留左侧边栏，在右侧内容区展示。
   const apiStatusOpen = state.currentView === 'apiStatus';
   const agentOpen = state.currentView === 'agent';
   const embeddingOpen = state.currentView === 'embedding';
+  const fast27bOpen = state.currentView === 'fast27b';
   const selectedModel = state.models.find((model) => model.id === state.selectedModelId);
   const loadedModel = state.models.find((model) => model.status === 'loaded')
     ?? state.models.find((model) => model.id === state.activeModelId);
@@ -202,7 +205,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -213,7 +216,7 @@ export default function ModelWorkspace() {
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
               agentOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
             }`}
-            title="Agent（智能体）· dsh 工作台"
+            title="Agent（智能体）· dsh 工作台 + 官方 WebUI 入口"
           >
             <Bot className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">Agent</span>
@@ -227,6 +230,16 @@ export default function ModelWorkspace() {
           >
             <Boxes className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">向量服务</span>
+          </button>
+          <button
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+              fast27bOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+            }`}
+            title="fast-27b · Swift / Heretic 27B 推理引擎（切换模型、一键启动）"
+          >
+            <Zap className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">fast-27b</span>
           </button>
           {detailOpen && (
             <button
@@ -314,10 +327,10 @@ export default function ModelWorkspace() {
         )}
 
         <div
-          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : embeddingOpen ? 'embedding' : detailOpen ? 'model-detail' : 'model-list'}
+          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : embeddingOpen ? 'embedding' : fast27bOpen ? 'fast27b' : detailOpen ? 'model-detail' : 'model-list'}
           className="anim-fade-rise min-h-0 flex-1 overflow-hidden"
         >
-          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : embeddingOpen ? <EmbeddingWorkspace /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
+          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : embeddingOpen ? <EmbeddingWorkspace /> : fast27bOpen ? <Fast27bPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
         </div>
       </section>
     </div>

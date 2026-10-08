@@ -246,6 +246,47 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     }
 }
 
+/// 用系统默认程序打开一个本地文件（仅限文件；供「打开 DLC 指南文档」使用）。
+/// Windows 上 `explorer.exe <文件>` 会按扩展名关联打开（.md → 默认编辑器/查看器）。
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在：{}", path));
+    }
+    if !p.is_file() {
+        return Err("该路径不是文件，无法用默认程序打开".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(p.to_string_lossy().to_string())
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| format!("无法用系统默认程序打开文件: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(p)
+            .spawn()
+            .map_err(|e| format!("无法打开文件: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(p)
+            .spawn()
+            .map_err(|e| format!("无法打开文件: {}", e))?;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();

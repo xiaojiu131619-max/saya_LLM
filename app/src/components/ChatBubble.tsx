@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Check,
@@ -21,6 +21,7 @@ import { useApp } from '@/context/AppContext';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
 import { isDesktopRuntime, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
+import { reasoningProfileFromModel } from '@/lib/reasoningGears';
 import { formatSessionCtxUsage } from '@/features/chat/chatUtils';
 import { formatToolArguments } from '@/features/chat/mcpTools';
 
@@ -215,6 +216,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         ctxTotal: activeModel.loadConfig.ctxLength,
         supportsReasoning: activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0,
         reasoningBudget: activeModel.loadConfig.reasoningBudget,
+        reasoningProfile: activeModel.reasoningProfile ?? reasoningProfileFromModel(activeModel),
         videoSupport: modelVideoSupport(activeModel),
         apiKey: state.apiConfig.apiKey,
         messages: history.map((msg) => ({

@@ -17,11 +17,13 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// 真正退出：先停止 llama-server、dsh 与 MCP 旁路进程，再退出进程。
+/// 真正退出：先停止 llama-server、fast-27b、dsh 与 MCP 旁路进程，再退出进程。
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
     services::embedding_manager::stop_embedding_on_exit();
+    services::fast27b_manager::stop_fast27b_on_exit();
+    services::webui_bridge::stop();
     services::dsh_manager::stop_dsh_on_exit();
     commands::mcp::disconnect_all_on_exit();
     app.exit(0);
@@ -72,6 +74,7 @@ pub fn run() {
             commands::system::read_file_content,
             commands::system::read_media_file,
             commands::system::reveal_path,
+            commands::system::open_path,
             commands::system::open_external_url,
             commands::system::check_video_runtime,
             commands::system::get_system_appearance,
@@ -123,6 +126,19 @@ pub fn run() {
             commands::dsh::dsh_bind_model,
             commands::dsh::dsh_unbind_model,
             commands::dsh::dsh_cleanup_data,
+            commands::fast27b::fast27b_start,
+            commands::fast27b::fast27b_stop,
+            commands::fast27b::fast27b_restart,
+            commands::fast27b::fast27b_get_status,
+            commands::fast27b::fast27b_get_logs,
+            commands::fast27b::fast27b_clear_logs,
+            commands::fast27b::fast27b_save_config,
+            commands::fast27b::fast27b_set_enabled,
+            commands::fast27b::fast27b_bind_dsh,
+            commands::fast27b::fast27b_unbind_dsh,
+            commands::fast27b::fast27b_bridge_ensure,
+            commands::fast27b::fast27b_bridge_status,
+            commands::fast27b::fast27b_bridge_stop,
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,
             commands::mcp::delete_mcp_server,
@@ -212,6 +228,8 @@ pub fn run() {
                             eprintln!("[app] close_to_tray disabled, quitting...");
                             let _ = services::process_manager::stop_server();
                             services::embedding_manager::stop_embedding_on_exit();
+                            services::fast27b_manager::stop_fast27b_on_exit();
+                            services::webui_bridge::stop();
                             commands::mcp::disconnect_all_on_exit();
                             // 允许窗口正常关闭，之后进程会退出。
                         }
@@ -222,6 +240,8 @@ pub fn run() {
                         eprintln!("[app] window destroyed, stopping server...");
                         let _ = services::process_manager::stop_server();
                         services::embedding_manager::stop_embedding_on_exit();
+                        services::fast27b_manager::stop_fast27b_on_exit();
+                        services::webui_bridge::stop();
                         commands::mcp::disconnect_all_on_exit();
                     }
                 }

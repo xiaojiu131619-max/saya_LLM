@@ -403,7 +403,7 @@ dsh 子进程 stdout/stderr
 - dsh 中文 README：<https://github.com/deepseek-ai/deepseek-harness/blob/master/README.zh.md>
 - dsh 文档站：<https://deepseek-harness.github.io/deepseek-harness/>
 - npm 包：<https://www.npmjs.com/package/@deepseek-ai/dsh>
-- 本项目路线图：`docs/ROADMAP_0.3.0_1.0.0.md`
+- 本项目路线图：`docs/plans/ROADMAP.md`
 
 ### C. 术语
 

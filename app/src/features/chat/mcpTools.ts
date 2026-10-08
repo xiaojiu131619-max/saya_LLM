@@ -172,6 +172,8 @@ export async function runChatToolLoop(options: {
   initialCompletionTokens: number;
   /** 首轮的完整指标（用于展示耗时与速度）。 */
   initialMetrics: ChatCompletionMetrics;
+  /** 首轮响应中模型请求的工具调用；工具循环从它开始执行。 */
+  initialToolCalls: ChatToolCall[];
   /** 执行工具调用；由调用方注入以便注入 UI 提示。 */
   callTool: (serverId: string, toolName: string, args: Record<string, unknown>) => Promise<{ text: string; isError?: boolean }>;
   signal: AbortSignal;
@@ -185,7 +187,10 @@ export async function runChatToolLoop(options: {
   const activities: ToolActivity[] = [];
   let promptTokens = options.initialPromptTokens;
   let completionTokens = options.initialCompletionTokens;
-  let lastToolCalls: ChatToolCall[] = [];
+  // 首轮请求已经完成，必须把它返回的 tool_calls 作为下一步执行入口。
+  // 若从空数组开始，循环会在第一次检查时直接退出，模型虽然返回了工具调用，
+  // 应用却不会真正调用 MCP，也不会回填 tool 结果。
+  let lastToolCalls: ChatToolCall[] = [...options.initialToolCalls];
   let content = options.initialContent;
   let lastMetrics = options.initialMetrics;
 
@@ -196,7 +201,7 @@ export async function runChatToolLoop(options: {
 
   let round = 0;
   while (round < MAX_TOOL_ROUNDS) {
-    // 工具调用由调用方在首轮结果里给出；这里通过上一轮的结果驱动。
+    // 首轮调用来自 initialToolCalls；后续调用由上一轮结果驱动。
     if (lastToolCalls.length === 0) break;
     round += 1;
 

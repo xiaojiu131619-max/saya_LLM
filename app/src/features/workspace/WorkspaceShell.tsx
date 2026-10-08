@@ -16,8 +16,8 @@ type WorkspaceMode = 'model' | 'chat' | 'settings';
 
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
-  // apiStatus / agent / embedding 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
-  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs' || view === 'agent' || view === 'embedding') return 'model';
+  // apiStatus / agent / embedding / fast27b 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
+  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs' || view === 'agent' || view === 'embedding' || view === 'fast27b') return 'model';
   return 'settings';
 }
 

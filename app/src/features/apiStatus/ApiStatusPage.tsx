@@ -1,10 +1,11 @@
 ﻿import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { Activity, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, WifiOff, XCircle, Zap } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, WifiOff, XCircle, Zap } from 'lucide-react';
 import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions, sessionBelongsToModel } from '@/features/chat/chatUtils';
 import { createApiModel } from '@/lib/apiModel';
 import PageHeader from '@/components/PageHeader';
+import ExternalApiSection from './ExternalApiSection';
 
 function formatTime(date: Date | null) {
   if (!date) return '尚未检测';
@@ -86,6 +87,10 @@ function formatCtxUsage(stats: ReturnType<typeof latestStatsForSessions>) {
   return `${stats.ctxUsed.toLocaleString()} / ${stats.ctxTotal.toLocaleString()}`;
 }
 
+function formatTokens(value: number) {
+  return Math.max(0, Math.round(value)).toLocaleString('zh-CN');
+}
+
 export default function ApiStatusPage() {
   const { state, dispatch } = useApp();
   const [result, setResult] = useState<PingResult | null>(null);
@@ -158,6 +163,26 @@ export default function ApiStatusPage() {
   );
   const latestStats = logRuntimeStats ?? latestStatsForSessions(modelSessions);
   const ctxPercent = ctxUsagePercent(latestStats);
+  const usageTotals = useMemo(() => Object.values(state.usageByModel).reduce(
+    (acc, usage) => ({
+      promptTokens: acc.promptTokens + usage.promptTokens,
+      completionTokens: acc.completionTokens + usage.completionTokens,
+      totalTokens: acc.totalTokens + usage.totalTokens,
+      responseCount: acc.responseCount + usage.responseCount,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0, responseCount: 0 },
+  ), [state.usageByModel]);
+  const externalUsage = useMemo(() => Object.entries(state.usageByModel)
+    .filter(([modelId]) => modelId.startsWith('api-'))
+    .reduce(
+      (acc, [, usage]) => ({
+        promptTokens: acc.promptTokens + usage.promptTokens,
+        completionTokens: acc.completionTokens + usage.completionTokens,
+        totalTokens: acc.totalTokens + usage.totalTokens,
+        responseCount: acc.responseCount + usage.responseCount,
+      }),
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0, responseCount: 0 },
+    ), [state.usageByModel]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]">
@@ -166,7 +191,7 @@ export default function ApiStatusPage() {
           <PageHeader
             icon={Activity}
             title="API 状态"
-            description="每 2 秒检测本地 OpenAI / Anthropic 兼容接口，展示模型、地址、响应速度和 API key 状态。对外 API 的开关与密钥在「软件设置」中配置。"
+            description="每 2 秒检测本地 OpenAI / Anthropic 兼容接口；这里集中查看运行状态、Token 用量与对外 API 设置。"
             className="mb-6"
             actions={(
               <button
@@ -208,6 +233,38 @@ export default function ApiStatusPage() {
             <InfoCard icon={Activity} label="模型状态" value={activeModel ? activeModel.name : '未加载'} note={state.serverRunning ? healthStatusCode : '服务启动后可对话'} />
             <InfoCard icon={KeyRound} label="当前鉴权" value={result?.apiKeyRequired ? '需要 API Key' : '无需 API Key'} note={result?.apiKeyRequired ? '软件内自动携带，外部请求使用 Bearer Token' : '当前运行实例未启用鉴权'} />
           </div>
+
+          <section className="mt-2 border-b border-[var(--border-subtle)] py-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                <Zap className="h-4 w-4 text-[var(--accent)]" />
+                Token 统计
+              </h2>
+              <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">包含软件内对话与对外 API</span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <LiveMetric icon={Zap} label="累计 Token" value={formatTokens(usageTotals.totalTokens)} note={`对外 API ${formatTokens(externalUsage.totalTokens)}`} />
+              <LiveMetric icon={ArrowDown} label="输入 Token" value={formatTokens(usageTotals.promptTokens)} note="提示词与上下文" />
+              <LiveMetric icon={ArrowUp} label="输出 Token" value={formatTokens(usageTotals.completionTokens)} note="模型生成内容" />
+              <LiveMetric icon={Activity} label="请求次数" value={formatTokens(usageTotals.responseCount)} note={`对外 API ${formatTokens(externalUsage.responseCount)} 次`} />
+            </div>
+          </section>
+
+          <section className="mt-4 border-b border-[var(--border-subtle)] pb-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                  <Globe2 className="h-4 w-4 text-[var(--accent)]" />
+                  对外 API 设置
+                </h2>
+                <p className="mt-1 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">监听范围、端口、API Key 与调用示例统一在这里管理。</p>
+              </div>
+              <StatusPill ok={state.apiConfig.enabled} text={state.apiConfig.enabled ? '已开启' : '仅本机'} />
+            </div>
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-2 dark:bg-white/[0.025]">
+              <ExternalApiSection embedded />
+            </div>
+          </section>
 
           <section className="mt-2 border-b border-[var(--border-subtle)] py-5">
             <div className="mb-3 flex items-center justify-between gap-3">

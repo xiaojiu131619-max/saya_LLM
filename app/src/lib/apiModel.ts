@@ -1,4 +1,5 @@
 import type { ModelInfo } from '@/types';
+import { detectReasoningProfile } from '@/lib/reasoningGears';
 
 // 通过对外 API（/v1/models）添加的模型：按名称自动推断标签，
 // 让模型一进入软件就带上 工具/思考/视觉/嵌入/重排 等标记。
@@ -58,6 +59,13 @@ function capabilitiesFromTags(tags: string[]) {
 export function createApiModel(alias: string, port: number): ModelInfo {
   const tags = ['API', ...inferApiModelTags(alias)];
   const displayName = alias.trim() || '未命名模型';
+  // 对外 API 模型拿不到 GGUF 对话模板，挡位只能按名字兜底识别（gpt-oss 系低/中/高、
+  // Qwen3 系开关等）；真正下发前 desktop.ts 还会用服务端 /props 的模板能力再校验一次。
+  const reasoningProfile = detectReasoningProfile({
+    name: displayName,
+    tags,
+    supportsReasoning: tags.includes('Thinking'),
+  });
   return {
     id: `api-${hashString(displayName.toLowerCase())}`,
     name: displayName,
@@ -117,6 +125,7 @@ export function createApiModel(alias: string, port: number): ModelInfo {
     license: 'API',
     source: 'api',
     apiName: displayName,
+    reasoningProfile,
     ...capabilitiesFromTags(tags),
   };
 }

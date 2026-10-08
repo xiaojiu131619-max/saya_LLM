@@ -1,6 +1,6 @@
 //! dsh `settings.yaml` 配置管理（F5 本地模型接入，Phase 3）。
 //!
-//! Phase 0 定稿策略（docs/DSH_SPIKE_RECORD.md）：
+//! Phase 0 定稿策略（docs/plans/DSH_SPIKE_RECORD.md）：
 //! - **只在 dsh 停止时写入**（热加载不可观测，且 dsh 自身经同一串行链整文档回写，
 //!   运行中外部重写有被覆盖风险）——由调用方（commands::dsh）保证时序；
 //! - 只维护本应用的两处键：`llm-pi-ai.providers.agent-llm-local` 与顶层

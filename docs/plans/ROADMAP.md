@@ -51,7 +51,7 @@ v0.3.x 没有交付 ComfyUI 进程管理、工作流模型或生图路由。以�
 - `start_comfy` / `stop_comfy` / `get_comfy_status`
 - `app/src/features/image/`、`image` ViewType 和 `ImageWorkspace`
 
-详细方案见 `docs/COMFY_IMAGE_WORKSPACE_PLAN.md`。
+详细方案见 `docs/plans/COMFY_IMAGE_WORKSPACE_PLAN.md`。
 
 ### 2.4 Agent / MCP
 
@@ -111,7 +111,7 @@ v0.3.x 没有交付 ComfyUI 进程管理、工作流模型或生图路由。以�
 
 ### 3.1 ComfyUI 生图工作区（P0 — 核心新功能）
 
-基于 `docs/COMFY_IMAGE_WORKSPACE_PLAN.md` 推进第一阶段交付。
+基于 `docs/plans/COMFY_IMAGE_WORKSPACE_PLAN.md` 推进第一阶段交付。
 
 **最小可用范围（Phase 1-3）：**
 

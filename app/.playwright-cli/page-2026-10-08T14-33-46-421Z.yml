@@ -1,0 +1,103 @@
+- main [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: 晓
+      - generic [ref=e8]: Agent LLM
+    - navigation [ref=e208]:
+      - button "最小化" [ref=e209] [cursor=pointer]
+      - button "最大化或还原" [ref=e211] [cursor=pointer]
+      - button "关闭" [ref=e214] [cursor=pointer]
+  - generic [ref=e10]:
+    - complementary [ref=e11]:
+      - generic [ref=e13]:
+        - button "切换到对话" [ref=e14] [cursor=pointer]: 晓
+        - generic [ref=e15]:
+          - generic [ref=e16]: Agent LLM PC
+          - generic [ref=e17]: 本地模型加载中心
+      - navigation [ref=e18]:
+        - button "模型列表" [ref=e19] [cursor=pointer]
+        - button "Agent" [ref=e25] [cursor=pointer]
+        - button "向量服务" [ref=e30] [cursor=pointer]
+        - button "fast-27b" [ref=e42] [cursor=pointer]
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - generic [ref=e49]: 已加载模型
+            - generic "未运行" [ref=e50]
+          - generic [ref=e51]: 暂无运行模型
+          - generic [ref=e52]: 加载后会显示名称与状态
+          - button "停止运行" [disabled] [ref=e53]
+        - button "服务状态 未运行 速度 -- 上下文 -- 显存 -- 内存 -- 未连接" [ref=e54] [cursor=pointer]:
+          - generic [ref=e55]:
+            - generic [ref=e56]: 服务状态
+            - generic [ref=e61]: 未运行
+          - generic [ref=e65]:
+            - generic [ref=e66]:
+              - generic [ref=e67]: 速度
+              - generic "--" [ref=e68]
+            - generic [ref=e69]:
+              - generic [ref=e70]: 上下文
+              - generic "--" [ref=e71]
+            - generic [ref=e72]:
+              - generic [ref=e73]: 显存
+              - generic "--" [ref=e74]
+            - generic [ref=e75]:
+              - generic [ref=e76]: 内存
+              - generic "--" [ref=e77]
+          - generic [ref=e78]: 未连接
+        - button "llama 日志 服务未运行" [ref=e87] [cursor=pointer]:
+          - generic [ref=e88]:
+            - generic [ref=e91]: llama 日志
+            - generic "服务未运行" [ref=e92]
+      - generic [ref=e95]:
+        - button "切换到对话 尚未选择模型" [ref=e96] [cursor=pointer]:
+          - generic [ref=e100]:
+            - generic [ref=e101]: 切换到对话
+            - generic [ref=e102]: 尚未选择模型
+        - generic [ref=e105]:
+          - button "切换深色主题" [ref=e106] [cursor=pointer]
+          - button "软件设置" [ref=e118] [cursor=pointer]
+    - generic [ref=e220]:
+      - generic [ref=e226]:
+        - heading "fast-27b" [level=1] [ref=e227]
+        - paragraph [ref=e228]: 选择本地模型，启动后接入 DSH 或使用 WebUI。
+      - region "模型与运行状态" [ref=e229]:
+        - generic [ref=e230]:
+          - generic [ref=e231]: 运行中 · API 就绪
+          - group [ref=e234]:
+            - generic [ref=e235]: 引擎已启用
+            - switch "启用 fast-27b 引擎" [checked] [ref=e236] [cursor=pointer]
+        - generic [ref=e238]:
+          - generic [ref=e239]:
+            - generic [ref=e240]: 选择模型
+            - combobox "选择模型" [disabled] [ref=e241]:
+              - option "Heretic 27B"
+              - option "Swift 27B" [selected]
+          - button "停止引擎" [ref=e332] [cursor=pointer]
+        - paragraph [ref=e246]: 切换模型前请先停止引擎。
+        - generic [ref=e247]:
+          - generic [ref=e248]: API · 127.0.0.1:8094
+          - generic [ref=e249]: 上下文 · 131,072
+          - generic [ref=e335]: 设备 KV 池 · 32,768 token
+      - region "接入与对话" [ref=e250]:
+        - generic [ref=e251]:
+          - generic [ref=e252]:
+            - heading "DSH" [level=2] [ref=e253]
+            - paragraph [ref=e254]: 已接入 · qwen3.8-27b
+          - generic [ref=e255]:
+            - button "解除" [active] [ref=e339] [cursor=pointer]
+            - button "打开" [ref=e259] [cursor=pointer]
+        - generic [ref=e264]:
+          - generic [ref=e265]:
+            - heading "WebUI" [level=2] [ref=e266]
+            - paragraph [ref=e267]: 直接与当前模型对话
+          - button "打开 WebUI" [ref=e268] [cursor=pointer]
+      - status [ref=e328]:
+        - paragraph [ref=e343]: fast27b 已就绪：http://127.0.0.1:8094
+        - paragraph [ref=e346]: 已接入模型 qwen3.8-27b（agent-llm-local），已设为 dsh 默认模型。
+      - button "高级配置 路径、参数与 API key" [ref=e330] [cursor=pointer]:
+        - generic [ref=e276]: 高级配置
+        - generic [ref=e277]: 路径、参数与 API key
+      - button "运行日志 2 行" [ref=e279] [cursor=pointer]:
+        - generic [ref=e282]: 运行日志
+        - generic [ref=e283]: 2 行

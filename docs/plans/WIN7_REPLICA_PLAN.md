@@ -330,7 +330,7 @@ Tauri 默认的 `downloadBootstrapper` 在 Win7 上**装不了**——bootstrapp
 - [ ] 便携包结构对齐现有约定（exe + bat + 空 `_up_/resources`）
 - [ ] 在纯净 Win7 SP1（无 WebView2、无 VC++ 运行库）上装机验证
 - [ ] 出 Win7 版 README / 装机说明 / 已知限制
-- [ ] 更新 `CHANGELOG.md` 与 `docs/TECHNICAL_REPORT.md`
+- [ ] 更新 `CHANGELOG.md` 与 `docs/guides/TECHNICAL_REPORT.md`
 
 **验收**：一台干净 Win7 装完即用，无需用户额外装任何运行时。
 
@@ -409,6 +409,6 @@ cargo +1.77.2 check --target x86_64-pc-windows-msvc
 
 ## 相关文档
 
-- `docs/TECHNICAL_REPORT.md`：当前架构与实现现状（反推依据）
+- `docs/guides/TECHNICAL_REPORT.md`：当前架构与实现现状（反推依据）
 - `CHANGELOG.md`：功能演进与已知限制
 - `AGENTS.md`：语言、参数与构建产物规则（本计划的改造须遵守，尤其「不得静默修改默认加载/推理参数」）

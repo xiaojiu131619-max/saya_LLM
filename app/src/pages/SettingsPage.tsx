@@ -15,7 +15,6 @@ import { useApp } from '@/context/AppContext';
 import ToggleSwitch from '@/components/ToggleSwitch';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
 import PageHeader from '@/components/PageHeader';
-import ExternalApiSection from '@/features/apiStatus/ExternalApiSection';
 import type { ThemeMode } from '@/types';
 import {
   addDesktopModelDir,
@@ -234,10 +233,6 @@ export default function SettingsPage() {
                 <p className="text-xs text-secondary-custom">{scanMessage}</p>
               </>
             )}
-          </SettingSection>
-
-          <SettingSection title="对外 API" icon={Globe2} delay={0.1}>
-            <ExternalApiSection embedded />
           </SettingSection>
 
           <SettingSection title="网络代理" icon={Globe2} delay={0.12}>

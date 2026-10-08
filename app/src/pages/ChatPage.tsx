@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -24,12 +24,13 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
+import { useEngineStatuses, type EngineStatusMap } from '@/hooks/useEngineStatuses';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
+import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, fetchServerReasoningEffortCap, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { MAX_TOOL_ROUNDS, collectMcpToolSpecs, runChatToolLoop as runToolLoop, type ChatRoundRunner } from '@/features/chat/mcpTools';
-import type { ChatMessageContentPart, ToolActivity } from '@/types';
+import type { ChatMessageContentPart, ChatEngineId, ToolActivity } from '@/types';
 import {
   CHAT_HISTORY_MODEL_ID,
   MAX_ATTACHMENT_BYTES,
@@ -53,7 +54,8 @@ import {
   type TextAttachment,
 } from '@/features/chat/chatUtils';
 import type { ChatSession, Message } from '@/types';
-import type { ReasoningMode } from '@/types';
+import type { ReasoningMode, ReasoningProfile } from '@/types';
+import { planReasoning, reasoningProfileFromModel } from '@/lib/reasoningGears';
 import { toolLabel } from '@/lib/llamaTools';
 import useMediaQuery from '@/hooks/useMediaQuery';
 
@@ -64,8 +66,70 @@ const REASONING_OPTIONS: Array<{ mode: ReasoningMode; label: string; description
   { mode: 'deep', label: '深思', description: '使用更高思考预算' },
 ];
 
+/**
+ * fast-27b 引擎不在 GGUF 扫描范围内，没有对话模板可解析：按引擎启动参数
+ * （--default-reasoning-effort high）固定成 minimal…high 四挡，界面意图照旧映射为
+ * 思考→minimal、深思→high，与接入引擎之前的下发参数保持一致。
+ */
+const ENGINE_REASONING_PROFILE: ReasoningProfile = {
+  canDisable: true,
+  efforts: ['minimal', 'low', 'medium', 'high'],
+  knobs: ['enable_thinking', 'reasoning_effort'],
+  source: 'name',
+  summary: '引擎（fast-27b）：按服务端默认挡位 minimal…high，界面下发 minimal / high。',
+};
+
 const AUTO_SCROLL_MAGNET_PX = 56;
 const SCROLL_RELEASE_DELTA_PX = 2;
+
+// ---------------------------------------------------------------------------
+// 自带对话的后端扩展：主模型之外，可选择 fast-27b 引擎。
+// 引擎自带 OpenAI 兼容 API，把发送参数（端口 / Key / 模型名 / 上下文）整体替换
+// 即可复用同一条对话链路；会话仍存全局桶，靠 runtimeModelId/modelName 快照区分。
+// ---------------------------------------------------------------------------
+
+/** 引擎对话目标（选中 fast-27b 后端且拿到状态快照后非空）。 */
+type ChatEngineTarget = {
+  key: 'fast27b';
+  label: string;
+  /** 会话快照 / 用量记录用的合成运行时模型 ID。 */
+  runtimeModelId: string;
+  displayName: string;
+  color: string;
+  port: number;
+  apiKey: string;
+  modelId: string;
+  contextWindow: number;
+  supportsReasoning: boolean;
+  running: boolean;
+};
+
+const CHAT_ENGINE_COLORS: Record<'fast27b', string> = {
+  fast27b: '#0ea5e9',
+};
+
+function engineTargetFromStatuses(
+  engine: ChatEngineId,
+  statuses: EngineStatusMap,
+): ChatEngineTarget | null {
+  if (engine === 'main') return null;
+  const status = statuses.fast27b;
+  return {
+    key: 'fast27b',
+    label: 'fast-27b',
+    runtimeModelId: 'engine:fast27b',
+    displayName: `fast-27b · ${status?.selected_model === 'swift' ? 'Swift 27B' : 'Heretic 27B'}`,
+    color: CHAT_ENGINE_COLORS.fast27b,
+    port: status?.port ?? 8094,
+    apiKey: status?.api_key ?? '',
+    modelId: status?.model_id ?? 'qwen3.8-27b',
+    contextWindow: status?.context_window ?? 262144,
+    // 引擎以 --default-reasoning-effort high 启动，思考由引擎默认开启。
+    supportsReasoning: true,
+    running: Boolean(status?.running),
+  };
+}
+
 
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return dataTransfer.files.length > 0 || Array.from(dataTransfer.types).some((type) => type === 'Files');
@@ -143,6 +207,71 @@ export default function ChatPage() {
 
   const activeModel = state.models.find((m) => m.id === state.activeModelId);
   const activeVideoSupport = modelVideoSupport(activeModel);
+
+  // ---- 对话后端：主模型 / fast-27b 引擎 ----
+  const chatEngine = state.chatEngine;
+  // 引擎运行状态：复用同一套轮询 Hook（Agent 页 WebUI 面板用它轮询自己那份后端选择，互不影响）。
+  const engineStatuses = useEngineStatuses(chatEngine);
+  const engineTarget = engineTargetFromStatuses(chatEngine, engineStatuses);
+  // 消息与用量记录的模型身份：引擎目标用合成 ID（engine:*），主模型用真实模型信息。
+  const chatIdentity = engineTarget
+    ? { id: engineTarget.runtimeModelId, name: engineTarget.displayName, color: engineTarget.color }
+    : activeModel
+      ? { id: activeModel.id, name: activeModel.name, color: activeModel.themeColorSolid }
+      : { id: '', name: '未知模型', color: '#808080' };
+  // 共享发送参数（两条发送路径共用）：引擎目标整体替换为引擎的 API 描述。
+  const reqPort = engineTarget ? engineTarget.port : (activeModel?.serverPort ?? state.serverPort);
+  const reqModelName = engineTarget ? engineTarget.modelId : (activeModel?.name ?? '');
+  const reqCtxTotal = engineTarget ? engineTarget.contextWindow : (activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0);
+  const reqReasoningSupported = engineTarget
+    ? engineTarget.supportsReasoning
+    : Boolean(activeModel && (activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0));
+  const reqReasoningBudget = engineTarget ? 0 : (activeModel?.loadConfig.reasoningBudget ?? 0);
+  const reqVideoSupport = engineTarget ? ('none' as const) : activeVideoSupport;
+  const reqApiKey = engineTarget ? engineTarget.apiKey : effectiveRequestApiKey(state.apiConfig);
+
+  // 思考挡位自动识别：按模型对话模板（GGUF 原文，或加载配置里覆盖的自定义模板）
+  // 判断该模型到底认哪些挡位，再把界面四挡意图翻译成实际下发的参数。
+  // 界面与发送链路（streamChatCompletion）共用同一份档案，保证「显示的就是发出的」。
+  const reasoningProfile = useMemo<ReasoningProfile>(
+    () => (engineTarget ? ENGINE_REASONING_PROFILE : reasoningProfileFromModel(activeModel)),
+    [engineTarget, activeModel],
+  );
+  // 运行中的服务端对模板能力有最终发言权：打开菜单时就地读一次 /props 的
+  // chat_template_caps，与服务端判定不一致时（自定义模板、内核差异）按服务端结果展示，
+  // 避免界面写着「effort 高」而请求里已经把 reasoning_effort 撤掉。
+  const [runtimeCaps, setRuntimeCaps] = useState<{ key: string; supportsReasoningEffort?: boolean } | null>(null);
+  const runtimeCapsKey = `${reqPort}|${chatIdentity.id}`;
+  useEffect(() => {
+    if (!reasoningMenuOpen) return;
+    let cancelled = false;
+    void fetchServerReasoningEffortCap(reqPort, reqApiKey).then((supportsReasoningEffort) => {
+      if (!cancelled) setRuntimeCaps({ key: runtimeCapsKey, supportsReasoningEffort });
+    });
+    return () => { cancelled = true; };
+  }, [reasoningMenuOpen, reqPort, reqApiKey, runtimeCapsKey]);
+  // 服务端明确说模板不认 reasoning_effort 时，退回按思考预算展示。
+  const displayReasoningProfile = useMemo<ReasoningProfile>(() => {
+    const supported = runtimeCaps?.key === runtimeCapsKey ? runtimeCaps.supportsReasoningEffort : undefined;
+    if (supported !== false || reasoningProfile.efforts.length === 0) return reasoningProfile;
+    return {
+      ...reasoningProfile,
+      efforts: [],
+      summary: `${reasoningProfile.summary}（服务端复核：当前模板不支持 reasoning_effort，已退回思考预算）`,
+    };
+  }, [reasoningProfile, runtimeCaps, runtimeCapsKey]);
+  const reasoningPlan = useMemo(
+    () => planReasoning(state.chatConfig.reasoningMode, displayReasoningProfile, reqReasoningBudget, reqReasoningSupported),
+    [state.chatConfig.reasoningMode, displayReasoningProfile, reqReasoningBudget, reqReasoningSupported],
+  );
+  const reasoningMenuItems = useMemo(
+    () => REASONING_OPTIONS.map((item) => ({
+      ...item,
+      plan: planReasoning(item.mode, displayReasoningProfile, reqReasoningBudget, reqReasoningSupported),
+    })),
+    [displayReasoningProfile, reqReasoningBudget, reqReasoningSupported],
+  );
+
   // 视频候选模型的原生视频依赖 ffmpeg/ffprobe，提前检测一次并在提示里说明。
   const [videoRuntime, setVideoRuntime] = useState<VideoRuntimeInfo | null>(null);
   useEffect(() => {
@@ -176,7 +305,10 @@ export default function ChatPage() {
   const sidebarModel = loadedModel ?? activeModel;
   const desktopReady = isDesktopRuntime();
   const systemStats = useSystemStats();
-  const canChat = Boolean(desktopReady && activeModel?.filePath && state.serverRunning);
+  // 引擎目标：引擎在跑即可对话；主模型目标：需要已加载模型 + 主服务在线。
+  const canChat = engineTarget
+    ? engineTarget.running
+    : Boolean(desktopReady && activeModel?.filePath && state.serverRunning);
   const chatSessions = useMemo(
     () => Object.values(state.chatSessions).flat().sort((a, b) => b.updatedAt - a.updatedAt),
     [state.chatSessions]
@@ -189,9 +321,11 @@ export default function ChatPage() {
   );
   const activeSessionModelName = activeSession?.modelName ?? activeSessionOwnerModel?.name;
   const activeSessionModelColor = activeSession?.modelColor ?? activeSessionOwnerModel?.themeColorSolid;
-  const activeModelSnapshot = activeModel
-    ? { runtimeModelId: activeModel.id, modelName: activeModel.name, modelColor: activeModel.themeColorSolid }
-    : undefined;
+  const activeModelSnapshot = engineTarget
+    ? { runtimeModelId: chatIdentity.id, modelName: chatIdentity.name, modelColor: chatIdentity.color }
+    : activeModel
+      ? { runtimeModelId: activeModel.id, modelName: activeModel.name, modelColor: activeModel.themeColorSolid }
+      : undefined;
   const vramPercent = systemStats.vramTotal > 0
     ? Math.min(100, Math.max(0, (systemStats.vramUsed / systemStats.vramTotal) * 100))
     : undefined;
@@ -205,8 +339,10 @@ export default function ChatPage() {
       return acc;
     });
   }, [modelMessages]);
-  // 水位基准：当前加载模型的上下文容量（-c）。
-  const ctxCapacity = activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0;
+  // 水位基准：引擎后端取引擎配置的上下文容量，主模型取当前加载模型的 -c。
+  const ctxCapacity = engineTarget
+    ? engineTarget.contextWindow
+    : (activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0);
   // 侧边栏状态卡 ctx：与对话气泡同口径——当前会话的本地累计水位（粗估），
   // 容量取当前加载模型的 -c。日志口径归 API 页，两处不要混。
   const sessionCtxUsed = sessionCtxTotals.length > 0
@@ -451,6 +587,12 @@ export default function ChatPage() {
 
   const processAttachmentFiles = async (files: File[]) => {
     if (files.length === 0) return;
+    // 引擎后端（fast-27b 未走应用媒体链路）：附件整体禁用，
+    // 避免 sanitizeMessagesForLlama 对非 llama-server 端点的能力探测出现歧义。
+    if (engineTarget) {
+      setAttachmentError('fast-27b 引擎对话暂不支持附件：请切回「主模型」后端后再使用。');
+      return;
+    }
 
     const nextAttachments: PendingAttachment[] = [];
     const errors: string[] = [];
@@ -638,7 +780,7 @@ export default function ChatPage() {
   const handleSend = async () => {
     // 用 isAnyGenerating 而非 isGenerating：否则切换会话后能并发发起第二条流，
     // 两条请求会抢同一个 llama-server slot。
-    if ((!inputText.trim() && pendingAttachments.length === 0) || !activeModel || !canChat || isAnyGenerating) return;
+    if ((!inputText.trim() && pendingAttachments.length === 0) || !canChat || isAnyGenerating) return;
     shouldStickToBottomRef.current = true;
 
     const textAttachments = pendingAttachments.filter((a): a is TextAttachment => a.kind === 'text');
@@ -667,23 +809,23 @@ export default function ChatPage() {
       setAttachmentError(sendErrors.join(' '));
       return;
     }
-    // 媒体附件能力校验
+    // 媒体附件能力校验（引擎后端已在附件入口整体禁用，这里只校验主模型目标）
     const imageParts = mediaAttachments.filter((a) => a.kind === 'image');
     const videoParts = mediaAttachments.filter((a) => a.kind === 'video');
     const audioParts = mediaAttachments.filter((a) => a.kind === 'audio');
-    if (imageParts.length > 0 && !activeModel.supportsVision) {
+    if (imageParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsVision) {
       setAttachmentError('当前模型不支持图片输入（未检测到视觉 mmproj）。');
       return;
     }
-    if (videoParts.length > 0 && !activeModel.supportsVision) {
+    if (videoParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsVision) {
       setAttachmentError('当前模型没有视觉 mmproj，无法处理视频或视频抽帧。');
       return;
     }
-    if (videoParts.length > 0 && activeVideoSupport === 'none') {
+    if (videoParts.length > 0 && !engineTarget && activeVideoSupport === 'none') {
       setAttachmentError('当前模型未检测到视频能力，请切换到已验证的视频模型。');
       return;
     }
-    if (audioParts.length > 0 && !activeModel.supportsAudio) {
+    if (audioParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsAudio) {
       setAttachmentError('当前模型不支持音频输入。');
       return;
     }
@@ -737,9 +879,9 @@ export default function ChatPage() {
           role: 'assistant',
           content: '',
           reasoningContent: '',
-          modelId: activeModel.id,
-          modelName: activeModel.name,
-          modelColor: activeModel.themeColorSolid,
+          modelId: chatIdentity.id,
+          modelName: chatIdentity.name,
+          modelColor: chatIdentity.color,
           timestamp: Date.now(),
           isStreaming: true,
         },
@@ -762,22 +904,22 @@ export default function ChatPage() {
     };
 
     // MCP 工具清单：只纳入已连接服务器的工具；没有可用工具时请求不带 tools 字段。
+    // 主模型与 fast-27b 都使用同一套 OpenAI 兼容工具调用链路。
     const toolSpecs = collectMcpToolSpecs(state.mcpServers);
     const conversation: ChatCompletionMessage[] = [...modelMessages, userMsg].map((msg) => ({
       role: msg.role,
       content: msg.multimodalContent ?? msg.content,
     }));
-    const port = activeModel.serverPort ?? state.serverPort;
-    const reasoningSupported = activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0;
     const runRound: ChatRoundRunner = (messages, handlers) => streamChatCompletion({
-      port,
-      modelName: activeModel.name,
+      port: reqPort,
+      modelName: reqModelName,
       config: state.chatConfig,
-      ctxTotal: activeModel.loadConfig.ctxLength,
-      supportsReasoning: reasoningSupported,
-      reasoningBudget: activeModel.loadConfig.reasoningBudget,
-      videoSupport: activeVideoSupport,
-      apiKey: effectiveRequestApiKey(state.apiConfig),
+      ctxTotal: reqCtxTotal,
+      supportsReasoning: reqReasoningSupported,
+      reasoningBudget: reqReasoningBudget,
+      reasoningProfile,
+      videoSupport: reqVideoSupport,
+      apiKey: reqApiKey,
       signal: abortController.signal,
       ...(toolSpecs.specs.length > 0 ? { tools: toolSpecs.specs } : {}),
       messages,
@@ -815,6 +957,7 @@ export default function ChatPage() {
           initialPromptTokens: first.promptTokens,
           initialCompletionTokens: first.completionTokens,
           initialMetrics: first,
+          initialToolCalls: first.toolCalls,
           callTool: async (serverId, toolName, args) => {
             const payload = await callMcpTool(serverId, toolName, args);
             return { text: payload?.text ?? '', isError: payload?.isError };
@@ -846,9 +989,9 @@ export default function ChatPage() {
         dispatch({
           type: 'ADD_USAGE',
           payload: {
-            modelId: activeModel.id,
-            modelName: activeModel.name,
-            modelColor: activeModel.themeColorSolid,
+            modelId: chatIdentity.id,
+            modelName: chatIdentity.name,
+            modelColor: chatIdentity.color,
             promptTokens: metrics.promptTokens,
             completionTokens: metrics.completionTokens,
             totalTokens: metrics.promptTokens + metrics.completionTokens,
@@ -887,7 +1030,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, activeModel.loadConfig.ctxLength),
+            stats: elapsedRequestStats(startTime, reqCtxTotal),
           },
         });
       } else {
@@ -903,7 +1046,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, activeModel.loadConfig.ctxLength),
+            stats: elapsedRequestStats(startTime, reqCtxTotal),
           },
         });
       }
@@ -915,7 +1058,7 @@ export default function ChatPage() {
   };
 
   const handleEditAndResend = async (messageId: string, content: string) => {
-    if (!activeSession || !activeModel || !canChat || isAnyGenerating) return;
+    if (!activeSession || !canChat || isAnyGenerating) return;
     const messageIndex = modelMessages.findIndex((message) => message.id === messageId && message.role === 'user');
     if (messageIndex === -1) return;
 
@@ -968,9 +1111,9 @@ export default function ChatPage() {
           role: 'assistant',
           content: '',
           reasoningContent: '',
-          modelId: activeModel.id,
-          modelName: activeModel.name,
-          modelColor: activeModel.themeColorSolid,
+          modelId: chatIdentity.id,
+          modelName: chatIdentity.name,
+          modelColor: chatIdentity.color,
           timestamp: Date.now(),
           isStreaming: true,
         },
@@ -997,17 +1140,16 @@ export default function ChatPage() {
       role: message.role,
       content: message.multimodalContent ?? message.content,
     }));
-    const port = activeModel.serverPort ?? state.serverPort;
-    const reasoningSupported = activeModel.tags.includes('Reasoning') || activeModel.loadConfig.reasoningBudget > 0;
     const runRound: ChatRoundRunner = (messages, handlers) => streamChatCompletion({
-      port,
-      modelName: activeModel.name,
+      port: reqPort,
+      modelName: reqModelName,
       config: state.chatConfig,
-      ctxTotal: activeModel.loadConfig.ctxLength,
-      supportsReasoning: reasoningSupported,
-      reasoningBudget: activeModel.loadConfig.reasoningBudget,
-      videoSupport: activeVideoSupport,
-      apiKey: effectiveRequestApiKey(state.apiConfig),
+      ctxTotal: reqCtxTotal,
+      supportsReasoning: reqReasoningSupported,
+      reasoningBudget: reqReasoningBudget,
+      reasoningProfile,
+      videoSupport: reqVideoSupport,
+      apiKey: reqApiKey,
       signal: abortController.signal,
       ...(toolSpecs.specs.length > 0 ? { tools: toolSpecs.specs } : {}),
       messages,
@@ -1044,6 +1186,7 @@ export default function ChatPage() {
           initialPromptTokens: first.promptTokens,
           initialCompletionTokens: first.completionTokens,
           initialMetrics: first,
+          initialToolCalls: first.toolCalls,
           callTool: async (serverId, toolName, args) => {
             const payload = await callMcpTool(serverId, toolName, args);
             return { text: payload?.text ?? '', isError: payload?.isError };
@@ -1074,9 +1217,9 @@ export default function ChatPage() {
         dispatch({
           type: 'ADD_USAGE',
           payload: {
-            modelId: activeModel.id,
-            modelName: activeModel.name,
-            modelColor: activeModel.themeColorSolid,
+            modelId: chatIdentity.id,
+            modelName: chatIdentity.name,
+            modelColor: chatIdentity.color,
             promptTokens: metrics.promptTokens,
             completionTokens: metrics.completionTokens,
             totalTokens: metrics.promptTokens + metrics.completionTokens,
@@ -1113,7 +1256,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, activeModel.loadConfig.ctxLength),
+            stats: elapsedRequestStats(startTime, reqCtxTotal),
           },
         });
       } else {
@@ -1129,7 +1272,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, activeModel.loadConfig.ctxLength),
+            stats: elapsedRequestStats(startTime, reqCtxTotal),
           },
         });
       }
@@ -1281,17 +1424,25 @@ export default function ChatPage() {
     dispatch({ type: 'SET_VIEW', payload: 'modelLoad' });
   };
 
-  const inputPlaceholder = activeModel
+  const inputPlaceholder = engineTarget
     ? canChat
       ? '输入消息...'
-      : '请先从模型管理加载本地模型'
-    : '加载模型后可继续发送，历史对话仍可查看';
+      : `请先到 Agent 页启动 ${engineTarget.label} 引擎`
+    : activeModel
+      ? canChat
+        ? '输入消息...'
+        : '请先从模型管理加载本地模型'
+      : '加载模型后可继续发送，历史对话仍可查看';
 
-  const emptyMessage = activeModel
+  const emptyMessage = engineTarget
     ? canChat
-      ? `${activeModel.params} ${activeModel.modelType === 'moe' ? 'MoE' : '稠密'} 模型 · ${activeModel.quant} · llama-server 已连接`
-      : '请先从模型管理加载模型，连接真实 llama-server 后再开始对话'
-    : '历史对话会独立保存。加载本地 GGUF 模型后即可继续发送。';
+      ? `${engineTarget.displayName} · 引擎已连接，直接输入即可对话（fast-27b 引擎暂不支持附件；已连接的 MCP 工具可参与调用）`
+      : `${engineTarget.label} 引擎未运行：到 Agent 页启动引擎后再对话`
+    : activeModel
+      ? canChat
+        ? `${activeModel.params} ${activeModel.modelType === 'moe' ? 'MoE' : '稠密'} 模型 · ${activeModel.quant} · llama-server 已连接`
+        : '请先从模型管理加载模型，连接真实 llama-server 后再开始对话'
+      : '历史对话会独立保存。加载本地 GGUF 模型后即可继续发送。';
 
   const activeTitle = activeSession?.title || '新对话';
   const activeHeaderModelName = activeSessionModelName
@@ -1306,7 +1457,11 @@ export default function ChatPage() {
   const enabledToolsText = state.chatConfig.enabledTools.length > 0
     ? state.chatConfig.enabledTools.map(toolLabel).join('、')
     : '未启用';
-  const runtimeStatusText = isGenerating ? '生成中' : state.serverRunning ? '运行中' : '未加载';
+  const runtimeStatusText = isGenerating
+    ? '生成中'
+    : engineTarget
+      ? engineTarget.running ? '引擎运行中' : '引擎未启动'
+      : state.serverRunning ? '运行中' : '未加载';
 
   return (
     <div
@@ -1335,6 +1490,12 @@ export default function ChatPage() {
       <ChatSidebar
         activeModel={sidebarModel}
         canChat={canChat}
+        engineTarget={engineTarget ? {
+          label: engineTarget.label,
+          statusText: engineTarget.running ? '引擎运行中 · 可对话' : '引擎未启动 · 到 fast-27b 页开启',
+          running: engineTarget.running,
+          avatar: '27B',
+        } : undefined}
         collapsed={sidebarCollapsed}
         collapseLocked={compactSidebar}
         selectionMode={selectionMode}
@@ -1373,12 +1534,31 @@ export default function ChatPage() {
               <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
                 <span className="truncate">{compactModelName(activeHeaderModelName)}</span>
                 <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/30" />
-                <span className="truncate">{canChat ? 'llama-server 已连接' : '历史对话可查看'}</span>
+                <span className="truncate">
+                  {engineTarget
+                    ? canChat ? `${engineTarget.label} 已连接` : `${engineTarget.label} 未启动`
+                    : canChat ? 'llama-server 已连接' : '历史对话可查看'}
+                </span>
               </p>
             </div>
           </div>
 
           <div className="flex flex-shrink-0 items-center gap-1.5">
+            {/* 对话后端：主模型 / fast-27b（引擎需先到 fast-27b 页启动） */}
+            <label
+              className="mr-1 hidden flex-shrink-0 items-center gap-1.5 text-xs sm:inline-flex"
+              title="选择自带对话使用的后端：主模型走模型页的 llama-server；fast-27b 走托管引擎"
+            >
+              <span className="text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">后端</span>
+              <select
+                value={chatEngine}
+                onChange={(event) => dispatch({ type: 'SET_CHAT_ENGINE', payload: event.target.value as ChatEngineId })}
+                className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-xs text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:bg-[var(--surface-muted)]"
+              >
+                <option value="main">主模型</option>
+                <option value="fast27b">fast-27b</option>
+              </select>
+            </label>
             <span
               className={`mr-1 hidden h-8 flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium transition-colors sm:inline-flex ${
                 isGenerating
@@ -1394,7 +1574,10 @@ export default function ChatPage() {
             {isAnyGenerating && (
               <IconButton icon={Square} label="停止生成" tone="danger" onClick={handleStopGeneration} />
             )}
-            <IconButton icon={Power} label="卸载模型" tone="danger" onClick={() => void handleUnloadModel()} disabled={!activeModel || !state.serverRunning} />
+            {/* 卸载模型只对主模型后端有意义；引擎在 Agent 页启停。 */}
+            {!engineTarget && (
+              <IconButton icon={Power} label="卸载模型" tone="danger" onClick={() => void handleUnloadModel()} disabled={!activeModel || !state.serverRunning} />
+            )}
             <IconButton
               icon={showSettings ? PanelRightClose : MoreHorizontal}
               label={showSettings ? '收起对话参数' : '更多 / 对话参数'}
@@ -1585,10 +1768,20 @@ export default function ChatPage() {
                             ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
                             : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
                         }`}
-                        title="思考强度"
+                        title={`思考强度：${reasoningPlan.requestLabel}`}
                       >
                         <Sparkles className="h-4 w-4" />
                         <span>{currentReasoningOption.label}</span>
+                        {/* 自动识别出的实际挡位：与请求里真正下发的参数一致 */}
+                        <span
+                          className={`rounded-md border px-1.5 py-0.5 text-[10px] font-normal ${
+                            reasoningPlan.honored
+                              ? 'border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]'
+                              : 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)]'
+                          }`}
+                        >
+                          {reasoningPlan.gearLabel}
+                        </span>
                       </button>
                       <AnimatePresence>
                         {reasoningMenuOpen && (
@@ -1597,11 +1790,12 @@ export default function ChatPage() {
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             exit={{ opacity: 0, y: 6, scale: 0.98 }}
                             transition={{ duration: 0.14 }}
-                            className="absolute bottom-10 left-0 z-20 w-44 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                            className="absolute bottom-10 left-0 z-20 w-72 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
                           >
-                            {REASONING_OPTIONS.map((item) => (
+                            {reasoningMenuItems.map((item) => (
                               <button
                                 key={item.mode}
+                                title={item.description}
                                 onClick={() => {
                                   dispatch({ type: 'SET_CHAT_CONFIG', payload: { reasoningMode: item.mode } });
                                   setReasoningMenuOpen(false);
@@ -1612,10 +1806,23 @@ export default function ChatPage() {
                                     : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
                                 }`}
                               >
-                                <div className="text-sm font-semibold">{item.label}</div>
-                                <div className="mt-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.description}</div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-sm font-semibold">{item.label}</span>
+                                  {!item.plan.honored && (
+                                    <span className="rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-warning)]">
+                                      模型不支持
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-0.5 font-mono text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.plan.requestLabel}</div>
+                                {item.plan.note && (
+                                  <div className="mt-0.5 text-[11px] leading-4 text-[var(--state-warning)]">{item.plan.note}</div>
+                                )}
                               </button>
                             ))}
+                            <div className="mt-1 border-t border-[var(--border)] px-3 py-2 text-[10px] leading-4 text-[var(--text-tertiary)] dark:border-white/[0.08]">
+                              自动识别（{displayReasoningProfile.source === 'template' ? '对话模板' : displayReasoningProfile.source === 'none' ? '无证据' : '架构/名字兜底'}）：{displayReasoningProfile.summary}
+                            </div>
                           </motion.div>
                         )}
                       </AnimatePresence>

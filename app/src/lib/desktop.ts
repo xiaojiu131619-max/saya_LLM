@@ -2,8 +2,15 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Effect, EffectState, getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, McpCallResult, McpServerConfig, McpServerStatus, McpTransport, ModelInfo, ModelLoadConfig, ModelTask, ReasoningMode, SystemStats, VideoSupportLevel } from '@/types';
-import { DEFAULT_REASONING_BUDGET, RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import type { ChatGenerationConfig, ChatMessageContentPart, ExternalApiConfig, McpCallResult, McpServerConfig, McpServerStatus, McpTransport, ModelInfo, ModelLoadConfig, ModelTask, ReasoningProfile, SystemStats, VideoSupportLevel } from '@/types';
+import { RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import {
+  UNKNOWN_REASONING_PROFILE,
+  chatTemplateFromMetadata,
+  detectReasoningProfile,
+  planReasoning,
+  profileSupportsThinking,
+} from '@/lib/reasoningGears';
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
 import { filterLlamaCppServerTools } from '@/lib/llamaTools';
@@ -704,6 +711,17 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
   const ctxLength = Math.max(0, Number(raw.context_length ?? 0));
   const capabilities = inferModelCapabilities(raw);
   const modelTask = resolveModelTask(raw);
+  const ggufMetadata = raw.gguf_metadata?.map(([key, value]) => ({ key, value })) ?? [];
+  // 思考挡位：按 GGUF 对话模板原文自动识别该模型认哪些挡位（界面「思考强度」据此翻译）。
+  const reasoningProfile = modelTask === 'chat'
+    ? detectReasoningProfile({
+      name: raw.name,
+      architecture: raw.architecture,
+      tags: capabilities.thinking ? ['Reasoning'] : [],
+      chatTemplate: chatTemplateFromMetadata(ggufMetadata),
+      supportsReasoning: capabilities.thinking,
+    })
+    : UNKNOWN_REASONING_PROFILE;
 
   return {
     id: `local-${hashString(raw.file_path)}`,
@@ -743,6 +761,7 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
       raw.rope_scaling_type ? `RoPE 缩放：${raw.rope_scaling_type}${raw.rope_scaling_factor ? ` x${raw.rope_scaling_factor}` : ''}` : null,
       raw.tokenizer_model ? `Tokenizer：${raw.tokenizer_model}` : null,
       raw.supports_reasoning ? '支持思考输出（reasoning / thinking）。' : null,
+      modelTask === 'chat' ? `思考挡位自动识别：${reasoningProfile.summary}` : null,
     ].filter(Boolean).join('\n') || '已读取本地 GGUF 文件。详细表头信息见模型信息页。',
     tags: [
       'Local',
@@ -810,7 +829,7 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     dsparkDraftPath: raw.dspark_draft_path ?? undefined,
     dflashDraftPath: raw.dflash_draft_path ?? undefined,
     isDynamicQuant: Boolean(raw.is_dynamic_quant),
-    ggufMetadata: raw.gguf_metadata?.map(([key, value]) => ({ key, value })) ?? [],
+    ggufMetadata,
     supportsVision: capabilities.vision,
     supportsAudio: capabilities.audio,
     supportsVideo: capabilities.video,
@@ -818,6 +837,7 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     supportsThinking: capabilities.thinking,
     supportsTools: capabilities.tools,
     supportsReasoning: capabilities.thinking,
+    reasoningProfile,
     supportsMtp: raw.mtp_support || Boolean(raw.mtp_draft_path),
     modelTask,
     poolingType: raw.pooling_type ?? undefined,
@@ -1033,6 +1053,12 @@ export async function stopDesktopServer() {
 export async function revealDesktopPath(path: string) {
   if (!isDesktopRuntime()) return;
   await invoke('reveal_path', { path });
+}
+
+/** 用系统默认程序打开本地文件（如 DLC 指南 .md 文档）。 */
+export async function openLocalPath(path: string) {
+  if (!isDesktopRuntime()) return;
+  await invoke('open_path', { path });
 }
 
 export async function openExternalUrl(url: string) {
@@ -1532,13 +1558,6 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function reasoningBudgetForMode(mode: ReasoningMode, modelBudget: number, supportsReasoning?: boolean) {
-  if (mode === 'off') return 0;
-  if (mode === 'think') return DEFAULT_REASONING_BUDGET;
-  if (mode === 'deep') return DEFAULT_REASONING_BUDGET * 4;
-  return supportsReasoning ? Math.max(modelBudget, DEFAULT_REASONING_BUDGET) : Math.max(0, modelBudget);
-}
-
 async function getServerModelId(port: number, headers: Record<string, string>, signal?: AbortSignal) {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers, signal });
@@ -1559,6 +1578,8 @@ interface ServerModalities {
   reportedVideo: boolean;
   hasNativeVideoProtocol: boolean;
   videoFallbackReason?: string;
+  /** /props 的 chat_template_caps：当前模板是否认识 reasoning_effort（undefined = 服务端未报告）。 */
+  supportsReasoningEffort?: boolean;
 }
 
 function messagesContainPart(messages: ChatCompletionMessage[], type: ChatMessageContentPart['type']) {
@@ -1651,6 +1672,12 @@ async function sanitizeMessagesForLlama(
   return Promise.all(messages.map(async (message) => ({
     role: message.role,
     content: await sanitizeContentForLlama(message.content, useNativeVideo),
+    // 工具回填轮次必须保留 assistant.tool_calls 与 tool.tool_call_id；
+    // 只清洗多模态 content 会丢掉这两组协议字段，fast-27b/llama-server
+    // 会因此无法把 MCP 执行结果接回同一次对话。
+    ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+    ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+    ...(message.name ? { name: message.name } : {}),
   })));
 }
 
@@ -1665,6 +1692,35 @@ function logMultimodalMode(hasAudio: boolean, hasVideo: boolean, modalities: Ser
   logInfo('multimodal', `视频使用${mode}。`);
 }
 
+/**
+ * 读取 /props 的 chat_template_caps 里「模板是否认识 reasoning_effort」这一项。
+ * 键名由服务端版本决定，这里按包含关系匹配，读不到就返回 undefined（表示服务端未报告）。
+ */
+function readSupportsReasoningEffort(caps: unknown): boolean | undefined {
+  if (!caps || typeof caps !== 'object') return undefined;
+  const entries = Object.entries(caps as Record<string, unknown>);
+  const hit = entries.find(([key]) => key.toLowerCase().replace(/-/g, '_').includes('reasoning_effort'));
+  return hit ? Boolean(hit[1]) : undefined;
+}
+
+/**
+ * 就地向运行中的服务端复核一次模板能力（不抛错：读不到一律返回 undefined）。
+ * 界面打开「思考强度」菜单时用它确认自动识别的挡位，服务端说模板不支持
+ * reasoning_effort 时就退回思考预算展示。
+ */
+export async function fetchServerReasoningEffortCap(port: number, apiKey?: string): Promise<boolean | undefined> {
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey?.trim()) headers.Authorization = `Bearer ${apiKey.trim()}`;
+    const response = await fetch(`http://127.0.0.1:${port}/props`, { headers });
+    if (!response.ok) return undefined;
+    const json = await response.json() as { chat_template_caps?: unknown } | null;
+    return readSupportsReasoningEffort(json?.chat_template_caps);
+  } catch {
+    return undefined;
+  }
+}
+
 async function getServerModalities(
   port: number,
   headers: Record<string, string>,
@@ -1677,6 +1733,7 @@ async function getServerModalities(
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const json = await response.json();
     const modalities = json?.modalities;
+    const supportsReasoningEffort = readSupportsReasoningEffort(json?.chat_template_caps);
     const reportedVideo = Boolean(modalities?.video);
     const modelAllowsNativeVideo = videoSupport === 'verified' || videoSupport === 'candidate';
     let video = reportedVideo && modelAllowsNativeVideo;
@@ -1715,6 +1772,7 @@ async function getServerModalities(
         modalities && Object.prototype.hasOwnProperty.call(modalities, 'video')
       ),
       videoFallbackReason,
+      supportsReasoningEffort,
     };
   } catch {
     if (signal?.aborted) throw createAbortError();
@@ -1738,6 +1796,8 @@ export async function streamChatCompletion(options: {
   ctxTotal?: number;
   supportsReasoning?: boolean;
   reasoningBudget?: number;
+  /** 模型的思考挡位档案（按对话模板自动识别）；不传表示未识别，只按预算请求。 */
+  reasoningProfile?: ReasoningProfile;
   videoSupport?: VideoSupportLevel;
   apiKey?: string;
   signal?: AbortSignal;
@@ -1788,21 +1848,48 @@ export async function streamChatCompletion(options: {
 
   const reasoningMode = options.config.reasoningMode ?? 'auto';
   const reasoningBudget = Math.max(0, Math.round(Number(options.reasoningBudget ?? 0)));
-  const effectiveReasoningBudget = reasoningBudgetForMode(reasoningMode, reasoningBudget, options.supportsReasoning);
+  const reasoningProfile = options.reasoningProfile ?? UNKNOWN_REASONING_PROFILE;
+  let reasoningPlan = planReasoning(reasoningMode, reasoningProfile, reasoningBudget, options.supportsReasoning);
+
+  // 运行中的服务端对模板能力有最终发言权：/props 报告模板不认识 reasoning_effort 时，
+  // 静态识别出的挡位一律不下发，退回思考预算（避免把无效参数当成已生效的挡位）。
+  if (reasoningPlan.effort && serverModalities.supportsReasoningEffort === false) {
+    logInfo(
+      'chat',
+      `服务端报告当前对话模板不支持 reasoning_effort，「${reasoningPlan.gearLabel}」退回思考预算 ${reasoningPlan.budgetTokens}。`,
+    );
+    reasoningPlan = {
+      ...reasoningPlan,
+      effort: undefined,
+      gearLabel: reasoningPlan.budgetTokens > 0 ? `预算 ${reasoningPlan.budgetTokens}` : reasoningPlan.gearLabel,
+      requestLabel: `思考预算 ${reasoningPlan.budgetTokens}`,
+    };
+  }
+
+  const effectiveReasoningBudget = reasoningPlan.budgetTokens;
   const supportsReasoning = reasoningMode !== 'off'
     && effectiveReasoningBudget > 0
-    && Boolean(options.supportsReasoning || reasoningMode === 'think' || reasoningMode === 'deep');
+    && (
+      reasoningMode === 'think'
+      || reasoningMode === 'deep'
+      || profileSupportsThinking(reasoningProfile, options.supportsReasoning)
+    );
 
   const chatUrl = `http://127.0.0.1:${options.port}/v1/chat/completions`;
   const serverModelId = await getServerModelId(options.port, headers, abortSignal);
   throwIfAborted(abortSignal);
   const requestModelName = serverModelId ?? options.modelName;
   const maxCompletionTokens = Math.max(0, Math.round(Number(options.config.maxTokens ?? 0)));
+  /**
+   * chat_template_kwargs 只带模型对话模板真正认识的变量：
+   * enable_thinking（能否关闭/开启思考）与 reasoning_effort（有没有离散挡位）。
+   * 模板不认的变量不发，避免把无效参数当成「挡位已生效」。
+   */
   const reasoningTemplateKwargs = (() => {
-    if (reasoningMode === 'off') return { enable_thinking: false };
-    if (reasoningMode === 'think') return { enable_thinking: true, reasoning_effort: 'minimal' };
-    if (reasoningMode === 'deep') return { enable_thinking: true, reasoning_effort: 'high' };
-    return undefined;
+    const kwargs: Record<string, unknown> = {};
+    if (reasoningPlan.enableThinking !== undefined) kwargs.enable_thinking = reasoningPlan.enableThinking;
+    if (reasoningPlan.effort) kwargs.reasoning_effort = reasoningPlan.effort;
+    return Object.keys(kwargs).length > 0 ? kwargs : undefined;
   })();
   const requestBody = {
     model: requestModelName,
@@ -1819,7 +1906,7 @@ export async function streamChatCompletion(options: {
       max_tokens: maxCompletionTokens,
       n_predict: maxCompletionTokens,
     } : {}),
-    ...(reasoningMode === 'off' ? {
+    ...(reasoningPlan.enableThinking === false ? {
       reasoning_budget: 0,
       thinking_budget_tokens: 0,
       ...(reasoningTemplateKwargs ? { chat_template_kwargs: reasoningTemplateKwargs } : {}),
@@ -1828,6 +1915,9 @@ export async function streamChatCompletion(options: {
       reasoning_budget: effectiveReasoningBudget,
       reasoning_format: 'deepseek',
       thinking_budget_tokens: effectiveReasoningBudget,
+      // 挡位同时走两个通道：native 字段（llama-server 会把它绑定进模板上下文）
+      // 与 chat_template_kwargs（模板自定义路径 / 老内核只认后者）。
+      ...(reasoningPlan.effort ? { reasoning_effort: reasoningPlan.effort } : {}),
       ...(reasoningTemplateKwargs ? { chat_template_kwargs: reasoningTemplateKwargs } : {}),
     } : {}),
   };
@@ -2286,6 +2376,188 @@ export async function dshUnbindModel() {
 export async function dshCleanupData(kind: 'sessions' | 'store') {
   if (!isDesktopRuntime()) return null;
   return invoke<string>('dsh_cleanup_data', { kind });
+}
+
+// ---------------------------------------------------------------------------
+// fast27b 引擎（三元量化 Bonsai-2-27B 离线包）启动通道
+// ---------------------------------------------------------------------------
+
+export type Fast27bModelVariant = 'heretic' | 'swift';
+
+export interface Fast27bModelPreset {
+  id: Fast27bModelVariant;
+  label: string;
+  model_path: string;
+  exists: boolean;
+  spec: string;
+}
+
+/** fast27b 运行状态（后端 runtime_status + 配置快照 + DLC 资源检测）。 */
+export interface Fast27bStatus {
+  running: boolean;
+  /** 「可对话」：进程存活 + /v1/models 在线 + 引擎日志未报失效。 */
+  api_ready: boolean;
+  /** /v1/models 探活通过（接口在线；worker 崩溃后仍可能为 true，不可单独当判活依据）。 */
+  api_reachable: boolean;
+  /** 引擎日志判定为失效（worker_crash / requests_failing / over_pool）。 */
+  degraded: boolean;
+  /** 失效中文原因（含处置建议）。 */
+  degraded_reason: string | null;
+  /** 故障码：worker_crash / requests_failing / over_pool。 */
+  fault_kind: string | null;
+  /** 是否必须重启引擎才能恢复。 */
+  requires_restart: boolean;
+  /** 触发失效的引擎日志原始行（证据，英文原文）。 */
+  raw_fault_line: string | null;
+  /** 失效发生时刻（HH:MM:SS）。 */
+  fault_at: string | null;
+  /** 致命失效之后的成功请求数（>0 = 读数存疑）。 */
+  completions_after_fault: number;
+  /** 设备 KV 池 token 数（引擎启动行读数）。 */
+  device_pool_tokens: number | null;
+  /** 设备 KV 池页数（每页 64 token）。 */
+  device_pool_pages: number | null;
+  /** 设备池取值来源：auto / explicit。 */
+  capacity_configured: string | null;
+  /** 最近一次超池的题面 token 数。 */
+  over_pool_prompt_tokens: number | null;
+  /** 最近一次超池时的设备池 token 数。 */
+  over_pool_pool_tokens: number | null;
+  port: number | null;
+  lan: boolean | null;
+  model_id: string | null;
+  pid: number | null;
+  /** 是否启用该 DLC。 */
+  enabled: boolean;
+  engine_path: string;
+  model_path: string;
+  selected_model: Fast27bModelVariant;
+  model_presets: Fast27bModelPreset[];
+  /** 引擎文件是否存在（DLC 就绪检测）。 */
+  engine_exists: boolean;
+  /** 模型文件是否存在（DLC 就绪检测）。 */
+  model_exists: boolean;
+  api_key: string;
+  context_window: number;
+  draft_tokens: number;
+  /** 引擎默认输出上限（--default-max-tokens）；0 = 未设，由引擎自身默认决定。 */
+  default_max_tokens: number;
+  /** 官方 webui 同源桥端口（配置）。 */
+  bridge_port: number;
+  auto_open_dsh_web: boolean;
+  /** 当前 dsh 绑定（仅当指向 fast27b 端口时返回）。 */
+  dsh_bound_model: string | null;
+  /** dsh Web 地址。 */
+  dsh_web_url: string;
+}
+
+/** fast27b 配置段（保存用）。 */
+export interface Fast27bConfig {
+  /** 是否启用该 DLC。 */
+  enabled: boolean;
+  engine_path: string;
+  model_path: string;
+  selected_model: Fast27bModelVariant;
+  swift_model_path: string;
+  heretic_model_path: string;
+  port: number;
+  lan: boolean;
+  api_key: string;
+  context_window: number;
+  draft_tokens: number;
+  /** 引擎默认输出上限（--default-max-tokens）；0 = 不传该参数，交回引擎自身默认。 */
+  default_max_tokens: number;
+  /** 官方 llama.cpp webui 同源桥端口（浏览器打开 fast27b 网页界面用；占用时自动顺延）。 */
+  bridge_port: number;
+  auto_open_dsh_web: boolean;
+}
+
+/** 同源桥信息：url 是浏览器里打开官方 webui 的地址。 */
+export interface WebuiBridgeInfo {
+  url: string;
+  port: number;
+  upstream_port: number;
+}
+
+/** 起（或复用）fast27b 的官方 webui 同源桥。 */
+export async function fast27bBridgeEnsure() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<WebuiBridgeInfo>('fast27b_bridge_ensure');
+}
+
+/** 桥的运行状态（未起返回 null）。 */
+export async function fast27bBridgeStatus() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<WebuiBridgeInfo | null>('fast27b_bridge_status');
+}
+
+/** 停掉桥。 */
+export async function fast27bBridgeStop() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_bridge_stop');
+}
+
+export async function fast27bGetStatus() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<Fast27bStatus>('fast27b_get_status');
+}
+
+export async function fast27bStart() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_start');
+}
+
+/**
+ * 重启 fast27b 引擎（引擎已失效时的恢复手段：worker 崩溃 / 连续 503 时唯一能恢复的操作）。
+ * 同一套 argv 重新拉起，并回收同引擎路径的遗留实例（否则端口被占住起不来）。
+ */
+export async function fast27bRestart() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_restart');
+}
+
+export async function fast27bStop() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_stop');
+}
+
+export async function fast27bGetLogs() {
+  if (!isDesktopRuntime()) return [];
+  return invoke<string[]>('fast27b_get_logs');
+}
+
+export async function fast27bClearLogs() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_clear_logs');
+}
+
+export async function fast27bSaveConfig(config: Fast27bConfig) {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_save_config', { config });
+}
+
+/** 只切换 fast27b DLC 的启用开关（不触碰其他配置项）。 */
+export async function fast27bSetEnabled(enabled: boolean) {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_set_enabled', { enabled });
+}
+
+export interface Fast27bBindResult {
+  model_id: string;
+  base_url: string;
+  provider: string;
+}
+
+/** 把 fast27b 引擎一键接入 dsh（写入 provider 并设为默认模型）。 */
+export async function fast27bBindDsh() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<Fast27bBindResult>('fast27b_bind_dsh');
+}
+
+/** 解除 fast27b 的 dsh 绑定（与 llama 绑定共用同一提供方槽位）。 */
+export async function fast27bUnbindDsh() {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_unbind_dsh');
 }
 
 // ---------------------------------------------------------------------------

@@ -79,6 +79,14 @@ npm run lint && npm run build   # 前端检查
 cd src-tauri && cargo check     # Rust 检查
 ```
 
+## 本机调优预设(Swift-1.5-Qwen3.8-27B)
+
+针对本机 RTX 3080 Ti 12GB 实测定案的 Swift-1.5-Qwen3.8-27B 推理预设:
+
+- **应用内插件**:模型工作区侧边栏 →「BeeLlama 插件」(与 ninfer 引擎同款托管模式),一键启动 / 接入 dsh / 配置编辑 / 实时日志
+- 一键脚本(备选):`scripts/start-swift27b-64k.bat`、`scripts/stop-swift27b.bat`(64K 上下文 + 视觉 + k8v6 KV 量化,端口 8080)
+- 调优依据、A/B 实测数据与已知坑(如当前构建下该模型 MTP 路径会拖慢约 5 倍,勿开启):[docs/guides/SWIFT27B_TUNING.md](docs/guides/SWIFT27B_TUNING.md)
+
 ## 对外 API
 
 在 **API 中心** 打开「释放 OpenAI / Anthropic 兼容 API」后，局域网内客户端可以这样调用：
