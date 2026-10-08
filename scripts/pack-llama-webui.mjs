@@ -2,7 +2,7 @@
 //
 // 官方 webui 是编译进 llama-server 的（当成一堆 gzip 流放在 PE 的只读段里），llama.cpp 发布包
 // 不带单独的静态目录，所以这里按「gzip 流出现顺序 == 资产路径字典序」把两者配对——
-// 该规律在 b10709 / b10883 / b11860 三个内核上都验证过（见 docs/guides/NINFER_DLC_GUIDE.md）。
+// 该规律在 b10709 / b10883 / b11860 三个内核上都验证过。
 //
 // 用法：
 //   node scripts/pack-llama-webui.mjs [llama-server-impl.dll 路径]

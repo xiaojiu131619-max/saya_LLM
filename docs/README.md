@@ -8,8 +8,6 @@
 | --- | --- |
 | [DEVELOPMENT_GUIDE.md](guides/DEVELOPMENT_GUIDE.md) | 本地开发、构建、测试和故障排查 |
 | [TECHNICAL_REPORT.md](guides/TECHNICAL_REPORT.md) | 当前架构、数据流与模块清单 |
-| [BEELLAMA_DLC_GUIDE.md](guides/BEELLAMA_DLC_GUIDE.md) | Beellama DLC 完整指南（硬件前提、离线包、自编译工具链） |
-| [NINFER_DLC_GUIDE.md](guides/NINFER_DLC_GUIDE.md) | Ninfer DLC 完整指南（离线包校验、CMake 配方、hf-mirror 下载） |
 | [SWIFT27B_TUNING.md](guides/SWIFT27B_TUNING.md) | Swift-27B 模型调优依据、A/B 实测数据与已知坑 |
 | [PUSH_REPORT_2026-10-08.md](guides/PUSH_REPORT_2026-10-08.md) | 2026-10-08 fast-27b、API 状态、Token、Chat 与 MCP 推送报告 |
 

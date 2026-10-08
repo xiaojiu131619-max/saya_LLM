@@ -189,3 +189,34 @@ feat: 重构 fast-27b 工作台并接入 API 状态与 MCP
 
 > 本报告仅记录当前工作区状态，**本次操作未执行 `git commit` 或 `git push`**。
 
+## 八、代码审查与修复（2026-10-09 补充）
+
+> 本批改动（fast-27b 工作台 / WebUI 同源桥 / 推理挡位 / Agent 页重构，约 5,000 行新代码 + 1,250 行修改）已在提交前后做了一轮逐文件代码审查。整体结论：链路设计扎实（进程树回收、失效锁存、代数过滤、测试覆盖都到位），发现并修复 2 个真 bug、1 处死代码、3 处文档死链，CHANGELOG 已重写对齐代码现状。
+
+### 修复的问题
+
+1. **引擎日志带中文会让失效识别整体失明**（`fast27b_manager.rs` 时间戳解析）：按字节下标切片，日志行含多字节字符（如模型路径带中文目录）时切片落在字符中间，日志读线程直接 panic——此后日志入队、worker 崩溃告警、超池提示、退出检测全部失效。改用 `str::get` 安全切片，并补了中文日志行的回归测试。
+2. **「应用重启后保留引擎已打死事实」从未生效**（`start_fast27b`）：先回扫历史日志、随后立即清空，回扫结果永远被自身覆盖，该功能实际是空转。现在回扫改在应用启动时执行一次（`lib.rs` setup），拉起新实例 / 手动停止引擎时才清空，新实例的 `engine ready` 行作最终归零确认。
+3. **死代码清理**：`EngineCard` 组件（132 行）、`openLocalPath` 封装与 `open_path` 后端命令、`is_engine_degraded` 函数均为上一轮「DLC 指南」界面残留、无任何调用方，已移除；修复后本批新增代码零编译警告（仓库剩余 6 个警告全在历史文件）。
+4. **文档死链**：CHANGELOG、`docs/README.md`、`SWIFT27B_TUNING.md` 第六节、`pack-llama-webui.mjs` 注释仍指向已删除的 NINFER/BEELLAMA 指南，已改为指向 fast-27b 现状；`SWIFT27B_TUNING.md` 注明其调优结论适用于独立脚本路径（BeeLlama/llama.cpp 运行时），与 fast-27b 页（ninfer 运行时）是两套栈。
+
+### 审查确认有效、无需改动的关键点
+
+- MCP 工具循环修复（`initialToolCalls` + 消息清洗保留 `tool_calls` / `tool_call_id`）真实有效，对主模型与 fast-27b 后端都生效；
+- worker 崩溃 / 连续 503 / 超池的状态机、代数过滤、Job Object 回收、同源桥的流回放与续传逻辑均正确，且已有实盘日志驱动的单元测试；
+- 推理挡位（`reasoningGears`）界面与发送链路共用同一份档案，`/props` 复核兜底设计合理。
+
+### 验证结果（2026-10-09 复测）
+
+| 验证项 | 结果 |
+| --- | --- |
+| `cargo test --lib` | 通过：131 passed，0 failed，8 ignored（含新增的中文日志行回归测试） |
+| `npx tsc -b` | 通过，无错误 |
+| 编译警告 | 本批新增代码 0 警告（仓库存量 6 个历史警告不变） |
+| `npm run desktop:build` | 通过；产物 `app/src-tauri/target/release/agent-llm.exe`（2026-10-09 01:01，约 21.6 MB） |
+
+### CHANGELOG
+
+`[Unreleased]` 段原有约一半条目停留在已被取代的 ninfer/BeeLlama 迭代口径（默认输出上限 65,536/ctx 81,920 与实际 32,768/262,144 不符、引用不存在的指南文档、`chatEngine` 写成三引擎）。已整段重写为 fast-27b 现状，并新增 MCP 工具循环、多字节 panic、回扫空转、同源桥链路复查、死代码清理五条修复条目；「变更」小节补充文档重组与对话侧边栏折叠态。
+
+

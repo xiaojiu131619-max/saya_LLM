@@ -1055,12 +1055,6 @@ export async function revealDesktopPath(path: string) {
   await invoke('reveal_path', { path });
 }
 
-/** 用系统默认程序打开本地文件（如 DLC 指南 .md 文档）。 */
-export async function openLocalPath(path: string) {
-  if (!isDesktopRuntime()) return;
-  await invoke('open_path', { path });
-}
-
 export async function openExternalUrl(url: string) {
   if (!isDesktopRuntime()) {
     window.open(url, '_blank', 'noopener,noreferrer');

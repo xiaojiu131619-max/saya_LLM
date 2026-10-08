@@ -38,6 +38,12 @@
 
 ### 新增
 
+- **fast-27b 引擎工作台（Swift / Heretic 27B）**：模型工作区侧边栏新增「fast-27b」入口，三元量化 27B 引擎（`ninfer-serve-86.exe` + `.ninfer` 权重离线包）以托管旁路进程接入。启动参数与 `D:\Projects\fast-llm` 的 BAT 启动器逐字对齐（`--kv-capacity auto`、`k8v4` 分页 KV、`--host-kv-mib 16384` 与 5 个 `NINFER_*` KVMem 环境变量，12 GiB 卡上权重 + 运行时预留不会撑爆显存），进程树走 Job Object 整树回收，启动前清扫遗留孤儿进程并预检端口占用，应用退出联动停止；就绪探测 `GET /v1/models`（带 Bearer，120 秒超时）。
+  - 模型选择 **Heretic 27B / Swift 27B**：Swift 启用 MTP 草稿头（`--spec mtp --draft-tokens`），Heretic 不带草稿参数，其余参数两模型一致；两个模型的自定义路径分别记忆、互不覆盖；引擎/模型路径、服务端口、局域网开关、API Key、上下文长度（ctx）、草稿长度、默认输出上限、网页桥端口均可编辑保存（切换模型需先停止引擎）。
+  - **默认输出上限可配置**（`--default-max-tokens`，默认 32,768；0 = 不传、交回引擎自身默认）：应用自带对话的「最大输出 Token」默认 0（请求体不带 `max_tokens`），该值就是默认对话实际能生成的最长长度——此前迭代写死过 1024，回复被静默截断且界面无处可改；现按配置下发，保存时校验不超过上下文窗口。同源桥合成 `/props` 的 `n_predict` 如实上报该值，官方网页界面的「最大输出」初值随之正确（不再写死 `-1`「无限」）。
+  - 一键接入 / 解除 dsh：与 llama 绑定共用 `agent-llm-local` 提供方槽位，接入前先鉴权探活 + 真实小补全校验（容忍推理模型仅返回 `reasoning_content`），写入 `settings.yaml` 前自动备份。
+  - 运行日志：stdout/stderr 双读线程 → 环形缓冲（5,000 行）+ `engine.log` 同步落盘，支持实时/暂停、复制、导出、清空；引擎启动行的设备 KV 池容量被解析读出（`device_pool_tokens` / `device_pool_pages`），面板直接展示——不改动任何加载/推理参数，只读引擎自己打印的数字。
+  - 引擎失效识别与一键「重启恢复」见下方修复条目；命令面新增 `fast27b_*` 13 个命令，配置 `config.json` 新增 `fast27b` 段（serde default 平滑迁移，旧配置自动补默认值）。
 - **思考强度自动识别模型挡位**：界面四挡「关闭 / 自动 / 思考 / 深思」不再按固定参数硬发，而是先识别模型到底认哪些挡位，再翻译成该模型支持的参数。
   - 新增 `app/src/lib/reasoningGears.ts`：按对话模板原文识别（GGUF 的 `tokenizer.chat_template`，加载配置里覆盖的自定义模板优先）——模板是否认识 `enable_thinking`（能否真正关闭思考）、`reasoning_effort` 有哪些可取挡位（从模板判断里的字面量提取，只引用变量不枚举取值的按 low / medium / high 兜底）、是否带 `preserve_thinking` 等变量；没有模板时按架构（gpt-oss / Qwen3 系）与名字/标签兜底；两者都没有则明确记为「无证据」，不再瞎猜。识别结论同时写进模型信息页的说明行。
   - 输入框旁「思考强度」菜单改为展示实际下发的挡位与预算（如 `reasoning_effort=high · 思考预算 16K`、`enable_thinking=true · 思考预算 4K`、`不指定挡位 · 思考预算 4K`），按钮上直接带当前挡位徽标；模型兑现不了的意图（例如模板没有关闭开关时选「关闭」、未识别到思考控制面时选「思考」）以黄色「模型不支持」标出并说明原因，菜单底部给出识别依据（对话模板 / 架构兜底 / 无证据）。
@@ -49,41 +55,32 @@
 - **fast-27b 引擎 worker 崩溃后应用仍显示「运行中 · API 就绪」，而每条对话都是 HTTP 503**（2026-10-05 实盘）：题面 53,377 token 超过设备 KV 池 17,920 token 时，引擎把 702 页一次性搬到主机池失败，日志打印 `worker crash: Paged KV reservation invariant was violated` 后永久停止服务；但引擎**进程仍在**、HTTP 层仍在监听、`/v1/models` 照样返回 200，而判活此前只看这一个接口，于是状态徽标一直是绿色，用户只能从 503 里猜原因。现在判活叠加引擎自己的日志特征：
   - `fast27b_manager` 新增引擎失效识别（`worker_crash` / `requests_failing` / `over_pool` 三类），在日志读线程入队**之前**解析，避免「引擎打完崩溃行再无输出」时晚一拍；worker 崩溃锁存到下次启动（不因后续请求成功而假恢复，只记 `completions_after_fault` 作存疑提示），HTTP 503 需连续两次才判失效（挡掉偶发瞬时失败），`HTTP 499 | client disconnected` 属客户端主动断开、不算故障。
   - 引擎失效时运行状态新增 `degraded` / `degraded_reason`（中文原因 + 处置建议）/ `fault_kind` / `requires_restart` / `raw_fault_line`（英文原文证据）/ `fault_at`；`api_ready`（「可对话」）改为「进程存活 + `/v1/models` 在线 + 日志未报失效」，另拆出 `api_reachable`（接口在线）以免语义混用。
-  - 面板徽标在失效时转为红色「已失效 · 需重启引擎」，并显示中文告警条（原因、日志时刻、故障码、原始日志行）与「重启引擎（推荐）」一键按钮；命令面新增 `fast27b_restart`（异步，不阻塞主线程：停止已失效实例 → 回收同引擎路径的遗留进程 → 同一套 argv 重新拉起，就绪/日志/进度照常走事件）。
-  - 应用重启后仍能识别失效：启动时回扫 `engine.log` 尾部，若「最后一台实例」死在 worker 崩溃上且其后没有新的 `engine ready`，则保留该事实（崩溃后又就绪过则视为已重启、不报失效）。
+  - 面板徽标在失效时转为红色「已失效 · 需重启引擎」，并显示中文告警条（原因、日志时刻、故障码、原始日志行）与「重启恢复」一键按钮；命令面新增 `fast27b_restart`（异步，不阻塞主线程：停止已失效实例 → 回收同引擎路径的遗留进程 → 同一套 argv 重新拉起，就绪/日志/进度照常走事件）。
+  - 应用重启后仍能识别失效：应用启动时回扫 `engine.log` 尾部，若「最后一台实例」死在 worker 崩溃上且其后没有新的 `engine ready`，则保留该事实（崩溃后又就绪过则视为已重启、不报失效）；拉起新实例或手动停止引擎时才清空。
   - 引擎启动行 `capacity | KV …, k8v4, auto | pages …` 被解析为设备 KV 池容量（`device_pool_tokens` / `device_pool_pages` / `capacity_configured`），在面板显式展示；超池告警行解析出「题面 token > 池 token」两个数并给出中文提示——**不改动任何默认加载/推理参数**，只把引擎自己打印的数字读出来。
-  - 测试：新增 17 项单元测试，覆盖崩溃/503/超池/过期日志行/成功消解/时间戳两种格式/池容量与超池解析/回扫判定，其中一项直接回扫本机真实 `engine.log`（含那唯一一条 `worker crash`）验证判定与日志事实一致。
-- **ninfer 默认输出被截断在 1024 token（输出上限不可配置）**：托管启动参数里 `--default-max-tokens` 被硬编码为 1024，而应用自带对话的「最大输出 Token」默认为 0（请求体不带 `max_tokens`），于是默认路径下所有回复最长 1024 token 就被切断，且界面上没有任何地方能改。
-  - 配置新增 `ninfer.default_max_tokens`（serde default 平滑迁移），默认 **65,536**（仍远小于上下文窗口 81,920，不与 ctx 抢空间）；`NinferStartOptions::build_args` 改为按配置下发，取值 0 表示不传该参数、交回引擎自身默认。
-  - ninfer DLC 面板「引擎配置」新增「默认输出上限（0 = 引擎自定）」输入项，保存时校验为非负整数且不超过上下文窗口；改动在下次启动引擎时生效。
-  - 同源桥合成 `/props` 的 `default_generation_settings.n_predict` 不再写死 `-1`（「无限」，与引擎真实默认互相矛盾），改为如实上报该配置值；官方网页界面里的「最大输出」初值随之正确。桥的 `ensure()` 签名相应增加该参数，配置变化时会重建桥。
-- **DLC 全链路缺陷复查（后端约 5,700 行 + 前端全部改动逐文件过查）**，修复以下问题：
-  - **一键启动在引擎已报错后仍干等**：后端健康检查超时（ninfer 120 秒 / BeeLlama 180 秒）或引擎进程退出时，前端等待循环只听 `ready` 事件、只按自己的 150/200 秒计时器兜底，后端早已报错还要再等约 30 秒。现在 `ninfer:error` / `ninfer:stopped`（及 beellama 对应事件）会立即让「一键启动」失败并给出原因，等待期内的手动停止也即时生效。
-  - **网页桥重建时端口漂移**：修改 ninfer 引擎配置（默认输出上限 / API Key / 桥端口）会重建同源桥，此前旧桥监听 socket 尚未释放时新桥绑定同端口会失败、静默顺延到「配置端口 + 1」，每改一次漂一格。现在 `stop()` 会 join accept 线程（确认端口已释放）再重建，端口稳定为配置值。
+  - 测试：新增 19 项引擎管理单元测试（另有配置迁移 3 项），覆盖崩溃/503/超池/过期日志行/成功消解/时间戳两种格式（含多字节字符行不 panic）/池容量与超池解析/回扫判定/启动参数组装，其中一项直接回扫本机真实 `engine.log`（含那唯一一条 `worker crash`）验证判定与日志事实一致。
+- **MCP 工具循环从未执行模型请求的工具调用**：模型首轮返回 `tool_calls` 后，工具循环从空数组起步、第一次检查即退出——模型请求了工具，应用却既不调用 MCP 也不回填工具结果，回复停在半截。现在循环从首轮返回的工具调用开始执行；多模态消息清洗（`sanitizeMessagesForLlama`）同时保留 `tool_calls` / `tool_call_id` / `name` 协议字段，工具回填轮次不再被清洗丢字段（对主模型与 fast-27b 后端同样生效）。
+- **引擎日志行含多字节字符时，失效识别与日志流整体失明**：引擎失效识别里的时间戳解析按字节下标切片，日志行带中文（如模型路径含中文目录）时切片落在字符中间，日志读线程直接 panic——此后再无日志行入队，失效识别、告警与退出检测全部失效。改用安全切片（`str::get`），并补了中文日志行的回归测试。
+- **「应用重启后保留引擎已打死事实」实际不生效**：`start_fast27b` 里先回扫历史日志、随后立即清空，回扫结果永远被自身覆盖，「跨应用重启保留失效」从未真正显示过。现在回扫改在应用启动时执行一次（lib.rs setup），拉起新实例 / 手动停止引擎时才清空，新实例的 `engine ready` 行作最终归零确认。
+- **fast-27b 与同源桥链路复查**，修复以下问题：
+  - **一键启动在引擎已报错后仍干等**：后端健康检查超时（120 秒）或引擎进程退出时，前端此前只听 `ready` 事件、按自己的计时器兜底；现在 `fast27b:error` / `fast27b:stopped` 事件会立即让「启动引擎」结束等待并给出原因，等待期内的手动停止也即时生效。
+  - **网页桥重建时端口漂移**：修改引擎配置（默认输出上限 / API Key / 桥端口）会重建同源桥，此前旧桥监听 socket 尚未释放时新桥绑定同端口会失败、静默顺延到「配置端口 + 1」，每改一次漂一格。现在 `stop()` 会 join accept 线程（确认端口已释放）再重建，端口稳定为配置值。
   - **网页桥连接健壮性**：进来的连接补 30 秒读超时，浏览器预连接/半开连接不再可能永久占住处理线程（线程上限 32 被慢慢耗尽会拒新连接）；`/v1/stream` 断流续传从「每 50ms 整段复制已收字节」改为只拷贝未发送的增量，长回答下省掉持续的全量内存复制。
-  - **引擎状态轮询不再拖慢启停**：状态汇总里的 `/v1/models` 探活（阻塞最长 2 秒）原先持有引擎子进程锁，轮询期间点「停止引擎 / 启动引擎」最多要多等 2 秒；探活已移到锁外（ninfer / beellama 同步修正）。
-  - **文案与清理**：BeeLlama 面板「打开 WebUI」提示仍写着已删除的「内嵌中文界面」，更正为官方网页界面入口；删除两个引擎管理器里从未接入生产路径的日志锚点解析函数与配置字段、测试文件的冗余 trait 导入，消除全部新增编译警告。
+  - **引擎状态轮询不再拖慢启停**：状态汇总里的 `/v1/models` 探活（阻塞最长 2 秒）原先持有引擎子进程锁，轮询期间点「停止引擎 / 启动引擎」最多要多等 2 秒；探活已移到锁外。
+- **死代码清理**：移除本批遗留但无任何调用方的 `EngineCard` 组件、`openLocalPath` 封装与 `open_path` 命令（上一轮「DLC 指南」界面的残留，随 fast-27b 整合已被替代），以及 `fast27b_manager` 里未使用的 `is_engine_degraded`；本批新增代码零编译警告。
 
 ### 新增
 
-- **Agent 页「WebUI」标签改为「官方 llama.cpp 网页界面」入口**：不再内嵌应用自绘的聊天页面，改为给出官方 webui 的地址并用系统浏览器打开（官方界面提供对话、思考折叠、采样参数、模型信息与流式续传等完整能力，正确性以官方实现为准）。
-  - 主模型 / BeeLlama DLC 本身就是 llama.cpp 服务，地址直接是引擎端口（`http://127.0.0.1:<port>`），浏览器打开即用；服务开了 API Key 时面板提供「复制 API Key」（官方界面「设置」里粘贴一次）。
-  - **ninfer 由应用提供同源桥**（`services/webui_bridge.rs`）：ninfer 引擎没有任何 HTML 页面（`/`、`/props`、`/slots` 全 404），而官方 webui 只认同源相对路径（`./props`、`./v1/chat/completions`、`./v1/stream?conv_id=…`）、没有「服务器地址」设置项，于是由应用在回环上起一层薄转发——内嵌官方 webui 资产（`resources/llama-webui.bin`，gzip 原样回给浏览器，与 llama-server 自身行为一致）+ 转发 `/v1/*`（注入引擎密钥）+ 合成 `/props`、`/slots`、`/health`、`/tools` + 转发时补 `model`、把 `top_k` 收敛到引擎上限 20 + 仿真 llama-server 的流回放端点（`/v1/stream` 回放/续传/`DELETE` 取消、`/v1/streams/lookup`），因此官方界面断流能续传而不是弹「Stream connection lost」。
-  - 桥的生命周期跟随引擎：`ninfer_start` 时自动拉起、`ninfer_stop`/应用退出时回收；配置新增 `ninfer.bridge_port`（默认 8095，被占用自动顺延并在界面显示实际地址，可在 ninfer DLC 面板「引擎配置」修改）；命令面新增 `ninfer_bridge_ensure` / `ninfer_bridge_status` / `ninfer_bridge_stop`。
-  - 删除应用自带的中文界面 `app/public/llama-webui-zh/index.html`（自绘页面与官方实现各维护一份的成本高，ninfer 的页面适配已由同源桥取代）；`AgentWebUiPanel` 去掉 iframe 与 URL 注入，改为「网页连接 + 后端选择 + 打开网页」，后端选择为独立状态 `webuiEngine`（`main`/`ninfer`/`beellama`，会话级，与对话页的 `chatEngine` 互不影响）。
-  - ninfer DLC 面板的「打开 WebUI」恢复（切到 WebUI 标签并把该标签后端设为 ninfer）。
-- **ninfer / BeeLlama 可直接使用软件自带的对话界面**：不必再依赖 dsh Web —— 对话页头部新增「后端」选择器（主模型 / ninfer DLC / BeeLlama DLC），选中引擎后自带对话的请求整体切到对应引擎的 OpenAI 兼容 API（端口 / API Key / 模型名 / 上下文容量取自 DLC 配置，3 秒轮询引擎运行状态）：
-  - 引擎在跑即可对话（不要求主模型已加载）；未启动时输入区给出「到 Agent 页启动」提示；会话仍是全局桶，靠 `runtimeModelId`/`modelName` 快照区分来源，侧边栏模型卡切换为引擎展示（引擎可用/未启动状态点）
-  - 引擎后端暂不支持附件与 MCP 工具注入（保持链路简单可靠），添加附件时会明确提示切回主模型；思考预算：BeeLlama 走默认预算（`--jinja` 思考模板），ninfer 无 thinking（`--no-thinking`）
-  - DLC 面板各有一个「在自带对话中使用」（切到对话页并把该引擎设为对话后端）；「打开 WebUI」两个面板都有——BeeLlama 打开自己的官方页面，ninfer 打开应用提供的同源桥页面
-  - ninfer 托管启动参数固定附加 `--cors`（引擎默认不返 CORS 头、预检 404，自带对话从 Tauri webview 直连会被浏览器拦截；只影响响应头不改推理行为）；BeeLlama（llama.cpp）的 cors-origins 默认 * 无需增补
-  - 应用状态新增 `chatEngine`（`main`/`ninfer`/`beellama`）与 `webuiEngine`（`main`/`ninfer`/`beellama`），均为会话级不持久化，分别配 `SET_CHAT_ENGINE` / `SET_WEBUI_ENGINE`
-
-- **ninfer / BeeLlama 转为 DLC 形式，Agent 页改为按钮切换界面**：两个外部引擎插件不再占用模型工作区侧边栏的独立入口，统一并入 Agent 页顶部的按钮切换标签（「dsh 智能体」主框架 +「ninfer DLC」+「BeeLlama DLC」+「llama WebUI」），标签自带状态圆点（运行中 / 已就绪 / 资源缺失 / 已停用，4 秒轻量轮询）：
-  - **DLC 状态卡**：每个 DLC 面板顶部新增状态卡——启用/停用开关（专用 `ninfer_set_enabled` / `beellama_set_enabled` 命令只翻转开关，不会误覆盖路径/端口等其他配置）、引擎 / 模型 / 视觉投影器（可选）文件存在性检测（缺失时逐项标红并给出补齐提示）、可折叠的「获取与安装指南」（离线包获取 / 源码自编译配方 / 模型镜像下载 / SHA256 校验 / 接入步骤的浓缩版）
-  - **指南入口**：新增 [docs/guides/NINFER_DLC_GUIDE.md](docs/guides/NINFER_DLC_GUIDE.md) 与 [docs/guides/BEELLAMA_DLC_GUIDE.md](docs/guides/BEELLAMA_DLC_GUIDE.md) 两份完整指南（含硬件前提、离线包结构与校验、自编译工具链与 CMake 配方、hf-mirror 模型下载、常见坑速查）；DLC 卡片提供「打开完整指南」（新增 `open_path` 命令，用系统默认程序打开文档，失败自动降级为资源管理器打开所在目录）、「指南所在目录」「打开资源目录」三个按钮
-  - **停用守卫**：DLC 停用后「一键启动 / 仅启动引擎 / 接入 dsh」按钮锁定并给出提示（已运行的引擎不受影响，可手动停止）；配置 `config.json` 的 `ninfer` / `beellama` 段各新增 `enabled` 字段（serde default 平滑迁移，存量配置默认启用）
-  - 侧边栏「ninfer 引擎」「BeeLlama 插件」入口移除，`ViewType` 删除对应两个视图；Agent 页面板化重构（dsh 内容抽为 `DshAgentPanel`，ninfer / beellama 页原地保留并加装 DLC 卡）
+- **Agent 页改为标签切换 + 官方 WebUI 入口**：顶部「dsh 智能体 / WebUI」两个标签（`agentTab` 全局状态，fast-27b 面板的「打开 WebUI」可跨页跳转），标签自带状态圆点（运行中 / 已就绪 / 资源缺失，4 秒轻量轮询）；dsh 工作台内容抽为 `DshAgentPanel` 原地保留。
+  - **WebUI 标签是「官方 llama.cpp 网页界面」入口**：不再内嵌应用自绘的聊天页面（删除 `app/public/llama-webui-zh/`，`AgentWebUiPanel` 去掉 iframe 与 URL 注入），改为给出官方 webui 的地址并用系统浏览器打开——官方界面提供对话、思考折叠、采样参数、模型信息与流式续传等完整能力，正确性以官方实现为准。主模型本身就是 llama.cpp 服务，地址即引擎端口（服务开了 API Key 时面板提供「复制 API Key」，官方界面「设置」里粘贴一次）；后端选择 `webuiEngine`（`main` / `fast27b`，会话级不持久化）与对话页的 `chatEngine` 互不影响。
+  - **fast-27b 由应用提供同源桥**（`services/webui_bridge.rs`）：引擎没有任何 HTML 页面（`/`、`/props`、`/slots` 全 404），而官方 webui 只认同源相对路径（`./props`、`./v1/chat/completions`、`./v1/stream?conv_id=…`）、没有「服务器地址」设置项，于是由应用在回环上起一层薄转发——内嵌官方 webui 资产（`resources/llama-webui.bin`，gzip 原样回给浏览器，与 llama-server 自身行为一致；用 `scripts/pack-llama-webui.mjs` 从 llama-server 二进制抽取）+ 转发 `/v1/*`（注入引擎密钥）+ 合成 `/props`、`/slots`、`/health`、`/tools` + 抹平协议差异（补 `model` 字段、`top_k` 收敛到引擎上限 20）+ 仿真 llama-server 的流回放端点（`/v1/stream` 回放/续传/`DELETE` 取消、`/v1/streams/lookup`），官方界面断流能续传而不是弹「Stream connection lost」。
+  - 桥的生命周期跟随引擎：`fast27b_start` 时自动拉起、`fast27b_stop` / 应用退出时回收；配置 `fast27b.bridge_port`（默认 8095，被占用自动顺延并显示实际地址，可在 fast-27b 面板「高级配置」修改）；命令面新增 `fast27b_bridge_ensure` / `fast27b_bridge_status` / `fast27b_bridge_stop`。
+- **对话页「后端」选择器（主模型 / fast-27b）**：自带对话不必再依赖 dsh Web —— 对话页头部新增「后端」选择器，选中引擎后自带对话的请求整体切到引擎的 OpenAI 兼容 API（端口 / API Key / 模型名 / 上下文容量取自 fast-27b 配置，3 秒轮询引擎运行状态）：
+  - 引擎在跑即可对话（不要求主模型已加载）；未启动时输入区给出「到 fast-27b 页启动引擎」提示；会话仍是全局桶，靠 `runtimeModelId`/`modelName` 快照区分来源，侧边栏模型卡切换为引擎展示（引擎可用/未启动状态点）
+  - 引擎后端暂不支持附件（添加附件时会明确提示切回主模型）；已连接的 MCP 工具可参与调用（模型请求的工具会被执行并回填，见上方修复条目）；思考挡位按引擎固定表映射（思考→`minimal`、深思→`high`、关闭→`enable_thinking=false`）
+  - fast-27b 托管启动固定附加 `--cors`（引擎默认不返 CORS 头、预检 404，自带对话从 Tauri webview 直连会被浏览器拦截；只影响响应头不改推理行为）
+  - 应用状态新增 `chatEngine`（`main` / `fast27b`，会话级不持久化，配 `SET_CHAT_ENGINE`）
+- **API 状态页整合**：新增「Token 统计」区块（累计 / 输入 / 输出 Token 与请求次数，并单独区分对外 API 部分）；「对外 API」设置从软件设置页移入 API 状态页，监听范围、端口、API Key 与调用示例统一在一处管理。
 
 - **AMD / Intel 显卡适配 + Vulkan 推理支持**：此前 Vulkan 内核与 `Vulkan0` 设备虽能用，但厂商判定依赖显卡名称子串、核显会被整块丢掉、内核装错包时只报「加载失败」。现在补齐了这条链路：
   - **厂商识别改用 DXGI 的 PCI Vendor ID**（NVIDIA `0x10DE` / AMD `0x1002` / Intel `0x8086`），不再依赖显卡名称——OEM 定制名、中文描述、无品牌标识的核显都能正确归类；拿不到 VendorId 时才回退名称匹配。芯片映射为：NVIDIA → CUDA，AMD / Intel → Vulkan。
@@ -167,6 +164,8 @@
 
 ### 变更
 
+- **文档目录重组**：`docs/` 根目录散放的文档按用途拆为 `guides/`（指南与报告）、`plans/`（计划书）、`archive/`（历史归档）三类子目录，`docs/README.md` 索引与各文档互链同步更新；`SWIFT27B_TUNING.md` 的「与本应用集成」章节更新为 fast-27b 现状（旧 BeeLlama / ninfer DLC 已整合为 fast-27b 页，报告调优结论仍适用于 `scripts/start-swift27b-64k.bat` 独立脚本路径）
+- **对话侧边栏折叠态简化**：折叠后不再显示会话列表，只保留模型状态卡与新会话入口，避免窄栏下会话行挤压变形
 - **模型管理单列卡片改回单行紧凑布局**：原来的「两行布局」（第一行名称/类型/大小/量化，第二行标签/speed/按钮）改回单行——图标、名称、类型、大小、量化、能力标签、速度、最近使用与操作按钮全部排成一行，名字过长截断让位；能力标签只显示点亮的（视觉/音频/视频/思考/工具/MTP/DSpark/DFlash/UD量化），不再显示灰色「未检测到」占位；窄窗口下按屏宽隐藏速度/标签等次要项，核心信息恒可见。列数（单列/多列磁贴）默认不变，仍可手动切换
 - **对话侧边栏移除 Agent（智能体）快捷入口按钮**（Bot 图标）；智能体功能仍可从模型工作区导航进入
 - **使用详情计数格式化**：令牌数（总/输入/输出/每日/排行）改为 K/M/B 缩写显示（1.24M / 512K / 8K），超过 10 位再分别用 B；平均速度与耗时等指标维持原样

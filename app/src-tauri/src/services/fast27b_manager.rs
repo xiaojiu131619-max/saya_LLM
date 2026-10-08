@@ -437,20 +437,23 @@ fn fault_kind_code(kind: FaultKind) -> &'static str {
 
 /// 解析引擎日志时间戳（取 HH:MM:SS；引擎有两种格式：
 /// `2026-10-05 11:59:19.236` 与 `[2026-10-05 11:59:19.206]`）。
+/// 逐字节推进的窗口必须用 `get()` 切片：日志行可能带多字节 UTF-8（模型路径、
+/// banner 等），直接下标切片落在字符中间会让日志读线程 panic、之后再无日志与失效识别。
 fn parse_log_clock(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
     let mut index = 0usize;
     while index + 8 <= bytes.len() {
-        let window = &line[index..index + 8];
-        let shaped = window.as_bytes().iter().enumerate().all(|(offset, byte)| {
-            if offset == 2 || offset == 5 {
-                *byte == b':'
-            } else {
-                byte.is_ascii_digit()
+        if let Some(window) = line.get(index..index + 8) {
+            let shaped = window.as_bytes().iter().enumerate().all(|(offset, byte)| {
+                if offset == 2 || offset == 5 {
+                    *byte == b':'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+            if shaped {
+                return Some(window.to_string());
             }
-        });
-        if shaped {
-            return Some(window.to_string());
         }
         index += 1;
     }
@@ -653,14 +656,6 @@ pub fn device_pool_capacity() -> Option<PagedKvCapacity> {
     FAST27B_CAPACITY.lock().ok().and_then(|guard| *guard)
 }
 
-/// 引擎失效状态是否成立。
-pub fn is_engine_degraded() -> bool {
-    FAST27B_FAULT
-        .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false)
-}
-
 /// 清空失效状态（启动新实例 / 停止引擎时调用；必须在代数自增前调用，
 /// 让仍在抽日志的旧监视线程因代数不匹配而无法把过期故障写回来）。
 fn reset_engine_fault() {
@@ -762,7 +757,9 @@ fn note_engine_log_line(line: &str, generation: u32) {
 
 /// 回扫日志文件尾部：若历史日志「最后一台实例」死在 worker 崩溃上，且此后没有新的
 /// `engine ready`，则保留该事实，避免应用重启后误报「运行中」。
-fn seed_fault_from_log_file() {
+/// 在应用启动时（lib.rs setup）调用一次；start_fast27b 拉起新实例前会用
+/// reset_engine_fault 清空，新实例的 `engine ready` 行是最终归零确认。
+pub fn seed_fault_from_log_file() {
     let Some(path) = log_file_path() else {
         return;
     };
@@ -888,9 +885,9 @@ pub fn start_fast27b(
     }
     validate_options(options)?;
 
-    // 先回扫历史日志：应用重启后若「最后一台实例」死在 worker 崩溃上，仍要显示失效态。
-    seed_fault_from_log_file();
-    // 随后清空：本次启动的日志会按代数过滤写入，不再受旧日志影响。
+    // 本次要拉起新实例：清空失效状态（含应用启动时回扫到的历史事实）与容量读数。
+    // 代数稍后在 spawn 后自增，清空必须在其之前，让旧监视线程的过期故障写不回来；
+    // 新实例的 `engine ready` 行会把状态机再次归零，作为最终确认。
     reset_engine_fault();
     if let Ok(mut guard) = FAST27B_CAPACITY.lock() {
         *guard = None;
@@ -1457,6 +1454,15 @@ mod tests {
         assert_eq!(parse_log_clock(CRASH_LINE).as_deref(), Some("11:59:19"));
         assert_eq!(parse_log_clock(OVER_POOL_LINE).as_deref(), Some("11:59:19"));
         assert_eq!(parse_log_clock("no timestamp here"), None);
+    }
+
+    /// 日志行带多字节 UTF-8（中文路径、中文说明）时不得 panic，且仍能解析出时间戳。
+    /// 逐字节窗口若用下标切片，起点落在字符中间会直接 panic、日志读线程整个死掉。
+    #[test]
+    fn parse_log_clock_handles_multibyte_lines() {
+        let line = "加载模型 D:\\模型\\bonsai2.ninfer 11:59:19.235 done";
+        assert_eq!(parse_log_clock(line).as_deref(), Some("11:59:19"));
+        assert_eq!(parse_log_clock("引擎日志：模型加载完成，等待请求"), None);
     }
 
     /// 应用重启后的回扫：日志尾部只见崩溃、之后没有 `engine ready` ⇒ 仍判失效。

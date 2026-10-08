@@ -90,15 +90,10 @@ D:\LLM\beellama\bin\llama-server.exe ^
 
 ## 六、与本应用(Agent LLM)集成
 
-**应用内 DLC(推荐)**:Agent 页顶部按钮切换 →「BeeLlama DLC」,托管模式与 ninfer DLC 一致:
-获取与安装完整指南见 [BEELLAMA_DLC_GUIDE.md](./BEELLAMA_DLC_GUIDE.md)。
+> 2026-10-09 注:应用内的 BeeLlama / ninfer DLC 已整合为模型工作区侧边栏的「fast-27b」页
+> (ninfer 运行时:`ninfer-serve-86.exe` + `.ninfer` 权重 + k8v4 分页 KV,Swift 容器带 MTP 草稿头),
+> 与本报告的 BeeLlama/llama.cpp 路径是**两套运行时**。本节描述的旧 DLC 界面已移除,
+> 调优结论仍适用于下方的独立脚本路径。
 
-- 一键启动:启动引擎 → 探活就绪 → 接入 dsh(未绑定时)→ 拉起 dsh → 打开界面
-- 配置可编辑:引擎/模型/视觉投影器路径、端口(默认 8090)、上下文(默认 65536)、
-  API Key(空 = 不鉴权)、视觉投影器放置(CPU/GPU)、局域网开放
-- 固定预设:kvarn4 KV(+ 1024 尾巴)、`-ngl 99 -b 512 -ub 256 -fa on --jinja`、
-  采样 temp 1.0 / top-p 0.95 / top-k 20(模型卡推荐)
-- **刻意不暴露 MTP 开关**:draft-mtp 路径对 Qwen3.8 拖慢约 5 倍(见第三节)
-- API 模型名固定为 `swift-1.5-qwen3.8-27b`(`--alias`),供 OpenAI 兼容调用与 dsh 绑定
-
-脚本方式(备选):`scripts/start-swift27b-64k.bat` / `scripts/stop-swift27b.bat`。
+脚本方式(备选):`scripts/start-swift27b-64k.bat` / `scripts/stop-swift27b.bat`
+(注意:停止脚本会结束本机全部 `llama-server.exe`,包括应用主模型的进程)。

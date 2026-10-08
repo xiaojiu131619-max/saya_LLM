@@ -74,7 +74,6 @@ pub fn run() {
             commands::system::read_file_content,
             commands::system::read_media_file,
             commands::system::reveal_path,
-            commands::system::open_path,
             commands::system::open_external_url,
             commands::system::check_video_runtime,
             commands::system::get_system_appearance,
@@ -165,6 +164,10 @@ pub fn run() {
                     commands::config::migrate_plaintext_api_key(&state, plaintext_key);
                 });
             }
+
+            // 回扫 fast-27b 的 engine.log 尾部：应用重启后若上一台引擎实例死在 worker 崩溃上
+            // 且其后没有新的 engine ready，仍要在状态面板显示失效（拉起新实例时才清空）。
+            services::fast27b_manager::seed_fault_from_log_file();
 
             // 系统托盘：关窗后常驻后台，左键单击恢复窗口，右键菜单提供"显示/退出"。
             let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
