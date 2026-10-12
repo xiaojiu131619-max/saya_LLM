@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -504,7 +505,10 @@ fn push_unique_dir(dirs: &mut Vec<PathBuf>, path: PathBuf) {
     dirs.push(path);
 }
 
-fn media_search_dirs(server_exe: &Path) -> Vec<PathBuf> {
+/// 收集媒体二进制的搜索目录。`path_var` 是 PATH 环境变量的来源：
+/// 生产传 `std::env::var_os("PATH")`，测试传 `None` 以获得与环境无关的结果
+/// （否则宿主机装了 ffmpeg 就会让「本地目录缺 ffmpeg」的断言失效）。
+fn media_search_dirs(server_exe: &Path, path_var: Option<&OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(parent) = server_exe.parent() {
         push_unique_dir(&mut dirs, parent.to_path_buf());
@@ -522,25 +526,34 @@ fn media_search_dirs(server_exe: &Path) -> Vec<PathBuf> {
         }
     }
 
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
+    if let Some(path) = path_var {
+        for dir in std::env::split_paths(path) {
             push_unique_dir(&mut dirs, dir);
         }
     }
     dirs
 }
 
-fn find_media_binary(server_exe: &Path, stem: &str) -> Option<PathBuf> {
+fn find_media_binary(server_exe: &Path, stem: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
     let file_name = media_binary_file_name(stem);
-    media_search_dirs(server_exe)
+    media_search_dirs(server_exe, path_var)
         .into_iter()
         .map(|dir| dir.join(&file_name))
         .find(|candidate| candidate.is_file())
 }
 
+/// 生产入口：PATH 来源取真实环境变量。
 fn video_runtime_info_for_exe(server_exe: &Path) -> VideoRuntimeInfo {
-    let ffmpeg = find_media_binary(server_exe, "ffmpeg");
-    let ffprobe = find_media_binary(server_exe, "ffprobe");
+    video_runtime_info_for_exe_with_path(server_exe, std::env::var_os("PATH").as_deref())
+}
+
+/// 与 [`video_runtime_info_for_exe`] 相同，但显式注入 PATH 来源，便于测试隔离环境。
+fn video_runtime_info_for_exe_with_path(
+    server_exe: &Path,
+    path_var: Option<&OsStr>,
+) -> VideoRuntimeInfo {
+    let ffmpeg = find_media_binary(server_exe, "ffmpeg", path_var);
+    let ffprobe = find_media_binary(server_exe, "ffprobe", path_var);
     VideoRuntimeInfo {
         ffmpeg_available: ffmpeg.is_some(),
         ffprobe_available: ffprobe.is_some(),
@@ -3539,6 +3552,9 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // 断言「runtime 目录里没有 ffmpeg/ffprobe 时不可用」。
+    // 必须传 path_var = None 屏蔽宿主机 PATH：原实现直接读环境变量，
+    // 于是开发机或 CI runner 上装了 ffmpeg 就会让第一个断言失效（测试依赖机器环境）。
     #[test]
     fn native_video_runtime_requires_ffmpeg_and_ffprobe() {
         let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
@@ -3551,23 +3567,60 @@ mod tests {
         let exe = dir.join(media_binary_file_name("llama-server"));
         std::fs::write(&exe, b"server").expect("write server");
 
-        let missing = video_runtime_info_for_exe(&exe);
+        let missing = video_runtime_info_for_exe_with_path(&exe, None);
         assert!(!missing.native_video_ready);
 
         std::fs::write(dir.join(media_binary_file_name("ffmpeg")), b"ffmpeg")
             .expect("write ffmpeg");
-        let partial = video_runtime_info_for_exe(&exe);
+        let partial = video_runtime_info_for_exe_with_path(&exe, None);
         assert!(partial.ffmpeg_available);
         assert!(!partial.ffprobe_available);
         assert!(!partial.native_video_ready);
 
         std::fs::write(dir.join(media_binary_file_name("ffprobe")), b"ffprobe")
             .expect("write ffprobe");
-        let ready = video_runtime_info_for_exe(&exe);
+        let ready = video_runtime_info_for_exe_with_path(&exe, None);
         assert!(ready.ffmpeg_available);
         assert!(ready.ffprobe_available);
         assert!(ready.native_video_ready);
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    // PATH 回退：runtime 目录干净，但 PATH 目录里有 ffmpeg/ffprobe → 仍应判定可用，
+    // 且解析出的路径指向 PATH 目录（验证回退顺序确实落到 PATH）。
+    #[test]
+    fn video_runtime_falls_back_to_path_dirs() {
+        let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "agent-llm-video-path-{}-{}",
+            std::process::id(),
+            id
+        ));
+        let runtime_dir = base.join("runtime");
+        let path_dir = base.join("path");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::create_dir_all(&path_dir).expect("create path dir");
+        let exe = runtime_dir.join(media_binary_file_name("llama-server"));
+        std::fs::write(&exe, b"server").expect("write server");
+
+        // 两边都没有 → 不可用。
+        assert!(!video_runtime_info_for_exe_with_path(&exe, Some(path_dir.as_os_str())).native_video_ready);
+
+        std::fs::write(path_dir.join(media_binary_file_name("ffmpeg")), b"ffmpeg")
+            .expect("write ffmpeg");
+        std::fs::write(path_dir.join(media_binary_file_name("ffprobe")), b"ffprobe")
+            .expect("write ffprobe");
+
+        let info = video_runtime_info_for_exe_with_path(&exe, Some(path_dir.as_os_str()));
+        assert!(info.ffmpeg_available);
+        assert!(info.ffprobe_available);
+        assert!(info.native_video_ready);
+        assert_eq!(
+            info.ffmpeg_path.as_deref(),
+            path_dir.join(media_binary_file_name("ffmpeg")).to_str()
+        );
+
+        std::fs::remove_dir_all(base).ok();
     }
 }

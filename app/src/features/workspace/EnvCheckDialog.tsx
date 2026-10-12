@@ -103,8 +103,14 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
   }, []);
 
   // 手动打开时重新执行一次检测，保证结果反映当前状态。
+  // runCheck 开头会同步执行 setPhase('checking')，直接在 effect 体内调用属于
+  // 「effect 内同步 setState」（会触发级联渲染）；延后一个宏任务再启动即可。
   useEffect(() => {
-    if (manualOpen) void runCheck();
+    if (!manualOpen) return;
+    const timer = window.setTimeout(() => {
+      void runCheck();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [manualOpen, runCheck]);
 
   const close = useCallback(() => {

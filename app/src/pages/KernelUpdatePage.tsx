@@ -250,12 +250,6 @@ export default function KernelUpdatePage() {
     }
   };
 
-  const refreshOverride = async () => {
-    const saved = await getKernelOverridePath();
-    setOverridePath(saved);
-    setOverrideInput(saved ?? '');
-  };
-
   const handleBrowseOverride = async () => {
     const picked = await pickKernelExe();
     if (picked) setOverrideInput(picked);
@@ -315,8 +309,14 @@ export default function KernelUpdatePage() {
   }, []);
 
   // 已保存的自编译核心路径一次到位（非桌面运行时返回 null，同样落到空输入框）。
+  // 内联 async IIFE（与上方加载安装内核的 effect 同风格）：setState 都在 await 之后，
+  // 不构成 effect 内的同步 setState。
   useEffect(() => {
-    void refreshOverride();
+    void (async () => {
+      const saved = await getKernelOverridePath();
+      setOverridePath(saved);
+      setOverrideInput(saved ?? '');
+    })();
   }, []);
 
   const versionBadge = (() => {

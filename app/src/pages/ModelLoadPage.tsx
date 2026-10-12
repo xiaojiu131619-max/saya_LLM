@@ -163,6 +163,11 @@ export default function ModelLoadPage() {
     refreshRunRecords();
   }, [refreshRunRecords]);
 
+  // 头像库：点击头像弹出内置 logo 库选择，不再支持上传图片。
+  // 必须声明在下面 `if (!model)` 提前返回之前：Hook 调用顺序不能依赖条件，
+  // 否则 model 从「无」变「有」时 Hook 数量变化，React 会直接抛错。
+  const [logoLibraryOpen, setLogoLibraryOpen] = useState(false);
+
   if (!model) {
     return (
       <div className="flex h-full flex-1 items-center justify-center bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
@@ -171,8 +176,6 @@ export default function ModelLoadPage() {
     );
   }
 
-  // 头像库：点击头像弹出内置 logo 库选择，不再支持上传图片。
-  const [logoLibraryOpen, setLogoLibraryOpen] = useState(false);
   const handleChangeLogo = () => {
     setLogoLibraryOpen(true);
   };
@@ -939,9 +942,13 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
   const [logCollapsed, setLogCollapsed] = useState(false);
 
   // 调参开始时自动展开卡片；日志区跟随滚动到底部。
-  useEffect(() => {
+  // 用「渲染期调整 state」替代原来 effect 内的同步 setState：行为不变，
+  // 但不会再触发级联渲染（原写法会被 react-hooks/set-state-in-effect 拦下）。
+  const [wasRunning, setWasRunning] = useState(running);
+  if (running !== wasRunning) {
+    setWasRunning(running);
     if (running) setExpanded(true);
-  }, [running]);
+  }
   useEffect(() => {
     if (!logCollapsed && logViewportRef.current) {
       logViewportRef.current.scrollTop = logViewportRef.current.scrollHeight;

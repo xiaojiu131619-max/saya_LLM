@@ -1125,7 +1125,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dispatch]);
 
   useEffect(() => {
     if (!isDesktopRuntime() || !state.serverRunning || !state.activeModelId) return;
@@ -1161,6 +1161,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.chatSessions,
     state.models,
     state.serverRunning,
+    dispatch,
   ]);
 
   useEffect(() => {
@@ -1202,7 +1203,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [state.activeModelId]);
+  }, [state.activeModelId, dispatch]);
 
   // 轮询 llama-server 日志累计的 token 用量（含对外 API / dsh 等非前端聊天请求）。
   // key = `api-<model_name>`；为避免把已在前端聊天统计里计入的 token 重复累加，

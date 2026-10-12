@@ -39,6 +39,15 @@
   - **Markdown 渲染**：正文与段落 / 列表 / 引用统一为 16px / 1.78（原 `leading-8` = 2.0 偏松）；标题改为 20 / 17 / 16 / 15 / 14px 五档并加负字距（本机 Win10 无 Segoe UI Variable，层级靠字号与字距而非可变字重）；**行内代码底色由 `--state-danger-bg`（粉色，错误语义用色）改为 `--surface-muted`**；`<hr>` 由写死的 `border-white/10`（浅色主题下不可见）改为 `--border`；代码块与表格行高收紧，表格数字改等宽对齐。
   - **API 状态页**：按原型结构重排为「状态面板 + 当前请求槽位 + 连接信息 + 使用统计 + 实时运行 + 接口可用模型 + 折叠高级设置」。请求槽位用真实数据：分母取模型加载配置的 `parallel`（默认 1），分子从全局会话的 `isStreaming` 派生；外部 API 请求不经过前端，界面上明确标注「仅统计软件内对话」；后端为 fast-27b 引擎时拿不到在途请求数，该面板降级为「引擎运行中」而不谎报槽位。原「对外 API 设置」区块折叠进「高级设置」，鉴权卡的「管理 API Key」按钮可直接展开该区块。
 
+### 修复
+
+- **CI 转绿（前端 eslint 4 个 error + Rust 环境依赖测试）**：
+  - `ModelLoadPage`：`useState` 原本写在 `if (!model)` 提前返回**之后**，Hook 调用顺序会随 `model` 有无而变化——模型从「无」切到「有」时 React 会直接抛错。把声明提到提前返回之前。
+  - 消除 3 处 `react-hooks/set-state-in-effect`（eslint-plugin-react-hooks v7 新增规则，随 `configs.flat.recommended` 引入，插件升级后让既有写法突然变成 error）：`ModelLoadPage` 的「调参开始自动展开卡片」改用渲染期调整 state；`KernelUpdatePage` 的覆盖路径读取改为内联 async IIFE（setState 落在 `await` 之后）；`EnvCheckDialog` 的手动检测启动延后一个宏任务。三处行为均不变。
+  - `AppContext`：3 处 `useEffect` 补 `dispatch` 依赖（`useCallback(…, [])` 包装，引用稳定，运行期无操作），消除 `exhaustive-deps` 告警。
+  - `process_manager`：`native_video_runtime_requires_ffmpeg_and_ffprobe` 的断言依赖宿主机 PATH——`media_search_dirs` 含 PATH 回退，于是「本地目录缺 ffmpeg 就该不可用」在装了 ffmpeg 的开发机和自带 ffmpeg 的 windows runner 上必然失败。新增 `video_runtime_info_for_exe_with_path` 注入 PATH 来源：生产入口读真实环境变量、行为不变，测试传 `None` 获得与环境无关的确定结果；并补一条显式验证 PATH 回退顺序的测试。
+- **CI 运行时升级**：`actions/checkout`、`actions/setup-node`、`actions/cache` 由 v4 升到 v5（Node 24 运行时），消除 Node 20 弃用告警。
+
 ---
 
 ## [0.4.0] - 2026-10-09
