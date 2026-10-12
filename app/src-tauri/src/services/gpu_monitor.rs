@@ -394,6 +394,83 @@ pub fn detect_display_vendors() -> Vec<(GpuVendor, String)> {
     Vec::new()
 }
 
+/// AMD 显卡对 HIP/ROCm 内核的支持级别（llama.cpp 的 ROCm 包在 Windows 上可用，
+/// 但只覆盖 RDNA2/3/CDNA 的一部分卡；Vega、RX 5000 及更早、全部核显不在覆盖内）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HipSupport {
+    /// 官方支持列表内：RX 6000/7000/9000 系独显、Radeon Pro W6000/W7000 系、Instinct。
+    Supported,
+    /// 未在官方列表，但同为 RDNA 独显（如 RX 6500/6400），HIP 内核可能可用，以实测为准。
+    Unverified,
+    /// 核显（Radeon 6xxM-8xxM / Radeon(TM) Graphics）与 RX 5000 及更早：不可用。
+    Unsupported,
+}
+
+impl HipSupport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HipSupport::Supported => "supported",
+            HipSupport::Unverified => "unverified",
+            HipSupport::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// 按显卡名称判定 HIP/ROCm 支持级别。名称来自 DXGI 适配器描述，
+/// 按 lowercase 子串匹配；识别不出的 AMD 独显按「未验证」处理（核显特征优先判不支持）。
+pub fn amd_hip_support(name: &str) -> HipSupport {
+    let lower = name.to_ascii_lowercase();
+
+    // 核显特征：Radeon(TM) Graphics、Radeon 6xxM/7xxM/8xxM（APU 的 DXGI 描述形态）。
+    const IGPU_MARKERS: [&str; 5] = [
+        "radeon(tm)",
+        "radeon (tm)",
+        "radeon graphics",
+        "610m",
+        "radeon 6",
+    ];
+    if IGPU_MARKERS.iter().any(|m| lower.contains(m))
+        || ["radeon 7", "radeon 8"].iter().any(|prefix| {
+            lower.find(prefix).is_some_and(|pos| {
+                let rest = &lower[pos + prefix.len()..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                !digits.is_empty() && rest[digits.len()..].starts_with('m')
+            })
+        })
+    {
+        return HipSupport::Unsupported;
+    }
+    // 官方支持：RX 6000/7000/9000 系、Radeon Pro W6000/W7000 系、Instinct、Radeon AI。
+    if ["rx 6", "rx 7", "rx 9", "radeon pro w6", "radeon pro w7", "radeon pro w8", "instinct", "radeon ai"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return HipSupport::Supported;
+    }
+    // 老架构：RX 5000 及更早（HD / R5 / R7 / R9 / RX 4xx/5xx / Vega）。
+    if lower.contains("rx 5")
+        || lower.contains("vega")
+        || lower.contains(" hd ")
+        || [" r5", " r7", " r9", "rx 4"].iter().any(|m| lower.contains(m))
+    {
+        return HipSupport::Unsupported;
+    }
+    // 其余 AMD 独显（未列入官方列表的 RDNA 卡等）：未验证。
+    HipSupport::Unverified
+}
+
+/// 本机 AMD 独显的 HIP/ROCm 支持情况：返回 (显卡名, 支持级别)。
+/// 没有 AMD 适配器时返回 None（NVIDIA / 纯 Intel 机器不需要 HIP）。
+pub fn detect_hip_capability() -> Option<(String, HipSupport)> {
+    detect_display_vendors()
+        .into_iter()
+        .find(|(vendor, _)| *vendor == GpuVendor::Amd)
+        .map(|(_, name)| {
+            let support = amd_hip_support(&name);
+            (name, support)
+        })
+}
+
 #[cfg(windows)]
 impl WindowsGpuMonitor {
     fn new() -> Result<Self> {
@@ -661,6 +738,23 @@ fn formatted_counter_items(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn amd_hip_support_classifies_by_name() {
+        use super::{amd_hip_support, HipSupport};
+        // 官方支持：RX 6000/7000/9000、Pro W 系列、Instinct。
+        assert_eq!(amd_hip_support("AMD Radeon RX 7900 XTX"), HipSupport::Supported);
+        assert_eq!(amd_hip_support("AMD Radeon RX 6800 XT"), HipSupport::Supported);
+        assert_eq!(amd_hip_support("AMD Radeon PRO W7800"), HipSupport::Supported);
+        assert_eq!(amd_hip_support("AMD Instinct MI300X"), HipSupport::Supported);
+        assert_eq!(amd_hip_support("AMD Radeon AI PRO R9700"), HipSupport::Supported);
+        // 核显与老架构：不支持。
+        assert_eq!(amd_hip_support("AMD Radeon(TM) Graphics"), HipSupport::Unsupported);
+        assert_eq!(amd_hip_support("AMD Radeon 780M"), HipSupport::Unsupported);
+        assert_eq!(amd_hip_support("AMD Radeon RX 5700 XT"), HipSupport::Unsupported);
+        assert_eq!(amd_hip_support("AMD Radeon R9 390"), HipSupport::Unsupported);
+        assert_eq!(amd_hip_support("AMD Radeon RX VEGA 64"), HipSupport::Unsupported);
+    }
+
     #[cfg(windows)]
     #[test]
     fn luid_key_matches_pdh_instance_name() {

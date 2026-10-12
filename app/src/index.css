@@ -399,6 +399,13 @@
     .model-load-summary-pills { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   }
 
+  /* 窄容器（<760px）：控件行按内容宽度排列并允许换行，
+     否则 view-controls 的 minmax(0,1fr) 会把排序按钮拉伸出大段空隙。 */
+  @container (max-width: 759px) {
+    .model-toolbar-controls { display: flex; flex-wrap: wrap; }
+    .model-toolbar-view-controls { display: flex; flex-wrap: wrap; }
+  }
+
   .model-dotted-surface { background: var(--app-bg); }
 
   .model-glass-card {

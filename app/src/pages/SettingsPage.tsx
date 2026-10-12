@@ -281,7 +281,7 @@ export default function SettingsPage() {
                 <span className="text-xl font-bold text-white">L</span>
               </div>
               <h3 className="text-base font-semibold text-primary-custom mb-1">Agent LLM</h3>
-              <p className="text-xs text-secondary-custom mb-3">v0.1.0 · 本地大模型管理启动器</p>
+              <p className="text-xs text-secondary-custom mb-3">v{__APP_VERSION__} · 本地大模型管理启动器</p>
               <div className="flex items-center justify-center gap-4 text-xs text-secondary-custom">
                 <span>React 19</span>
                 <span>·</span>

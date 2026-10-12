@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import {
   connectMcpServer,
   deleteMcpServer,
@@ -83,6 +84,8 @@ export default function McpServersSection() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // 待确认删除的服务器（ConfirmDialog 打开时非空）。
+  const [pendingDelete, setPendingDelete] = useState<McpServerEntry | null>(null);
 
   const servers = state.mcpServers;
 
@@ -155,8 +158,14 @@ export default function McpServersSection() {
     }
   };
 
-  const handleDelete = async (server: McpServerEntry) => {
-    if (!window.confirm(`确定删除 MCP 服务器「${server.name}」吗？正在运行的连接会一并断开。`)) return;
+  const handleDelete = (server: McpServerEntry) => {
+    // 删除确认走应用内 ConfirmDialog（与数据管理页同范式），不再用阻塞式原生弹窗。
+    setPendingDelete(server);
+  };
+
+  const confirmDelete = async () => {
+    const server = pendingDelete;
+    if (!server) return;
     setError(null);
     try {
       const next = await deleteMcpServer(server.id);
@@ -165,6 +174,8 @@ export default function McpServersSection() {
       if (draft?.id === server.id) setDraft(null);
     } catch (error) {
       setError(`删除失败：${String(error)}`);
+    } finally {
+      setPendingDelete(null);
     }
   };
 
@@ -422,6 +433,16 @@ export default function McpServersSection() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="删除 MCP 服务器"
+        description={`确定删除「${pendingDelete?.name ?? ''}」吗？正在运行的连接会一并断开。`}
+        confirmLabel="删除"
+        tone="danger"
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </section>
   );
 }

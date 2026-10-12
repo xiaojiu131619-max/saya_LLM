@@ -397,7 +397,7 @@ interface CapabilityDef {
 const CAPABILITY_DEFS: CapabilityDef[] = [
   { key: 'vision',    label: '视觉', icon: Eye,      active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },
   { key: 'audio',     label: '音频', icon: Mic,      active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },
-  { key: 'video',     label: '视频', icon: Film,     active: 'bg-[var(--state-warning-bg)]', activeText: 'text-[var(--state-warning)]', activeBorder: 'border-[var(--state-danger-border)]' },
+  { key: 'video',     label: '视频', icon: Film,     active: 'bg-[var(--state-warning-bg)]', activeText: 'text-[var(--state-warning)]', activeBorder: 'border-[var(--state-warning-border)]' },
   { key: 'thinking',  label: '思考', icon: Brain,    active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--accent-subtle)]' },
   { key: 'tools',     label: '工具', icon: Wrench,   active: 'bg-[var(--state-success-bg)]', activeText: 'text-[var(--state-success)]', activeBorder: 'border-[var(--state-success-border)]' },
   { key: 'mtp',       label: 'MTP',  icon: Sparkles, active: 'bg-[var(--accent-subtle)]', activeText: 'text-[var(--accent)]', activeBorder: 'border-[var(--border)]' },

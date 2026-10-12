@@ -286,12 +286,39 @@ function InlineMarkdown({ content }: { content: string }) {
     }
   };
 
-  lines.forEach((line, idx) => {
+  // 用下标循环而不是 forEach：表格分支一次要吞掉表头 + 分隔行 + 若干数据行。
+  let idx = 0;
+  while (idx < lines.length) {
+    const line = lines[idx];
     const trimmed = line.trim();
 
     if (!trimmed) {
       flushList();
-      return;
+      idx += 1;
+      continue;
+    }
+
+    // GFM 表格：当前行以 | 开头，且下一行是形如 | --- | :---: | 的分隔行。
+    if (trimmed.startsWith('|') && idx + 1 < lines.length && isTableSeparatorRow(lines[idx + 1])) {
+      flushList();
+      const headerCells = splitTableRow(trimmed);
+      const alignCells = splitTableRow(lines[idx + 1]);
+      const aligns = headerCells.map((_, i) => alignOf(alignCells[i] ?? ''));
+      const rows: string[][] = [];
+      idx += 2;
+      while (idx < lines.length && lines[idx].trim().startsWith('|')) {
+        rows.push(splitTableRow(lines[idx]));
+        idx += 1;
+      }
+      elements.push(
+        <MarkdownTable
+          key={`table-${elements.length}`}
+          header={headerCells}
+          aligns={aligns}
+          rows={rows}
+        />
+      );
+      continue;
     }
 
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
@@ -302,7 +329,8 @@ function InlineMarkdown({ content }: { content: string }) {
       const sizeClass = sizes[level] || 'text-sm';
       const HeadingTag = `h${Math.min(level, 6)}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
       elements.push(<HeadingTag key={idx} className={`${sizeClass} font-semibold mt-4 mb-2 text-primary-custom`}>{renderInline(headingMatch[2])}</HeadingTag>);
-      return;
+      idx += 1;
+      continue;
     }
 
     const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
@@ -311,7 +339,8 @@ function InlineMarkdown({ content }: { content: string }) {
       inList = true;
       listType = 'ul';
       listItems.push(<li key={idx} className="break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(ulMatch[1])}</li>);
-      return;
+      idx += 1;
+      continue;
     }
 
     const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
@@ -320,7 +349,8 @@ function InlineMarkdown({ content }: { content: string }) {
       inList = true;
       listType = 'ol';
       listItems.push(<li key={idx} className="break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(olMatch[1])}</li>);
-      return;
+      idx += 1;
+      continue;
     }
 
     if (trimmed.startsWith('>')) {
@@ -330,22 +360,96 @@ function InlineMarkdown({ content }: { content: string }) {
           {renderInline(trimmed.slice(1).trim())}
         </blockquote>
       );
-      return;
+      idx += 1;
+      continue;
     }
 
     if (trimmed.match(/^---+$/)) {
       flushList();
       elements.push(<hr key={idx} className="my-4 border-white/10" />);
-      return;
+      idx += 1;
+      continue;
     }
 
     flushList();
     elements.push(<p key={idx} className="my-1.5 whitespace-pre-wrap break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(trimmed)}</p>);
-  });
+    idx += 1;
+  }
 
   flushList();
 
   return <>{elements}</>;
+}
+
+/** 分隔行（| --- | :---: |）判定：去掉首尾管道后每个格子都是 3 个以上的 -（允许对齐冒号）。 */
+function isTableSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('-')) return false;
+  const cells = splitTableRow(trimmed);
+  return cells.length > 0 && cells.every((cell) => /^[\s:]*-{3,}[\s:]*$/.test(cell));
+}
+
+/** 拆一行表格为单元格（去首尾管道后按 | 切分；单元格内的转义管道等边缘情况不作处理）。 */
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+function alignOf(separatorCell: string): 'left' | 'center' | 'right' {
+  const left = separatorCell.startsWith(':');
+  const right = separatorCell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return 'left';
+}
+
+function MarkdownTable({
+  header,
+  aligns,
+  rows,
+}: {
+  header: string[];
+  aligns: Array<'left' | 'center' | 'right'>;
+  rows: string[][];
+}) {
+  return (
+    <div className="my-3 max-w-full overflow-x-auto rounded-lg border border-[var(--border)] dark:border-white/[0.08]">
+      <table className="w-full border-collapse text-[15px] leading-7">
+        <thead>
+          <tr className="bg-[var(--surface-muted)] dark:bg-[var(--surface-hover)]">
+            {header.map((cell, i) => (
+              <th
+                key={i}
+                className="border-b border-[var(--border)] px-3 py-2 text-left font-semibold text-primary-custom dark:border-white/[0.08]"
+                style={{ textAlign: aligns[i] }}
+              >
+                {renderInline(cell)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, r) => (
+            <tr key={r} className="border-b border-[var(--border)] last:border-b-0 dark:border-white/[0.06]">
+              {header.map((_, i) => (
+                <td
+                  key={i}
+                  className="px-3 py-1.5 align-top text-primary-custom/90 [overflow-wrap:anywhere]"
+                  style={{ textAlign: aligns[i] }}
+                >
+                  {renderInline(row[i] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function renderInline(text: string): React.ReactNode {

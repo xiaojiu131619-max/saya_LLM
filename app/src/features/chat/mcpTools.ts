@@ -1,5 +1,6 @@
 import type { McpServerEntry, ToolActivity } from '@/types';
 import type { ChatCompletionMessage, ChatCompletionMetrics, ChatToolCall, ChatToolSpec } from '@/lib/desktop';
+import { partialMetricsFromError } from '@/lib/desktop';
 
 /** MCP 工具名格式：`mcp__<服务器名>__<工具名>`。 */
 const MCP_TOOL_PREFIX = 'mcp__';
@@ -253,13 +254,27 @@ export async function runChatToolLoop(options: {
     content = '';
     options.onContent('');
 
-    const next = await options.runRound(options.conversation, {
-      onToken: (token) => {
-        content += token;
-        options.onContent(content);
-      },
-      onReasoningDelta: options.onReasoningDelta,
-    });
+    let next: ChatCompletionMetrics;
+    try {
+      next = await options.runRound(options.conversation, {
+        onToken: (token) => {
+          content += token;
+          options.onContent(content);
+        },
+        onReasoningDelta: options.onReasoningDelta,
+      });
+    } catch (error) {
+      // 中途被终止：把前几轮已累计的 token 与本轮流式部分测量值合并挂回错误，
+      // 让终止统计「有什么写什么」（否则只统计到最后一轮的量）。
+      const partial = partialMetricsFromError(error);
+      (error as Error & { partialMetrics?: Partial<ChatCompletionMetrics> }).partialMetrics = {
+        completionTokens: completionTokens + Math.max(0, Math.round(Number(partial?.completionTokens) || 0)),
+        firstTokenDelay: Math.max(0, Number(partial?.firstTokenDelay) || 0),
+        tokensPerSec: Math.max(0, Number(partial?.tokensPerSec) || 0),
+        genTime: Math.max(0, Number(partial?.genTime) || 0),
+      };
+      throw error;
+    }
     promptTokens += next.promptTokens;
     completionTokens += next.completionTokens;
     lastToolCalls = next.toolCalls;

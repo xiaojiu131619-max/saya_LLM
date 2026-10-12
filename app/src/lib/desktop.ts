@@ -201,6 +201,10 @@ export interface LlamaReleaseInfo {
   cuda_matched: boolean;
   host_backend: string;
   gpu_name: string | null;
+  /** 本机 AMD 独显是否在 ROCm/HIP 官方支持列表内（无 AMD 卡为 false）。 */
+  hip_capable: boolean;
+  /** 本机 AMD 显卡名（有 AMD 卡才非空；配合 hip_capable 区分「支持 / 未验证」）。 */
+  hip_gpu: string | null;
 }
 
 export interface MediaPayload {
@@ -478,10 +482,21 @@ export interface ChatCompletionMetrics {
 
 let activeChatAbortController: AbortController | null = null;
 
-function createAbortError() {
+function createAbortError(partialMetrics?: Partial<ChatCompletionMetrics>) {
   const error = new Error('已停止生成。');
   error.name = 'AbortError';
+  // 中止前流式过程已经产生的部分测量值（首字延迟 / 已生成 token / 速度 / 耗时），
+  // 终止统计要「有什么写什么」，不能全归零。
+  if (partialMetrics) {
+    (error as Error & { partialMetrics?: Partial<ChatCompletionMetrics> }).partialMetrics = partialMetrics;
+  }
   return error;
+}
+
+/** 从中止 / 中断错误里取回流式过程中已产生的部分测量值；没有则返回 null。 */
+export function partialMetricsFromError(error: unknown): Partial<ChatCompletionMetrics> | null {
+  const partial = (error as { partialMetrics?: Partial<ChatCompletionMetrics> } | null)?.partialMetrics;
+  return partial ?? null;
 }
 
 function mergeAbortSignals(...signals: Array<AbortSignal | undefined>): { signal: AbortSignal; cleanup: () => void } {
@@ -1998,6 +2013,9 @@ export async function streamChatCompletion(options: {
   const decoder = new TextDecoder();
   let buffer = '';
   let rawBody = '';
+  // 流式 delta 计数：llama.cpp 每个内容 / 思考 delta ≈ 1 个 token，
+  // 是服务端 usage 缺失（被中止时拿不到最终 usage）时的真实产量口径。
+  let streamedTokenCount = 0;
   abortSignal.addEventListener('abort', () => {
     void reader.cancel().catch(() => {});
   }, { once: true });
@@ -2010,6 +2028,7 @@ export async function streamChatCompletion(options: {
     const reasoningToken = extractReasoningDelta(choice);
     if (reasoningToken) {
       firstTokenAt ??= performance.now();
+      streamedTokenCount += 1;
       reasoningContent += reasoningToken;
       options.onReasoningDelta?.(reasoningContent);
       receivedContent = true;
@@ -2018,6 +2037,7 @@ export async function streamChatCompletion(options: {
     const token = extractContentFromChoice(choice);
     if (token) {
       firstTokenAt ??= performance.now();
+      streamedTokenCount += 1;
       options.onToken(token);
       receivedContent = true;
     }
@@ -2053,32 +2073,57 @@ export async function streamChatCompletion(options: {
     }
   };
 
-  while (true) {
-    throwIfAborted(abortSignal);
-    const { value, done } = await reader.read();
-    throwIfAborted(abortSignal);
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    rawBody += chunk;
-    buffer += chunk;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
+  // 中止 / 流中断时已经产生的部分测量值：首字延迟、已生成 token 数、速度、耗时。
+  // 终止统计要「有什么写什么」，不能全归零。
+  const buildPartialMetrics = () => {
+    const firstTokenDelay = firstTokenAt ? Math.max(0, (firstTokenAt - requestStartedAt) / 1000) : 0;
+    const genTime = Math.max(0, (performance.now() - requestStartedAt) / 1000);
+    const completionTokens = Math.max(0, Math.round(Number(latestUsage.completionTokens) || streamedTokenCount));
+    const tokensPerSec = completionTokens > 0 && genTime > firstTokenDelay
+      ? completionTokens / Math.max(0.001, genTime - firstTokenDelay)
+      : 0;
+    return { completionTokens, firstTokenDelay, tokensPerSec, genTime };
+  };
+  const throwAbortWithMetrics = (): void => {
+    if (!abortSignal.aborted) return;
+    throw createAbortError(buildPartialMetrics());
+  };
 
-    for (const line of lines) {
-      throwIfAborted(abortSignal);
-      processStreamLine(line);
-    }
-  }
+  try {
+    while (true) {
+      throwAbortWithMetrics();
+      const { value, done } = await reader.read();
+      throwAbortWithMetrics();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      rawBody += chunk;
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
 
-  throwIfAborted(abortSignal);
-  // 注意：decoder.decode() 会 flush 不完整的 UTF-8 序列，可能产生替换字符（U+FFFD）。
-  // 这只在流异常中断且最后一块数据截断在多字节字符中间时发生，概率极低。
-  const tail = `${buffer}${decoder.decode()}`.trim();
-  if (tail) {
-    for (const line of tail.split('\n')) {
-      throwIfAborted(abortSignal);
-      processStreamLine(line);
+      for (const line of lines) {
+        throwAbortWithMetrics();
+        processStreamLine(line);
+      }
     }
+
+    throwAbortWithMetrics();
+    // 注意：decoder.decode() 会 flush 不完整的 UTF-8 序列，可能产生替换字符（U+FFFD）。
+    // 这只在流异常中断且最后一块数据截断在多字节字符中间时发生，概率极低。
+    const tail = `${buffer}${decoder.decode()}`.trim();
+    if (tail) {
+      for (const line of tail.split('\n')) {
+        throwAbortWithMetrics();
+        processStreamLine(line);
+      }
+    }
+  } catch (err) {
+    if (abortSignal.aborted || (err as Error)?.name === 'AbortError') {
+      throw createAbortError(buildPartialMetrics());
+    }
+    // 流中途断开（网络错误等）：同样带上已产生的部分测量值再抛出。
+    (err as Error & { partialMetrics?: Partial<ChatCompletionMetrics> }).partialMetrics = buildPartialMetrics();
+    throw err;
   }
 
   if (!firstTokenAt && rawBody.trim()) {

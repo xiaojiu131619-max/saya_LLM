@@ -27,7 +27,7 @@ import { useSystemStats } from '@/hooks/useSystemStats';
 import { useEngineStatuses, type EngineStatusMap } from '@/hooks/useEngineStatuses';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
-import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, fetchServerReasoningEffortCap, isDesktopRuntime, listenDesktopFileDrops, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
+import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, fetchServerReasoningEffortCap, isDesktopRuntime, listenDesktopFileDrops, partialMetricsFromError, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { MAX_TOOL_ROUNDS, collectMcpToolSpecs, runChatToolLoop as runToolLoop, type ChatRoundRunner } from '@/features/chat/mcpTools';
 import type { ChatMessageContentPart, ChatEngineId, ToolActivity } from '@/types';
@@ -171,6 +171,20 @@ function elapsedMessageStats(timestamp: number, ctxTotal = 0) {
     firstTokenDelay: 0,
     tokensPerSec: 0,
     genTime: Math.max(0, (Date.now() - timestamp) / 1000),
+  };
+}
+
+/** 终止 / 失败时落定的统计：真实耗时 + 中止前流式已产生的部分测量值（有什么写什么）。
+ *  时钟与 elapsedRequestStats 一致（performance.now 基准的 startTime）。 */
+function terminatedMessageStats(error: unknown, startTime: number, ctxTotal = 0) {
+  const stats = elapsedRequestStats(startTime, ctxTotal);
+  const partial = partialMetricsFromError(error);
+  if (!partial) return stats;
+  return {
+    ...stats,
+    ...(Number(partial.completionTokens) > 0 ? { outputTokens: Math.round(Number(partial.completionTokens)) } : {}),
+    ...(Number(partial.firstTokenDelay) > 0 ? { firstTokenDelay: Number(partial.firstTokenDelay) } : {}),
+    ...(Number(partial.tokensPerSec) > 0 ? { tokensPerSec: Number(partial.tokensPerSec) } : {}),
   };
 }
 
@@ -1030,7 +1044,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, reqCtxTotal),
+            stats: terminatedMessageStats(error, startTime, reqCtxTotal),
           },
         });
       } else {
@@ -1046,7 +1060,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, reqCtxTotal),
+            stats: terminatedMessageStats(error, startTime, reqCtxTotal),
           },
         });
       }
@@ -1256,7 +1270,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, reqCtxTotal),
+            stats: terminatedMessageStats(error, startTime, reqCtxTotal),
           },
         });
       } else {
@@ -1272,7 +1286,7 @@ export default function ChatPage() {
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, reqCtxTotal),
+            stats: terminatedMessageStats(error, startTime, reqCtxTotal),
           },
         });
       }
@@ -1768,7 +1782,7 @@ export default function ChatPage() {
                             ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
                             : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
                         }`}
-                        title={`思考强度：${reasoningPlan.requestLabel}`}
+                        title={canChat ? `思考强度：${reasoningPlan.requestLabel}` : '加载模型或启动引擎后可调整思考强度'}
                       >
                         <Sparkles className="h-4 w-4" />
                         <span>{currentReasoningOption.label}</span>

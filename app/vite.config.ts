@@ -1,7 +1,11 @@
 import path from "path"
+import { readFileSync } from "node:fs"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 import { inspectAttr } from 'kimi-plugin-inspect-react'
+
+// 应用版本号从 package.json 注入（设置页「关于」展示用），避免界面文案里硬编码版本。
+const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8")).version as string
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => ({
@@ -10,6 +14,9 @@ export default defineConfig(({ mode }) => ({
     mode === 'development' ? inspectAttr() : null,
     react(),
   ],
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+  },
   server: {
     port: 3000,
   },

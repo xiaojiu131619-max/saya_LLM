@@ -204,7 +204,7 @@ export default function EmbeddingWorkspace() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)]">
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div className="mx-auto max-w-[1180px] space-y-5">
+        <div className="mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px] space-y-5">
           <PageHeader
             icon={Boxes}
             title="向量服务"

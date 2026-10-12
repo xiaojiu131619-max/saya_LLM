@@ -1,5 +1,6 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState, type ComponentType } from 'react';
 import {
+  Activity,
   ArrowLeft,
   Bot,
   Boxes,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 import ThemeToggleButton from '@/components/ThemeToggleButton';
 import { useApp } from '@/context/AppContext';
+import useMediaQuery from '@/hooks/useMediaQuery';
 import { useSystemStats } from '@/hooks/useSystemStats';
 import AgentPage from '@/pages/AgentPage';
 import ApiStatusPage from '@/features/apiStatus/ApiStatusPage';
@@ -178,11 +180,97 @@ export default function ModelWorkspace() {
     };
   }, [loadedModel, shouldFetchRuntimeStats]);
 
+  // 竖屏 / 窄窗口（≤959px，与对话页侧边栏折叠同一断点）：侧边栏收缩为图标栏，
+  // 保留全部导航入口（服务状态与 llama 日志在窄栏下以图标形式可达）。
+  const compactSidebar = useMediaQuery('(max-width: 959px)');
+
   return (
     <div
       className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
     >
-      <aside className="hidden min-h-0 w-60 max-[900px]:w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-[var(--border)] bg-[var(--surface-muted)] p-2 dark:border-white/[0.08] dark:bg-[var(--surface-muted)] md:flex">
+      {compactSidebar ? (
+        <aside
+          aria-label="模型工作区导航（窄栏）"
+          className="flex min-h-0 w-14 flex-shrink-0 flex-col items-center overflow-y-auto border-r border-[var(--border)] bg-[var(--surface-muted)] px-1.5 py-3 dark:border-white/[0.08]"
+        >
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
+            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
+            title="切换到对话"
+            aria-label="切换到对话"
+          >
+            {selectedModel?.family?.[0] || '晓'}
+          </button>
+          <nav aria-label="模型工作区主导航" className="mt-3 flex w-full flex-col items-center gap-1">
+            <RailNavButton
+              icon={Database}
+              label="模型列表"
+              active={!detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen}
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
+            />
+            <RailNavButton
+              icon={Bot}
+              label="Agent"
+              active={agentOpen}
+              title="Agent（智能体）· dsh 工作台 + 官方 WebUI 入口"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
+            />
+            <RailNavButton
+              icon={Boxes}
+              label="向量服务"
+              active={embeddingOpen}
+              title="向量服务 · Embedding / Rerank 模型（可与对话模型同时运行）"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
+            />
+            <RailNavButton
+              icon={Zap}
+              label="fast-27b"
+              active={fast27bOpen}
+              title="fast-27b · Swift / Heretic 27B 推理引擎（切换模型、一键启动）"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
+            />
+            {detailOpen && (
+              <RailNavButton
+                icon={ArrowLeft}
+                label="退出参数界面"
+                active={false}
+                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
+              />
+            )}
+          </nav>
+          <div className="mt-4 flex w-full flex-col items-center gap-1 border-t border-[var(--border-subtle)] pt-3">
+            <RailNavButton
+              icon={Activity}
+              label="服务状态"
+              active={apiStatusOpen}
+              title={state.serverRunning ? '服务状态 · 运行中' : '服务状态 · 未运行'}
+              indicator={state.serverRunning ? 'ok' : 'off'}
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'apiStatus' })}
+            />
+            <RailNavButton
+              icon={Terminal}
+              label="llama 日志"
+              active={llamaLogsOpen}
+              title="llama 日志"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'llamaLogs' })}
+            />
+          </div>
+          <div className="mt-auto flex w-full flex-col items-center gap-1 border-t border-[var(--border-subtle)] pt-3">
+            <ThemeToggleButton theme={state.theme} onClick={() => dispatch({ type: 'TOGGLE_THEME' })} />
+            <button
+              type="button"
+              onClick={openSettings}
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+              title="打开软件设置"
+              aria-label="软件设置"
+            >
+              <Settings className="h-[18px] w-[18px]" />
+            </button>
+          </div>
+        </aside>
+      ) : (
+      <aside className="hidden min-h-0 w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-[var(--border)] bg-[var(--surface-muted)] p-2 dark:border-white/[0.08] dark:bg-[var(--surface-muted)] md:flex">
         <div className="px-4 pb-4 pt-3">
           <div className="mb-4 flex items-center gap-3">
             <button
@@ -205,7 +293,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -214,7 +302,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              agentOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              agentOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
             title="Agent（智能体）· dsh 工作台 + 官方 WebUI 入口"
           >
@@ -224,7 +312,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              embeddingOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              embeddingOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
             title="向量服务 · Embedding / Rerank 模型（可与对话模型同时运行）"
           >
@@ -234,7 +322,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              fast27bOpen ? 'bg-[var(--border)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--border)]'
+              fast27bOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
             title="fast-27b · Swift / Heretic 27B 推理引擎（切换模型、一键启动）"
           >
@@ -303,6 +391,7 @@ export default function ModelWorkspace() {
           </div>
         </div>
       </aside>
+      )}
 
       <section className="flex min-w-0 flex-1 flex-col bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
         {detailOpen && (
@@ -334,6 +423,48 @@ export default function ModelWorkspace() {
         </div>
       </section>
     </div>
+  );
+}
+
+/** 窄栏（≤959px）导航图标按钮：图标 + tooltip，右上角可带运行指示点。 */
+function RailNavButton({
+  icon: Icon,
+  label,
+  active,
+  onClick,
+  title,
+  indicator,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+  indicator?: 'ok' | 'off';
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title ?? label}
+      aria-label={label}
+      aria-current={active ? 'page' : undefined}
+      className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+        active
+          ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]'
+          : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
+      }`}
+    >
+      <Icon className="h-[18px] w-[18px]" />
+      {indicator && (
+        <span
+          aria-hidden="true"
+          className={`absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full ${
+            indicator === 'ok' ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'
+          }`}
+        />
+      )}
+    </button>
   );
 }
 

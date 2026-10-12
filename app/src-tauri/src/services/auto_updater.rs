@@ -332,9 +332,9 @@ pub(crate) fn is_real_display_adapter(name: &str) -> bool {
 /// 厂商判定优先用 DXGI 的 PCI Vendor ID（显卡名称不可靠：OEM 定制名、中文描述、
 /// 无品牌标识的核显都能骗过子串匹配）。VendorId 拿不到时才回退到名称匹配。
 ///
-/// 后端归属：NVIDIA → CUDA；AMD / Intel → Vulkan。AMD 在 Windows 上没有可用的
-/// HIP/ROCm 通用路线（官方 rocm 包只覆盖 Linux 与特定专业卡），Vulkan 才是 AMD
-/// 用户在 Windows 上的正确选择。
+/// 后端归属：NVIDIA → CUDA；AMD / Intel → Vulkan。AMD 的 ROCm/HIP 内核只覆盖
+/// RDNA2/3 的一部分卡（见 gpu_monitor::amd_hip_support），默认推荐仍走 Vulkan；
+/// HIP-capable 的卡会把 ROCm 包作为可选候选参与「核心更新」排序（见 hip_capable 参数）。
 pub(crate) fn detect_host_gpu_backend() -> (String, Option<String>) {
     // 1) DXGI VendorId：最可靠，且能正确识别核显。
     let vendors = crate::services::gpu_monitor::detect_display_vendors();
@@ -386,6 +386,20 @@ pub(crate) fn detect_host_gpu_backend() -> (String, Option<String>) {
     }
 
     ("CPU".to_string(), None)
+}
+
+/// 本机 HIP/ROCm 上下文：(hip_capable, 显卡名)。
+/// hip_capable = 本机 AMD 独显在 ROCm 官方支持列表内（RX 6000/7000/9000、
+/// Pro W6000/W7000、Instinct）；hip_gpu 有值表示本机存在 AMD 卡（可区分
+/// 「不支持」与「未验证」两种提示），没有 AMD 卡时为 (false, None)。
+fn detect_hip_context() -> (bool, Option<String>) {
+    match crate::services::gpu_monitor::detect_hip_capability() {
+        Some((name, support)) => (
+            support == crate::services::gpu_monitor::HipSupport::Supported,
+            Some(name),
+        ),
+        None => (false, None),
+    }
 }
 
 fn parse_cuda_version(value: &str) -> Option<(u32, u32)> {
@@ -550,6 +564,7 @@ fn host_matched_asset(
     cuda_version: Option<&str>,
     host_backend: &str,
     blackwell: bool,
+    hip_capable: bool,
 ) -> bool {
     let lower = name.to_ascii_lowercase();
     match host_backend {
@@ -559,7 +574,12 @@ fn host_matched_asset(
                     .map(|version| cuda_asset_matches(name, Some(version), blackwell))
                     .unwrap_or(true)
         }
-        "Vulkan" => lower.contains("vulkan") || lower.contains("kompute"),
+        "Vulkan" => {
+            lower.contains("vulkan")
+                || lower.contains("kompute")
+                // HIP-capable 的 AMD 卡：ROCm 包也算本机匹配（可在「核心更新」正常下载）。
+                || (hip_capable && (lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon")))
+        }
         "CPU" => lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx"),
         _ => false,
     }
@@ -570,10 +590,12 @@ fn package_asset_score(
     cuda_version: Option<&str>,
     host_backend: &str,
     blackwell: bool,
+    hip_capable: bool,
 ) -> (u8, u32, u32, String) {
     let lower = name.to_ascii_lowercase();
-    // AMD 的 Windows ROCm/HIP 包只覆盖少数专业卡，不适用于普通 Radeon 与核显。
-    // 无论 host 是什么，都排到纯 CPU 之后，避免 AMD 用户被推荐到装不上的包。
+    // AMD 的 Windows ROCm/HIP 包只覆盖 RDNA2/3 的一部分卡。HIP-capable 的卡上它是
+    // 正经候选（Vulkan 之后、CPU 之前，Vulkan 仍是默认推荐）；其余卡维持排到纯
+    // CPU 之后，避免被推荐到装不上的包。
     let is_rocm = lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon");
     match host_backend {
         "CUDA" => {
@@ -595,11 +617,14 @@ fn package_asset_score(
             if lower.contains("vulkan") {
                 return (0, 0, 0, lower);
             }
+            if is_rocm {
+                return (if hip_capable { 2 } else { 6 }, 0, 0, lower);
+            }
             if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
                 return (4, 0, 0, lower);
             }
-            // Vulkan host（AMD / Intel）：CUDA 与 ROCm 都不能用，明确排到最后。
-            if lower.contains("cuda") || is_rocm {
+            // Vulkan host（AMD / Intel）：CUDA 用不上，明确排到最后。
+            if lower.contains("cuda") {
                 return (6, 0, 0, lower);
             }
         }
@@ -665,6 +690,12 @@ pub struct ReleaseInfo {
     pub cuda_matched: bool,
     pub host_backend: String,
     pub gpu_name: Option<String>,
+    /// 本机 AMD 独显是否在 HIP/ROCm 官方支持列表内（无 AMD 卡为 false）。
+    #[serde(default)]
+    pub hip_capable: bool,
+    /// 本机 AMD 显卡名（有 AMD 卡才非空；配合 hip_capable 区分「支持 / 未验证」）。
+    #[serde(default)]
+    pub hip_gpu: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -758,6 +789,7 @@ fn collect_windows_assets(
     cuda_version: Option<&str>,
     host_backend: &str,
     blackwell: bool,
+    hip_capable: bool,
 ) -> (Vec<AssetInfo>, bool) {
     let mut assets = Vec::new();
     let mut cuda_matched = false;
@@ -770,7 +802,8 @@ fn collect_windows_assets(
                 if matches_cuda {
                     cuda_matched = true;
                 }
-                let matches_host = host_matched_asset(name, cuda_version, host_backend, blackwell);
+                let matches_host =
+                    host_matched_asset(name, cuda_version, host_backend, blackwell, hip_capable);
                 assets.push(AssetInfo {
                     name: name.to_string(),
                     browser_download_url: a["browser_download_url"]
@@ -784,7 +817,8 @@ fn collect_windows_assets(
             }
         }
     }
-    assets.sort_by_key(|asset| package_asset_score(&asset.name, cuda_version, host_backend, blackwell));
+    assets
+        .sort_by_key(|asset| package_asset_score(&asset.name, cuda_version, host_backend, blackwell, hip_capable));
     (assets, cuda_matched)
 }
 
@@ -794,10 +828,17 @@ fn release_info_from_value(
     host_backend: &str,
     gpu_name: &Option<String>,
     blackwell: bool,
+    hip_capable: bool,
+    hip_gpu: &Option<String>,
 ) -> ReleaseInfo {
     let tag_name = item["tag_name"].as_str().unwrap_or("").to_string();
-    let (assets, cuda_matched) =
-        collect_windows_assets(item, cuda_version.as_deref(), host_backend, blackwell);
+    let (assets, cuda_matched) = collect_windows_assets(
+        item,
+        cuda_version.as_deref(),
+        host_backend,
+        blackwell,
+        hip_capable,
+    );
     let version = tag_name.trim_start_matches('v').to_string();
     ReleaseInfo {
         tag_name,
@@ -809,6 +850,8 @@ fn release_info_from_value(
         cuda_matched,
         host_backend: host_backend.to_string(),
         gpu_name: gpu_name.clone(),
+        hip_capable,
+        hip_gpu: hip_gpu.clone(),
     }
 }
 
@@ -821,9 +864,11 @@ fn pick_latest_build_release(
     host_backend: &str,
     gpu_name: &Option<String>,
     blackwell: bool,
+    hip_capable: bool,
+    hip_gpu: &Option<String>,
 ) -> Option<ReleaseInfo> {
     json.as_array()?.iter().map(|item| {
-        release_info_from_value(item, cuda_version, host_backend, gpu_name, blackwell)
+        release_info_from_value(item, cuda_version, host_backend, gpu_name, blackwell, hip_capable, hip_gpu)
     }).find(|info| !info.assets.is_empty())
 }
 
@@ -833,8 +878,9 @@ pub fn check_latest_release(proxy_url: Option<&str>) -> Result<ReleaseInfo, Stri
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
     let blackwell = is_blackwell_gpu(gpu_name.as_deref());
+    let (hip_capable, hip_gpu) = detect_hip_context();
 
-    pick_latest_build_release(&json, &cuda_version, &host_backend, &gpu_name, blackwell)
+    pick_latest_build_release(&json, &cuda_version, &host_backend, &gpu_name, blackwell, hip_capable, &hip_gpu)
         .ok_or_else(|| "最近的发布中未找到可用的 Windows x64 安装包，请稍后再试。".to_string())
 }
 
@@ -845,6 +891,7 @@ pub fn list_recent_releases(count: usize, proxy_url: Option<&str>) -> Result<Vec
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
     let blackwell = is_blackwell_gpu(gpu_name.as_deref());
+    let (hip_capable, hip_gpu) = detect_hip_context();
 
     let mut releases = Vec::new();
     if let Some(arr) = json.as_array() {
@@ -852,8 +899,15 @@ pub fn list_recent_releases(count: usize, proxy_url: Option<&str>) -> Result<Vec
             if releases.len() >= count {
                 break;
             }
-            let info =
-                release_info_from_value(item, &cuda_version, &host_backend, &gpu_name, blackwell);
+            let info = release_info_from_value(
+                item,
+                &cuda_version,
+                &host_backend,
+                &gpu_name,
+                blackwell,
+                hip_capable,
+                &hip_gpu,
+            );
             // 跳过不带 Windows 安装包的发布（如 v0.3.0 这类纯公告稳定版），
             // 否则列表里会出现无法安装的空条目。
             if info.assets.is_empty() {
@@ -1638,7 +1692,7 @@ mod tests {
             assetless_stable_release_json(),
             build_release_json("b10642")
         ]);
-        let info = pick_latest_build_release(&json, &None, "CPU", &None, false)
+        let info = pick_latest_build_release(&json, &None, "CPU", &None, false, false, &None)
             .expect("应选中带安装包的 b10642");
         assert_eq!(info.tag_name, "b10642");
         assert_eq!(info.version, "b10642");
@@ -1651,7 +1705,7 @@ mod tests {
     #[test]
     fn pick_latest_returns_none_when_no_windows_packages() {
         let json = serde_json::json!([assetless_stable_release_json()]);
-        assert!(pick_latest_build_release(&json, &None, "CPU", &None, false).is_none());
+        assert!(pick_latest_build_release(&json, &None, "CPU", &None, false, false, &None).is_none());
     }
 
     #[test]
@@ -1663,6 +1717,8 @@ mod tests {
             "CUDA",
             &Some("NVIDIA GeForce RTX 4070".to_string()),
             false,
+            false,
+            &None,
         )
         .expect("应选中 b10642");
         assert_eq!(info.assets[0].name, "llama-b10642-bin-win-cuda-12.4-x64.zip");
@@ -1679,36 +1735,66 @@ mod tests {
             "llama-b11115-bin-win-vulkan-x64.zip",
             None,
             "Vulkan",
-            false
+            false,
+            false,
         ));
         // AMD 的 ROCm 包不能算 host-matched——普通 Radeon / 核显装不上。
         assert!(!super::host_matched_asset(
             "llama-b11115-bin-win-rocm-10.0-x64.zip",
             None,
             "Vulkan",
-            false
+            false,
+            false,
         ));
         // CUDA 包同样不匹配。
         assert!(!super::host_matched_asset(
             "llama-b11115-bin-win-cuda-12.4-x64.zip",
             None,
             "Vulkan",
-            false
+            false,
+            false,
         ));
 
-        // 评分排序：Vulkan < CPU < CUDA/ROCm。ROCm 必须排在纯 CPU 之后，
-        // 否则 AMD 用户会被推荐到装不上的专业卡包。
+        // 评分排序（非 HIP-capable 卡）：Vulkan < CPU < CUDA/ROCm。ROCm 必须排在
+        // 纯 CPU 之后，否则这些卡的用户会被推荐到装不上的专业卡包。
         let vulkan = super::package_asset_score(
-            "llama-b11115-bin-win-vulkan-x64.zip", None, "Vulkan", false).0;
+            "llama-b11115-bin-win-vulkan-x64.zip", None, "Vulkan", false, false).0;
         let cpu = super::package_asset_score(
-            "llama-b11115-bin-win-cpu-x64.zip", None, "Vulkan", false).0;
+            "llama-b11115-bin-win-cpu-x64.zip", None, "Vulkan", false, false).0;
         let rocm = super::package_asset_score(
-            "llama-b11115-bin-win-rocm-10.0-x64.zip", None, "Vulkan", false).0;
+            "llama-b11115-bin-win-rocm-10.0-x64.zip", None, "Vulkan", false, false).0;
         let cuda = super::package_asset_score(
-            "llama-b11115-bin-win-cuda-12.4-x64.zip", None, "Vulkan", false).0;
+            "llama-b11115-bin-win-cuda-12.4-x64.zip", None, "Vulkan", false, false).0;
         assert!(vulkan < cpu, "Vulkan 应优于 CPU：{vulkan} vs {cpu}");
         assert!(cpu < rocm, "ROCm 应排在 CPU 之后：{cpu} vs {rocm}");
         assert!(cpu < cuda, "CUDA 应排在 CPU 之后：{cpu} vs {cuda}");
+    }
+
+    #[test]
+    fn amd_hip_capable_card_gets_rocm_candidate() {
+        // HIP-capable 的卡（RX 6000/7000/9000 系等）：ROCm 包算本机匹配候选，
+        // 排在 Vulkan 之后、CPU 之前；Vulkan 仍是第一推荐（覆盖面与驱动敏感性）。
+        assert!(super::host_matched_asset(
+            "llama-b11115-bin-win-rocm-10.0-x64.zip",
+            None,
+            "Vulkan",
+            false,
+            true,
+        ));
+        let vulkan = super::package_asset_score(
+            "llama-b11115-bin-win-vulkan-x64.zip", None, "Vulkan", false, true).0;
+        let rocm = super::package_asset_score(
+            "llama-b11115-bin-win-rocm-10.0-x64.zip", None, "Vulkan", false, true).0;
+        let cpu = super::package_asset_score(
+            "llama-b11115-bin-win-cpu-x64.zip", None, "Vulkan", false, true).0;
+        assert!(vulkan < rocm, "Vulkan 仍是默认推荐：{vulkan} vs {rocm}");
+        assert!(rocm < cpu, "HIP-capable 卡上 ROCm 应排在 CPU 之前：{rocm} vs {cpu}");
+        // CUDA 机器上 ROCm 候选地位不变（装不上）。
+        assert_eq!(
+            super::package_asset_score(
+                "llama-b11115-bin-win-rocm-10.0-x64.zip", None, "CUDA", false, true).0,
+            9
+        );
     }
 
     #[test]

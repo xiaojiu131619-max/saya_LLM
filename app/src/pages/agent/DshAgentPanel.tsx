@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { isDesktopRuntime } from '@/lib/desktop';
 import { listenDesktopEvent } from '@/lib/desktop';
 import {
@@ -109,6 +110,14 @@ export default function DshAgentPanel() {
   const [dshLogs, setDshLogs] = useState<string[]>([]);
   const [dshLive, setDshLive] = useState(true);
   const [logCopied, setLogCopied] = useState(false);
+  // 应用内确认对话框（替代原生 window.confirm）：待执行动作挂在 pendingConfirm 上。
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    description?: string;
+    confirmLabel: string;
+    tone: 'warning' | 'danger';
+    action: () => Promise<void> | void;
+  } | null>(null);
 
   const installing = stage !== 'idle';
   const running = status?.runtime.running ?? false;
@@ -124,7 +133,9 @@ export default function DshAgentPanel() {
       setStatus(nextStatus);
       setChecks(nextChecks);
     } catch (error) {
-      setActionMessage(`检测失败：${String(error)}`);
+      // Invoke 失败原文常带英文 Error: 前缀，去掉后让面板叙述保持中文口径。
+      const reason = String(error).replace(/^Error:\s*/, '');
+      setActionMessage(`检测失败：${reason}`);
     } finally {
       setChecking(false);
       setProgressMessage(null);
@@ -268,18 +279,25 @@ export default function DshAgentPanel() {
     }
   };
 
-  const handleStop = async () => {
-    if (!window.confirm('确定要关闭 dsh 吗？未完成的会话上下文会被中断。')) return;
-    setStopping(true);
-    try {
-      await dshStop();
-      setRuntimeMessage('dsh 已停止。');
-    } catch (error) {
-      setRuntimeMessage(`关闭失败：${String(error)}`);
-    } finally {
-      setStopping(false);
-      await refreshStatusOnly();
-    }
+  const handleStop = () => {
+    setPendingConfirm({
+      title: '关闭 dsh',
+      description: '未完成的会话上下文会被中断。',
+      confirmLabel: '关闭 dsh',
+      tone: 'warning',
+      action: async () => {
+        setStopping(true);
+        try {
+          await dshStop();
+          setRuntimeMessage('dsh 已停止。');
+        } catch (error) {
+          setRuntimeMessage(`关闭失败：${String(error)}`);
+        } finally {
+          setStopping(false);
+          await refreshStatusOnly();
+        }
+      },
+    });
   };
 
   const handleBind = async () => {
@@ -355,9 +373,15 @@ export default function DshAgentPanel() {
   };
 
   const handleClearLogs = () => {
-    if (window.confirm('确定要清空 dsh 日志吗？')) {
-      void dshClearLogs().finally(() => setDshLogs([]));
-    }
+    setPendingConfirm({
+      title: '清空 dsh 日志',
+      confirmLabel: '清空',
+      tone: 'warning',
+      action: async () => {
+        await dshClearLogs();
+        setDshLogs([]);
+      },
+    });
   };
 
   const packageState = (() => {
@@ -721,6 +745,19 @@ export default function DshAgentPanel() {
           </section>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        title={pendingConfirm?.title ?? ''}
+        description={pendingConfirm?.description}
+        confirmLabel={pendingConfirm?.confirmLabel}
+        tone={pendingConfirm?.tone}
+        onConfirm={async () => {
+          await pendingConfirm?.action();
+          setPendingConfirm(null);
+        }}
+        onCancel={() => setPendingConfirm(null)}
+      />
     </div>
   );
 }

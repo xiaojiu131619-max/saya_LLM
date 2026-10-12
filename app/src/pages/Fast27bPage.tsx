@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import ToggleSwitch from "@/components/ToggleSwitch";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { useApp } from "@/context/AppContext";
 import {
   isDesktopRuntime,
@@ -131,6 +132,15 @@ export default function Fast27bPage() {
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [openingDsh, setOpeningDsh] = useState(false);
+
+  // 应用内确认对话框（替代原生 window.confirm）：待执行动作挂在 pendingConfirm 上。
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    description?: string;
+    confirmLabel: string;
+    tone: "warning" | "danger";
+    action: () => Promise<void> | void;
+  } | null>(null);
 
   const running = status?.running ?? false;
   const apiReady = status?.api_ready ?? false;
@@ -309,19 +319,25 @@ export default function Fast27bPage() {
     }
   };
 
-  const handleStop = async () => {
-    if (!window.confirm("确定要停止 fast27b 引擎吗？正在进行的对话会被中断。"))
-      return;
-    setStopping(true);
-    try {
-      await fast27bStop();
-      setRuntimeMessage("fast27b 已停止。");
-    } catch (error) {
-      setRuntimeMessage(`停止失败：${String(error)}`);
-    } finally {
-      setStopping(false);
-      await refreshStatusOnly();
-    }
+  const handleStop = () => {
+    setPendingConfirm({
+      title: "停止 fast-27b 引擎",
+      description: "正在进行的对话会被中断。",
+      confirmLabel: "停止引擎",
+      tone: "warning",
+      action: async () => {
+        setStopping(true);
+        try {
+          await fast27bStop();
+          setRuntimeMessage("fast27b 已停止。");
+        } catch (error) {
+          setRuntimeMessage(`停止失败：${String(error)}`);
+        } finally {
+          setStopping(false);
+          await refreshStatusOnly();
+        }
+      },
+    });
   };
 
   /**
@@ -510,13 +526,7 @@ export default function Fast27bPage() {
   const markDirty = () => setSettingsDirty(true);
 
   /** 启用/停用 fast27b 引擎：只翻转开关（专用命令，不触碰其他配置项）。 */
-  const handleToggleEnabled = async (next: boolean) => {
-    if (!next && running) {
-      const proceed = window.confirm(
-        "引擎当前正在运行；停用后启动按钮会锁定（已运行的引擎不受影响，可手动停止）。是否继续？",
-      );
-      if (!proceed) return;
-    }
+  const applyEnabled = async (next: boolean) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setActionMessage(null);
@@ -533,6 +543,21 @@ export default function Fast27bPage() {
     } finally {
       busyRef.current = false;
     }
+  };
+
+  const handleToggleEnabled = (next: boolean) => {
+    if (!next && running) {
+      setPendingConfirm({
+        title: "停用 fast-27b 引擎",
+        description:
+          "引擎当前正在运行；停用后启动按钮会锁定（已运行的引擎不受影响，可手动停止）。",
+        confirmLabel: "停用",
+        tone: "warning",
+        action: () => applyEnabled(false),
+      });
+      return;
+    }
+    void applyEnabled(next);
   };
 
   const handleCopyLogs = async () => {
@@ -552,9 +577,16 @@ export default function Fast27bPage() {
   };
 
   const handleClearLogs = () => {
-    if (window.confirm("确定要清空 fast27b 日志吗？")) {
-      void fast27bClearLogs().finally(() => setFast27bLogs([]));
-    }
+    setPendingConfirm({
+      title: "清空 fast27b 日志",
+      description: "面板里的日志会立即清空；engine.log 落盘文件不受影响。",
+      confirmLabel: "清空",
+      tone: "warning",
+      action: async () => {
+        await fast27bClearLogs();
+        setFast27bLogs([]);
+      },
+    });
   };
 
   const runningBadge = (
@@ -1165,6 +1197,19 @@ export default function Fast27bPage() {
             </div>
           )}
         </section>
+
+        <ConfirmDialog
+          open={pendingConfirm !== null}
+          title={pendingConfirm?.title ?? ""}
+          description={pendingConfirm?.description}
+          confirmLabel={pendingConfirm?.confirmLabel}
+          tone={pendingConfirm?.tone}
+          onConfirm={async () => {
+            await pendingConfirm?.action();
+            setPendingConfirm(null);
+          }}
+          onCancel={() => setPendingConfirm(null)}
+        />
       </div>
     </div>
   );

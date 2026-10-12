@@ -906,6 +906,27 @@ fn detect_error(line: &str) -> Option<ServerError> {
         });
     }
 
+    // HIP / ROCm 错误：ROCm 包只覆盖部分 AMD 卡，最常见的失败是「没有 HIP 设备」
+    // 与 hipblas/rocblas 初始化失败（驱动过旧或卡不在支持列表）。
+    if line_lower.contains("no hip device")
+        || line_lower.contains("hip error")
+        || line_lower.contains("hipblas")
+        || line_lower.contains("rocblas")
+        || line_lower.contains("ggml-hip") && line_lower.contains("failed")
+        || (line_lower.contains("hip") && line_lower.contains("failed to initialize"))
+    {
+        return Some(ServerError {
+            error_type: "hip".into(),
+            title: "HIP / ROCm 错误".into(),
+            details: line.into(),
+            suggestions: vec![
+                "ROCm/HIP 内核只支持部分 AMD 显卡（RX 6000/7000/9000 系、Radeon PRO W6000/W7000、Instinct）；核显、RX 5000 及更早不支持。".into(),
+                "请更新 AMD 显卡驱动（Adrenalin）后重试。".into(),
+                "若仍失败，请到「核心更新」换用 Vulkan 包——它支持所有 AMD / Intel 显卡。".into(),
+            ],
+        });
+    }
+
     // CUDA errors - broad matching
     if line_lower.contains("cuda error")
         || line_lower.contains("cuda init")
@@ -1797,17 +1818,30 @@ pub fn detect_kernel_backend(exe: &str) -> KernelBackend {
 /// 后端错配判定的纯函数部分（便于单测，不依赖子进程）。
 ///
 /// 返回 Some(错误信息) 表示应阻断启动。只拦「方向明确相反」的组合：
-/// CUDA 内核 + 无 CUDA 设备 + 有 Vulkan 设备 = AMD/Intel 机器装了 CUDA 包，
-/// GPU 必然用不上。NVIDIA 卡配 Vulkan 内核可以正常跑（只是通常慢些），
-/// 因此放行，避免为了速度偏好阻断用户的可行配置。
+/// - CUDA 内核 + 无 CUDA 设备 + 有 Vulkan 设备 = AMD/Intel 机器装了 CUDA 包，GPU 必然用不上。
+/// - HIP 内核 + 无 HIP 设备 = ROCm/HIP 包只覆盖部分 AMD 卡（RX 6000/7000/9000、
+///   Pro W6000/W7000、Instinct），装在其它卡上必然退回 CPU——无论机器上还有没有
+///   Vulkan 设备都应阻断并指路（NVIDIA 卡装了 ROCm 包同样用不上）。
+/// NVIDIA 卡配 Vulkan 内核可以正常跑（只是通常慢些），因此放行，
+/// 避免为了速度偏好阻断用户的可行配置。
 fn backend_mismatch_reason(
     backend: KernelBackend,
     has_cuda_device: bool,
     has_vulkan_device: bool,
+    has_hip_device: bool,
 ) -> Option<String> {
     if backend == KernelBackend::Cuda && !has_cuda_device && has_vulkan_device {
         return Some(
             "当前内核是 CUDA 版，但本机没有 CUDA 设备、只有 Vulkan 设备：\nAMD / Intel 显卡无法使用 CUDA 内核，请到「核心更新」下载 Vulkan 包后重新加载。"
+                .to_string(),
+        );
+    }
+    if backend == KernelBackend::Hip && !has_hip_device && (has_vulkan_device || has_cuda_device) {
+        // 枚举出了其它后端的设备，说明枚举本身可用且确实没有 HIP 设备；
+        // 设备列表为空可能只是 --list-devices 没有输出，不据此阻断，
+        // 交给运行时错误识别兜底。
+        return Some(
+            "当前内核是 HIP / ROCm 版，但本机没有 HIP 可用设备：\nROCm/HIP 包只支持部分 AMD 显卡（RX 6000/7000/9000 系、Radeon PRO W6000/W7000、Instinct），核显、RX 5000 及更早、NVIDIA / Intel 显卡都不支持。\n请到「核心更新」下载 Vulkan 包后重新加载（Vulkan 支持所有 AMD / Intel 显卡）。"
                 .to_string(),
         );
     }
@@ -1830,8 +1864,13 @@ fn validate_backend_support(exe: &str, config: &ServerConfig) -> Result<()> {
     let has_cuda_device = candidates
         .iter()
         .any(|device| device.to_ascii_lowercase().starts_with("cuda"));
+    let has_hip_device = candidates
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("hip"));
 
-    if let Some(reason) = backend_mismatch_reason(backend, has_cuda_device, has_vulkan_device) {
+    if let Some(reason) =
+        backend_mismatch_reason(backend, has_cuda_device, has_vulkan_device, has_hip_device)
+    {
         bail!("{}\n内核路径：{}\n设备列表：{}", reason, exe, candidates.join(" / "));
     }
 
@@ -2016,6 +2055,12 @@ fn pick_offload_device(available: &[String], requested: Option<&str>) -> Option<
     available
         .iter()
         .find(|device| device.to_ascii_lowercase().starts_with("cuda"))
+        .or_else(|| {
+            // HIP/ROCm 内核（AMD）：设备名形如 Hip0，优先于列表里其余设备。
+            available
+                .iter()
+                .find(|device| device.to_ascii_lowercase().starts_with("hip"))
+        })
         .cloned()
         .or_else(|| available.first().cloned())
 }
@@ -3080,6 +3125,29 @@ mod tests {
     }
 
     #[test]
+    fn pick_offload_device_prefers_hip_on_rocm_runtime() {
+        // ROCm/HIP 内核的设备名形如 Hip0：无显式请求时优先选 HIP 设备。
+        assert_eq!(
+            super::pick_offload_device(&["Hip0".to_string()], None).as_deref(),
+            Some("Hip0")
+        );
+        // 混合后端内核：CUDA 优先级最高，其次 HIP，再退回首项。
+        assert_eq!(
+            super::pick_offload_device(&["Hip0".to_string(), "CPU0".to_string()], None).as_deref(),
+            Some("Hip0")
+        );
+        assert_eq!(
+            super::pick_offload_device(&["CUDA0".to_string(), "Hip0".to_string()], None).as_deref(),
+            Some("CUDA0")
+        );
+        // 用户显式请求的设备优先于自动选择（存在时原样采用）。
+        assert_eq!(
+            super::pick_offload_device(&["Hip0".to_string()], Some("Hip0")).as_deref(),
+            Some("Hip0")
+        );
+    }
+
+    #[test]
     fn detect_error_identifies_cuda_failure() {
         let log = "CUDA error: an illegal memory access was encountered";
         let error = super::detect_error(log);
@@ -3141,7 +3209,7 @@ mod tests {
     fn backend_mismatch_only_blocks_impossible_combinations() {
         use super::KernelBackend;
         // AMD/Intel 机器 + CUDA 内核：CUDA 只认 NVIDIA 设备，必然用不上 GPU -> 阻断。
-        let blocked = super::backend_mismatch_reason(KernelBackend::Cuda, false, true);
+        let blocked = super::backend_mismatch_reason(KernelBackend::Cuda, false, true, false);
         assert!(blocked.is_some(), "CUDA 内核 + 只有 Vulkan 设备应被拦下");
         let msg = blocked.unwrap();
         assert!(msg.contains("Vulkan"), "指引应提到 Vulkan 包：{msg}");
@@ -3149,18 +3217,42 @@ mod tests {
 
         // NVIDIA 卡 + Vulkan 内核：能正常跑，只是通常慢些 -> 放行，不阻断可行配置。
         assert!(
-            super::backend_mismatch_reason(KernelBackend::Vulkan, true, true).is_none(),
+            super::backend_mismatch_reason(KernelBackend::Vulkan, true, true, false).is_none(),
             "NVIDIA 卡用 Vulkan 内核应放行"
         );
 
         // 正确的匹配组合 -> 放行。
-        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, true, false).is_none());
-        assert!(super::backend_mismatch_reason(KernelBackend::Vulkan, false, true).is_none());
+        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, true, false, false).is_none());
+        assert!(super::backend_mismatch_reason(KernelBackend::Vulkan, false, true, false).is_none());
 
         // 设备列表为空（探测失败）时不阻断，避免误伤。
-        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, false, false).is_none());
+        assert!(super::backend_mismatch_reason(KernelBackend::Cuda, false, false, false).is_none());
         // 纯 CPU 内核 + 显卡存在：不阻断（用户可能只是想先用 CPU）。
-        assert!(super::backend_mismatch_reason(KernelBackend::Cpu, false, true).is_none());
+        assert!(super::backend_mismatch_reason(KernelBackend::Cpu, false, true, false).is_none());
+    }
+
+    #[test]
+    fn backend_mismatch_blocks_hip_kernel_without_hip_device() {
+        use super::KernelBackend;
+        // HIP/ROCm 内核 + 枚举到了其它后端设备但没有 HIP 设备 = 卡不在 ROCm 覆盖内
+        // （或装在 NVIDIA / Intel 机器上）-> 必然退回 CPU，阻断并指路 Vulkan 包。
+        for (has_cuda, has_vulkan) in [(false, true), (true, false), (true, true)] {
+            let blocked = super::backend_mismatch_reason(
+                KernelBackend::Hip,
+                has_cuda,
+                has_vulkan,
+                false,
+            );
+            assert!(blocked.is_some(), "HIP 内核无 HIP 设备应被拦下（cuda={has_cuda} vulkan={has_vulkan}）");
+            let msg = blocked.unwrap();
+            assert!(msg.contains("HIP") || msg.contains("ROCm"), "指引应点明 HIP/ROCm：{msg}");
+            assert!(msg.contains("Vulkan"), "指引应指向 Vulkan 包：{msg}");
+        }
+
+        // HIP 内核 + 有 HIP 设备：正常匹配，放行。
+        assert!(super::backend_mismatch_reason(KernelBackend::Hip, false, false, true).is_none());
+        // 设备列表为空（枚举失败 / 没有输出）：不阻断，交给运行时错误识别兜底。
+        assert!(super::backend_mismatch_reason(KernelBackend::Hip, false, false, false).is_none());
     }
 
     #[test]

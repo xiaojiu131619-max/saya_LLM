@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { Activity, ArrowDown, ArrowUp, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Plus, RefreshCw, Server, WifiOff, XCircle, Zap } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, CheckCircle2, Clock3, Gauge, Globe2, KeyRound, Loader2, Lock, Plus, RefreshCw, Server, WifiOff, XCircle, Zap } from 'lucide-react';
 import { getDesktopServerLogs, isDesktopRuntime, pingLocalApi, type PingResult } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import { ctxUsagePercent, latestRuntimeStatsFromServerLogs, latestStatsForSessions, sessionBelongsToModel } from '@/features/chat/chatUtils';
@@ -32,7 +32,16 @@ function displayModelName(raw: string) {
   }
 }
 
-function StatusPill({ ok, text }: { ok: boolean; text: string }) {
+function StatusPill({ ok, text, neutral = false }: { ok: boolean; text: string; neutral?: boolean }) {
+  // neutral：正常态而非错误（如「仅本机」= 未开启对外监听），用中性灰；红色只留给真正的失败。
+  if (neutral) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1 text-xs font-semibold text-secondary-custom">
+        <Lock className="h-3.5 w-3.5" />
+        {text}
+      </span>
+    );
+  }
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${ok ? 'bg-[var(--state-success-bg)] text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]' : 'bg-[var(--state-danger-bg)] text-[var(--state-danger)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)]'}`}>
       {ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
@@ -259,7 +268,7 @@ export default function ApiStatusPage() {
                 </h2>
                 <p className="mt-1 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">监听范围、端口、API Key 与调用示例统一在这里管理。</p>
               </div>
-              <StatusPill ok={state.apiConfig.enabled} text={state.apiConfig.enabled ? '已开启' : '仅本机'} />
+              <StatusPill ok={state.apiConfig.enabled} text={state.apiConfig.enabled ? '已开启' : '仅本机'} neutral={!state.apiConfig.enabled} />
             </div>
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-2 dark:bg-white/[0.025]">
               <ExternalApiSection embedded />

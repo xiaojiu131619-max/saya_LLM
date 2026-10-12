@@ -86,6 +86,11 @@ fn check_kernel() -> EnvCheckItem {
         .any(|device| device.to_ascii_lowercase().starts_with("vulkan"))
     {
         "Vulkan"
+    } else if devices
+        .iter()
+        .any(|device| device.to_ascii_lowercase().starts_with("hip"))
+    {
+        "HIP/ROCm"
     } else if devices.is_empty() {
         "未知"
     } else {
@@ -383,6 +388,45 @@ fn vulkan_icd_status() -> VulkanRuntime {
     VulkanRuntime::NoLoader
 }
 
+/// HIP / ROCm 支持（仅 AMD 显卡机器出现）。
+///
+/// ROCm 内核在 Windows 上可用，但只覆盖 RDNA2/3 的一部分卡（RX 6000/7000/9000 系、
+/// Radeon PRO W6000/W7000、Instinct）；Vega、RX 5000 及更早、全部核显不在覆盖内。
+/// 有 AMD 卡时告诉用户本机卡能不能用 HIP，避免自行试错；没有 AMD 卡不产出该项。
+fn check_hip_support() -> Option<EnvCheckItem> {
+    const TITLE: &str = "HIP / ROCm（AMD 显卡）";
+    let (gpu_name, support) = crate::services::gpu_monitor::detect_hip_capability()?;
+    match support {
+        crate::services::gpu_monitor::HipSupport::Supported => Some(EnvCheckItem::new(
+            "hip_support",
+            "ok",
+            TITLE,
+            format!(
+                "检测到 {}，在 ROCm 官方支持列表内：可在「核心更新」下载 ROCm 内核（性能通常优于 Vulkan，Vulkan 仍是默认推荐）。", gpu_name
+            ),
+        )),
+        crate::services::gpu_monitor::HipSupport::Unverified => Some(
+            EnvCheckItem::new(
+                "hip_support",
+                "warning",
+                TITLE,
+                format!("检测到 {}，未在 ROCm 官方支持列表内：HIP 内核可能可用，以实测为准。", gpu_name),
+            )
+            .with_hint(
+                "默认建议使用 Vulkan 包；如需尝试 HIP，请到「核心更新」下载 ROCm 内核并实测速度。",
+                None,
+                Some("kernel-update"),
+            ),
+        ),
+        crate::services::gpu_monitor::HipSupport::Unsupported => Some(EnvCheckItem::new(
+            "hip_support",
+            "ok",
+            TITLE,
+            format!("检测到 {}，不在 ROCm 支持列表内（核显 / RX 5000 及更早）。本机的 AMD 加速走 Vulkan 即可。", gpu_name),
+        )),
+    }
+}
+
 /// 运行一次完整环境检测。包含少量子进程探测（nvidia-smi / PowerShell），
 /// 整体在秒级内完成，供首次启动与设置页手动检测调用。
 #[tauri::command]
@@ -394,6 +438,10 @@ pub fn run_env_check(_state: State<'_, AppState>) -> Vec<EnvCheckItem> {
     ];
     // Vulkan 运行时只对 AMD / Intel 路线有意义，按需插入。
     if let Some(item) = check_vulkan_runtime() {
+        items.push(item);
+    }
+    // HIP / ROCm 支持只对 AMD 显卡机器有意义，按需插入。
+    if let Some(item) = check_hip_support() {
         items.push(item);
     }
     items.push(check_video_runtime());

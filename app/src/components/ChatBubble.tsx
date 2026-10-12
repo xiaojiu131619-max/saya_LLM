@@ -19,7 +19,7 @@ import {
 import type { Message, ToolActivity } from '@/types';
 import { useApp } from '@/context/AppContext';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
-import { isDesktopRuntime, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
+import { isDesktopRuntime, partialMetricsFromError, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { reasoningProfileFromModel } from '@/lib/reasoningGears';
 import { formatSessionCtxUsage } from '@/features/chat/chatUtils';
@@ -37,7 +37,8 @@ interface ChatBubbleProps {
 }
 
 function formatMetric(value: number, suffix = '') {
-  if (!Number.isFinite(value) || value <= 0) return '未返回';
+  // 终止 / 异常的回复没有测速数据：统一用 -- 占位，与整行的占位口径一致。
+  if (!Number.isFinite(value) || value <= 0) return `--${suffix}`;
   return `${value.toFixed(value >= 10 ? 1 : 2)}${suffix}`;
 }
 
@@ -68,6 +69,19 @@ function elapsedRequestStats(startTime: number, ctxTotal = 0) {
     firstTokenDelay: 0,
     tokensPerSec: 0,
     genTime: Math.max(0, (performance.now() - startTime) / 1000),
+  };
+}
+
+/** 终止 / 失败时落定的统计：真实耗时 + 中止前流式已产生的部分测量值（有什么写什么）。 */
+function terminatedRequestStats(error: unknown, startTime: number, ctxTotal = 0) {
+  const stats = elapsedRequestStats(startTime, ctxTotal);
+  const partial = partialMetricsFromError(error);
+  if (!partial) return stats;
+  return {
+    ...stats,
+    ...(Number(partial.completionTokens) > 0 ? { outputTokens: Math.round(Number(partial.completionTokens)) } : {}),
+    ...(Number(partial.firstTokenDelay) > 0 ? { firstTokenDelay: Number(partial.firstTokenDelay) } : {}),
+    ...(Number(partial.tokensPerSec) > 0 ? { tokensPerSec: Number(partial.tokensPerSec) } : {}),
   };
 }
 
@@ -281,7 +295,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
             sessionId,
             messageId: assistantMsgId,
             streaming: false,
-            stats: elapsedRequestStats(startTime, activeModel.loadConfig.ctxLength),
+            stats: terminatedRequestStats(error, startTime, activeModel.loadConfig.ctxLength),
           },
         });
         return;
@@ -404,7 +418,8 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         <ToolActivityPanel activities={message.toolActivity} />
       )}
 
-      <div className="min-w-0 text-[15.5px] leading-[1.9] text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+      {/* 正文与思考块同宽（760px）：宽窗口下不限行长的中文长段落可读性差。 */}
+      <div className="min-w-0 max-w-[760px] text-[15.5px] leading-[1.9] text-[var(--text-primary)] dark:text-[var(--text-primary)]">
         <MarkdownRenderer content={message.content} />
         {message.isStreaming && (
           <div className="mt-3 flex w-fit items-center gap-2 py-1 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
@@ -429,20 +444,19 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         <ActionButton icon={Trash2} label="删除" onClick={handleDelete} danger />
       </div>
 
-      {message.isStreaming && (
+      {message.isStreaming ? (
         <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
           <Metric icon={Clock} label={`已用 ${formatDuration(streamingElapsed)}`} />
         </div>
-      )}
-
-      {stats && !message.isStreaming && (
+      ) : (
         <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
           {/* ctx 与侧边栏服务状态同口径：本地会话累计水位（估算）。 */}
+          {/* 终止 / 出错的回复拿不到完整统计：整行保留，缺的值一律 -- 占位，不再隐藏整行。 */}
           <Metric icon={Gauge} label={formatSessionCtxUsage(sessionCtx)} />
-          <Metric icon={Zap} label={stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : 'tok 未返回'} />
-          <Metric icon={Clock} label={stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : 'TTFT 未返回'} />
-          <Metric icon={Clock} label={`${formatMetric(stats.tokensPerSec, ' tok/s')}`} />
-          <Metric icon={Clock} label={`生成耗时 ${formatSecondsShort(stats.genTime)}`} />
+          <Metric icon={Zap} label={stats && stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : '-- tok'} />
+          <Metric icon={Clock} label={stats && stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : '--s TTFT'} />
+          <Metric icon={Clock} label={`${formatMetric(stats ? stats.tokensPerSec : 0, ' tok/s')}`} />
+          <Metric icon={Clock} label={stats && stats.genTime > 0 ? `生成耗时 ${formatSecondsShort(stats.genTime)}` : '生成耗时 --m--s'} />
         </div>
       )}
     </motion.article>

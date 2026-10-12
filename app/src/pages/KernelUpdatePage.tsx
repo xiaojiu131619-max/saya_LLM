@@ -63,8 +63,9 @@ function kernelSourceDescription(source: KernelDownloadSource) {
 }
 
 // 后端标签：llama.cpp 各后端在 Windows 上的实际包名对应关系。
-// ROCm/HIP 需要单独标注并提示适用范围——它是 AMD 的官方路线，但只覆盖少数
-// 专业卡，普通 Radeon 与核显必须用 Vulkan，用户在列表里看到 "AMD" 容易选错。
+// ROCm/HIP 需要单独标注并提示适用范围——它只覆盖 RDNA2/3 的一部分卡
+// （RX 6000/7000/9000 系、Radeon PRO W6000/W7000、Instinct），普通 Radeon
+// 与核显必须用 Vulkan；HIP-capable 的卡在列表里会给出「支持 HIP」标记。
 const backendLabelMap: Record<string, string> = {
   CUDA: 'CUDA',
   Vulkan: 'Vulkan',
@@ -90,6 +91,17 @@ function releaseMatchDescription(info: LlamaReleaseInfo) {
   if (!asset) return '没有适合本机的 Windows x64 发布包';
   const backend = backendLabelMap[asset.backend] ?? asset.backend;
   return `${backend} · ${formatBytes(asset.size)} · ${asset.matches_host ? '已匹配本机' : '手动确认'}`;
+}
+
+/** ROCm/HIP 包的适用性说明（非 ROCm 包返回 null）。
+ *  有 AMD 卡时按支持级别给出「支持 / 未验证 / 不支持」三种说明，
+ *  没有 AMD 卡（NVIDIA / Intel 机器）提示该包与本机无关。 */
+function rocmApplicabilityNote(info: LlamaReleaseInfo): string | null {
+  const asset = pickMatchedAsset(info);
+  if (!asset || asset.backend !== 'ROCm') return null;
+  if (info.hip_gpu === null) return 'ROCm / HIP 包仅支持部分 AMD 显卡，与本机（非 AMD）无关';
+  if (info.hip_capable) return `本机 ${info.hip_gpu} 支持 HIP：可下载尝试，性能通常优于 Vulkan`;
+  return `本机 ${info.hip_gpu} 未在 ROCm 支持列表内，可能无法使用`;
 }
 
 // 从进度消息中提取下载百分比，用于进度条；非下载阶段返回 null。
@@ -452,6 +464,17 @@ export default function KernelUpdatePage() {
                         <div className="mt-0.5 truncate text-xs text-secondary-custom">
                           {release.published_at.slice(0, 10)} · {releaseMatchDescription(release)}
                         </div>
+                        {rocmApplicabilityNote(release) && (
+                          <div
+                            className={`mt-0.5 text-[11px] ${
+                              release.hip_capable
+                                ? 'text-[var(--state-success)]'
+                                : 'text-[var(--state-warning)]'
+                            }`}
+                          >
+                            {rocmApplicabilityNote(release)}
+                          </div>
+                        )}
                       </div>
                       <button
                         onClick={() => void handleUpdateFromRelease(release)}

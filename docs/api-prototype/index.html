@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API 服务 · 原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #091017;
+      --bg-raised: #0f1922;
+      --panel: rgba(19, 31, 41, .88);
+      --panel-strong: #16232e;
+      --panel-soft: rgba(255,255,255,.045);
+      --line: rgba(226, 241, 249, .12);
+      --line-strong: rgba(226, 241, 249, .22);
+      --text: #f2f7f9;
+      --muted: #8fa2ad;
+      --dim: #647985;
+      --blue: #6ed8ff;
+      --blue-deep: #1e9dcf;
+      --green: #72e0ae;
+      --green-bg: rgba(73, 212, 148, .12);
+      --amber: #ffc875;
+      --amber-bg: rgba(255, 183, 74, .12);
+      --red: #ff8d8d;
+      --red-bg: rgba(255, 91, 91, .12);
+      --radius: 18px;
+      --radius-sm: 11px;
+      --shadow: 0 24px 70px rgba(0,0,0,.28);
+      --mono: "Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      --sans: "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font: 14px/1.5 var(--sans);
+      background:
+        radial-gradient(circle at 76% -8%, rgba(28, 157, 207, .2), transparent 32rem),
+        radial-gradient(circle at 12% 100%, rgba(255, 155, 71, .08), transparent 28rem),
+        var(--bg);
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+    .rail {
+      position: relative; padding: 25px 17px 19px; border-right: 1px solid var(--line);
+      background: rgba(5, 12, 17, .58); backdrop-filter: blur(20px);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; padding: 0 9px; margin-bottom: 44px; }
+    .brand-mark { display:grid; place-items:center; width: 31px; height: 31px; border: 1px solid rgba(110,216,255,.55); border-radius: 10px; color: var(--blue); background: rgba(110,216,255,.08); font-weight: 800; letter-spacing: -.06em; }
+    .brand-name { font-size: 13px; letter-spacing: .13em; text-transform: uppercase; color: #cad9df; font-weight: 700; }
+    .nav-label { margin: 0 10px 10px; font-size: 10px; text-transform: uppercase; letter-spacing: .18em; color: var(--dim); }
+    .nav { display:grid; gap: 5px; }
+    .nav-item { display:flex; align-items:center; gap: 11px; width: 100%; padding: 11px 11px; border: 1px solid transparent; border-radius: 11px; color: var(--muted); background: transparent; text-align: left; }
+    .nav-item:hover { color: var(--text); background: var(--panel-soft); }
+    .nav-item.active { color: var(--text); border-color: rgba(110,216,255,.18); background: linear-gradient(100deg, rgba(110,216,255,.15), rgba(110,216,255,.03)); }
+    .nav-icon { width: 16px; height: 16px; flex: none; color: currentColor; }
+    .rail-footer { position: absolute; left: 17px; right: 17px; bottom: 20px; padding: 13px 12px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.025); }
+    .rail-footer .eyebrow { color: var(--dim); }
+    .rail-footer strong { display:block; margin-top: 3px; font-size: 12px; font-weight: 600; color: var(--muted); }
+
+    main { min-width: 0; padding: 37px clamp(22px, 5vw, 72px) 70px; }
+    .content { max-width: 1120px; margin: 0 auto; }
+    .topbar { display:flex; align-items:flex-start; justify-content:space-between; gap: 25px; margin-bottom: 32px; }
+    .eyebrow { color: var(--blue); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; font-weight: 800; }
+    h1 { margin: 7px 0 5px; font-size: clamp(30px, 4vw, 46px); line-height: 1.05; letter-spacing: -.055em; font-weight: 720; }
+    .lead { max-width: 620px; margin: 0; color: var(--muted); font-size: 14px; }
+    .toolbar { display:flex; align-items:center; gap: 9px; flex-wrap:wrap; justify-content:flex-end; }
+    .button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height: 38px; padding: 0 13px; border:1px solid var(--line-strong); border-radius: 10px; color:var(--text); background: rgba(255,255,255,.05); transition: .18s ease; }
+    .button:hover { border-color: rgba(110,216,255,.55); background: rgba(110,216,255,.1); transform: translateY(-1px); }
+    .button.primary { border-color: rgba(110,216,255,.65); color: #07131a; background: var(--blue); font-weight: 750; }
+    .button.primary:hover { background: #94e4ff; }
+    .button.ghost { color: var(--muted); background: transparent; }
+    .icon { width: 16px; height: 16px; }
+
+    .hero { display:grid; grid-template-columns: minmax(0, 1.32fr) minmax(290px, .68fr); gap: 14px; margin-bottom: 34px; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(140deg, rgba(25, 41, 53, .95), rgba(13, 23, 31, .91)); box-shadow: var(--shadow); }
+    .status-panel { min-height: 262px; padding: 27px 28px 24px; position:relative; overflow:hidden; }
+    .status-panel::after { content:""; position:absolute; width: 320px; height:320px; right:-110px; top:-150px; border:1px solid rgba(110,216,255,.16); border-radius:50%; box-shadow: 0 0 0 34px rgba(110,216,255,.03), 0 0 0 68px rgba(110,216,255,.025); pointer-events:none; }
+    .status-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; position:relative; z-index:1; }
+    .status-title { display:flex; align-items:center; gap:11px; font-size: 20px; font-weight: 730; letter-spacing:-.03em; }
+    .status-dot { width: 10px; height: 10px; border-radius:50%; background: var(--green); box-shadow: 0 0 0 5px rgba(114,224,174,.1), 0 0 20px rgba(114,224,174,.7); }
+    .status-dot.busy { background:var(--amber); box-shadow: 0 0 0 5px rgba(255,200,117,.1), 0 0 20px rgba(255,200,117,.65); }
+    .status-dot.error { background:var(--red); box-shadow: 0 0 0 5px rgba(255,141,141,.1), 0 0 20px rgba(255,141,141,.65); }
+    .status-badge { display:inline-flex; align-items:center; gap:7px; padding: 6px 10px; border-radius:999px; color: var(--green); background: var(--green-bg); font-size: 11px; font-weight: 750; white-space:nowrap; }
+    .status-badge.busy { color:var(--amber); background:var(--amber-bg); }
+    .status-badge.error { color:var(--red); background:var(--red-bg); }
+    .status-copy { position:relative; z-index:1; margin: 29px 0 26px; }
+    .status-copy p { margin: 0; color: var(--muted); }
+    .model-line { display:flex; align-items:center; gap: 10px; margin-top: 8px; font-family:var(--mono); font-size: 18px; color: var(--text); }
+    .model-tag { font: 11px var(--sans); color:var(--blue); border:1px solid rgba(110,216,255,.25); background:rgba(110,216,255,.08); padding:4px 7px; border-radius:6px; }
+    .status-foot { display:flex; flex-wrap:wrap; gap: 26px; position:relative; z-index:1; }
+    .fact-label { color:var(--dim); font-size:11px; }
+    .fact-value { margin-top: 3px; color:var(--text); font-size: 13px; }
+    .fact-value.mono { font-family:var(--mono); }
+
+    .request-panel { padding: 23px; display:flex; flex-direction:column; justify-content:space-between; min-height:262px; }
+    .panel-heading { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .panel-title { margin:0; font-size: 14px; font-weight: 750; letter-spacing:.01em; }
+    .panel-kicker { color:var(--dim); font-size:11px; }
+    .request-state { margin: 27px 0 23px; }
+    .request-state strong { display:block; font-size: 27px; letter-spacing:-.05em; }
+    .request-state span { display:block; margin-top:4px; color:var(--muted); }
+    .slot { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top: 15px; border-top: 1px solid var(--line); }
+    .slot-number { font: 700 18px var(--mono); color:var(--text); }
+    .slot-bar { display:flex; gap:4px; width: 92px; }
+    .slot-bar i { display:block; height:6px; flex:1; border-radius:99px; background: rgba(114,224,174,.85); }
+    .slot-bar i:last-child { background: rgba(255,255,255,.09); }
+    .busy-state .slot-bar i { background: rgba(255,200,117,.9); }
+    .error-state .slot-bar i { background: rgba(255,141,141,.9); }
+
+    .section { margin-top: 31px; }
+    .section-head { display:flex; align-items:end; justify-content:space-between; gap: 18px; margin-bottom: 12px; }
+    .section-title { margin:0; font-size: 17px; letter-spacing:-.025em; }
+    .section-note { margin:0; color:var(--muted); font-size:12px; }
+    .connect-grid { display:grid; grid-template-columns: minmax(0, 1.25fr) minmax(230px, .75fr); gap: 14px; }
+    .connect-card { padding: 22px; }
+    .label { color:var(--dim); font-size:11px; }
+    .endpoint { display:flex; align-items:center; justify-content:space-between; gap: 12px; margin-top: 8px; padding: 13px 14px; border:1px solid rgba(110,216,255,.23); border-radius: 11px; color:var(--blue); background:rgba(110,216,255,.055); }
+    .endpoint code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font: 13px var(--mono); }
+    .copy-button { display:inline-flex; align-items:center; gap:7px; flex:none; border:0; color: var(--blue); background:transparent; font-size:12px; font-weight:700; }
+    .copy-button:hover { color:#b7efff; }
+    .detail-list { display:grid; gap: 15px; margin-top: 22px; }
+    .detail { display:flex; align-items:center; justify-content:space-between; gap: 15px; padding-bottom: 13px; border-bottom:1px solid var(--line); }
+    .detail:last-child { padding-bottom:0; border-bottom:0; }
+    .detail-value { color:var(--text); font-size:13px; }
+    .detail-value.mono { font-family:var(--mono); }
+    .detail-value.good { color:var(--green); }
+    .key-card { padding:22px; display:flex; flex-direction:column; justify-content:space-between; min-height: 220px; }
+    .key-status { display:flex; align-items:center; gap: 11px; margin: 26px 0 16px; }
+    .key-icon { display:grid; place-items:center; width:35px; height:35px; border-radius:10px; color:var(--green); background:var(--green-bg); }
+    .key-status strong { display:block; font-size:14px; }
+    .key-status span { display:block; margin-top:2px; color:var(--muted); font-size:12px; }
+    .key-card .button { width:100%; }
+
+    .metrics { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+    .metric { min-height: 112px; padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.035); }
+    .metric-name { color:var(--muted); font-size:11px; }
+    .metric-value { margin-top: 12px; font: 700 22px var(--mono); letter-spacing:-.05em; }
+    .metric-note { margin-top: 3px; color:var(--dim); font-size:11px; }
+
+    details { border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.025); overflow:hidden; }
+    summary { display:flex; align-items:center; justify-content:space-between; gap: 14px; padding: 17px 19px; list-style:none; cursor:pointer; }
+    summary::-webkit-details-marker { display:none; }
+    summary:hover { background: rgba(255,255,255,.035); }
+    .summary-left { display:flex; align-items:center; gap:11px; }
+    .summary-left strong { font-size:14px; }
+    .chevron { color:var(--muted); transition:.18s; }
+    details[open] .chevron { transform:rotate(180deg); }
+    .settings { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; padding: 0 19px 19px; }
+    .setting { padding: 14px; border:1px solid var(--line); border-radius:11px; background:rgba(0,0,0,.1); }
+    .setting strong { display:block; margin-top:5px; font-size:13px; }
+    .setting p { margin: 5px 0 0; color:var(--muted); font-size:11px; }
+    .setting button { margin-top:12px; min-height:31px; padding:0 10px; border:1px solid var(--line-strong); border-radius:8px; color:var(--text); background:transparent; font-size:11px; }
+    .status-switch { display:flex; gap:5px; padding: 4px; border:1px solid var(--line); border-radius:10px; background:rgba(0,0,0,.12); }
+    .status-switch button { min-height: 28px; padding: 0 9px; border:0; border-radius:7px; color:var(--muted); background:transparent; font-size:11px; }
+    .status-switch button.active { color:var(--text); background:rgba(255,255,255,.1); }
+    .toast { position:fixed; right: 22px; bottom: 22px; padding: 11px 14px; border:1px solid rgba(110,216,255,.3); border-radius:10px; color:var(--blue); background:#122530; box-shadow:var(--shadow); opacity:0; transform:translateY(8px); pointer-events:none; transition:.22s; }
+    .toast.show { opacity:1; transform:none; }
+
+    @media (max-width: 880px) {
+      .app { grid-template-columns: 70px minmax(0, 1fr); }
+      .rail { padding: 20px 10px; }
+      .brand { justify-content:center; padding:0; margin-bottom: 38px; }
+      .brand-name, .nav-label, .nav-item span, .rail-footer { display:none; }
+      .nav-item { justify-content:center; padding: 12px; }
+      .hero, .connect-grid { grid-template-columns: 1fr; }
+      main { padding: 29px 24px 55px; }
+    }
+    @media (max-width: 620px) {
+      .topbar { display:block; }
+      .toolbar { margin-top:18px; justify-content:flex-start; }
+      .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .settings { grid-template-columns:1fr; }
+      .status-panel, .request-panel, .connect-card, .key-card { padding: 19px; }
+      .section-head { display:block; }
+      .section-note { margin-top:4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="rail" aria-label="主导航">
+      <div class="brand"><div class="brand-mark">A</div><div class="brand-name">Agent LLM</div></div>
+      <div class="nav-label">工作区</div>
+      <nav class="nav">
+        <button class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg><span>模型</span></button>
+        <button class="nav-item active" type="button"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M16 3h5v5"/></svg><span>API 服务</span></button>
+        <button class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16"/><path d="m7 15 3-4 3 2 4-6"/></svg><span>运行日志</span></button>
+      </nav>
+      <div class="rail-footer"><div class="eyebrow">原型预览</div><strong>单模型 · 单并发</strong></div>
+    </aside>
+
+    <main>
+      <div class="content">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">服务控制台 / API</div>
+            <h1>API 服务</h1>
+            <p class="lead">快速确认服务状态、获取客户端连接信息，并查看唯一请求槽位的当前占用情况。</p>
+          </div>
+          <div class="toolbar">
+            <div class="status-switch" aria-label="切换演示状态">
+              <button class="active" type="button" data-state="idle">空闲</button>
+              <button type="button" data-state="busy">生成中</button>
+              <button type="button" data-state="error">异常</button>
+            </div>
+            <button class="button primary" id="refresh" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 0 0-14.9-4M4 5v4h4M4 13a8 8 0 0 0 14.9 4M20 19v-4h-4"/></svg>重新检测</button>
+          </div>
+        </header>
+
+        <section class="hero" aria-label="服务总览">
+          <article class="panel status-panel" id="statusPanel">
+            <div class="status-heading">
+              <div class="status-title"><i class="status-dot" id="statusDot"></i><span id="statusTitle">API 服务运行中</span></div>
+              <div class="status-badge" id="statusBadge"><i class="status-dot"></i><span id="statusBadgeText">可接受请求</span></div>
+            </div>
+            <div class="status-copy">
+              <p>当前加载模型</p>
+              <div class="model-line"><span>Qwen3-8B-Instruct</span><span class="model-tag">单模型</span></div>
+            </div>
+            <div class="status-foot">
+              <div><div class="fact-label">最近检测</div><div class="fact-value" id="checkedAt">刚刚 · 24 ms</div></div>
+              <div><div class="fact-label">访问范围</div><div class="fact-value">局域网可访问</div></div>
+              <div><div class="fact-label">服务端口</div><div class="fact-value mono">8080</div></div>
+            </div>
+          </article>
+
+          <article class="panel request-panel" id="requestPanel">
+            <div class="panel-heading"><h2 class="panel-title">当前请求</h2><span class="panel-kicker">单并发</span></div>
+            <div class="request-state"><strong id="requestTitle">服务空闲</strong><span id="requestHint">可以接受新的请求</span></div>
+            <div class="slot"><div><div class="fact-label">请求槽位</div><div class="slot-number" id="slotNumber">0 / 1</div></div><div class="slot-bar" aria-label="请求槽位占用"><i></i><i></i></div></div>
+          </article>
+        </section>
+
+        <section class="section" aria-label="连接信息">
+          <div class="section-head"><div><h2 class="section-title">连接信息</h2><p class="section-note">外部客户端只需要下面三项信息即可发起调用。</p></div></div>
+          <div class="connect-grid">
+            <article class="panel connect-card">
+              <div class="label">客户端 Base URL</div>
+              <div class="endpoint"><code id="endpoint">http://192.168.1.20:8080/v1</code><button class="copy-button" type="button" data-copy="#endpoint"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 16H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1"/></svg>复制</button></div>
+              <div class="detail-list">
+                <div class="detail"><span class="label">当前模型</span><span class="detail-value mono">Qwen3-8B-Instruct</span></div>
+                <div class="detail"><span class="label">聊天接口</span><span class="detail-value mono">/v1/chat/completions</span></div>
+                <div class="detail"><span class="label">兼容协议</span><span class="detail-value">OpenAI Compatible</span></div>
+              </div>
+              <button class="button" id="copyExample" type="button" style="margin-top:22px; width:100%;">复制调用示例</button>
+            </article>
+            <article class="panel key-card">
+              <div><div class="label">访问鉴权</div><div class="key-status"><div class="key-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 5l3 3M14 7l3 3"/></svg></div><div><strong>API Key 已启用</strong><span>外部请求需要 Bearer Token</span></div></div></div>
+              <div><button class="button" id="manageKey" type="button">管理 API Key</button><p class="panel-kicker" style="margin:10px 0 0; text-align:center;">当前运行中的 Key 已生效</p></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" aria-label="使用统计">
+          <div class="section-head"><div><h2 class="section-title">使用统计</h2><p class="section-note">单模型累计数据；详细日志仍可在运行日志中查看。</p></div><span class="panel-kicker">今日 · 10 月 8 日</span></div>
+          <div class="metrics">
+            <article class="metric"><div class="metric-name">请求次数</div><div class="metric-value">1,248</div><div class="metric-note">过去 24 小时</div></article>
+            <article class="metric"><div class="metric-name">输入 Token</div><div class="metric-value">520K</div><div class="metric-note">提示词与上下文</div></article>
+            <article class="metric"><div class="metric-name">输出 Token</div><div class="metric-value">680K</div><div class="metric-note">模型生成内容</div></article>
+            <article class="metric"><div class="metric-name">输出速度</div><div class="metric-value">32.4</div><div class="metric-note">tok/s · 最近一次</div></article>
+          </div>
+        </section>
+
+        <section class="section" aria-label="高级设置">
+          <details>
+            <summary><span class="summary-left"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.5"/></svg><strong>高级设置</strong></span><svg class="icon chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="settings">
+              <div class="setting"><div class="label">网络访问</div><strong>局域网可访问</strong><p>监听 0.0.0.0，其他设备可连接。</p><button type="button" data-toast="这里可以切换仅本机 / 局域网访问">修改访问范围</button></div>
+              <div class="setting"><div class="label">服务端口</div><strong class="mono">8080</strong><p>修改后需要重新加载模型。</p><button type="button" data-toast="这里可以编辑 API 端口">修改端口</button></div>
+              <div class="setting"><div class="label">运行状态</div><strong>模型已加载</strong><p>默认参数保持不变，重新加载后生效。</p><button type="button" data-toast="这里可以重新加载当前模型">重新加载模型</button></div>
+            </div>
+          </details>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script>
+    const states = {
+      idle: { title: 'API 服务运行中', badge: '可接受请求', request: '服务空闲', hint: '可以接受新的请求', slot: '0 / 1', className: '' },
+      busy: { title: 'API 服务运行中', badge: '正在生成', request: '请求处理中', hint: '唯一请求槽位正在使用', slot: '1 / 1', className: 'busy-state' },
+      error: { title: 'API 服务异常', badge: '暂不可用', request: '无法接受请求', hint: '请检查服务状态或重新加载模型', slot: '— / 1', className: 'error-state' },
+    };
+    const toast = document.getElementById('toast');
+    let toastTimer;
+    function showToast(text) { toast.textContent = text; toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 1900); }
+    function setState(name) {
+      const state = states[name];
+      document.getElementById('statusTitle').textContent = state.title;
+      document.getElementById('statusBadgeText').textContent = state.badge;
+      document.getElementById('requestTitle').textContent = state.request;
+      document.getElementById('requestHint').textContent = state.hint;
+      document.getElementById('slotNumber').textContent = state.slot;
+      document.getElementById('statusPanel').className = 'panel status-panel ' + state.className;
+      document.getElementById('requestPanel').className = 'panel request-panel ' + state.className;
+      document.getElementById('statusDot').className = 'status-dot ' + (name === 'busy' ? 'busy' : name === 'error' ? 'error' : '');
+      document.getElementById('statusBadge').className = 'status-badge ' + (name === 'busy' ? 'busy' : name === 'error' ? 'error' : '');
+      document.querySelectorAll('[data-state]').forEach(btn => btn.classList.toggle('active', btn.dataset.state === name));
+      document.getElementById('checkedAt').textContent = name === 'error' ? '刚刚 · 检测失败' : '刚刚 · 24 ms';
+    }
+    document.querySelectorAll('[data-state]').forEach(btn => btn.addEventListener('click', () => setState(btn.dataset.state)));
+    document.getElementById('refresh').addEventListener('click', () => { document.getElementById('checkedAt').textContent = '刚刚 · 24 ms'; showToast('检测完成，API 服务正常'); });
+    document.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', async () => { const value = document.querySelector(btn.dataset.copy).textContent; try { await navigator.clipboard.writeText(value); } catch {} showToast('Base URL 已复制'); }));
+    document.getElementById('copyExample').addEventListener('click', () => showToast('调用示例已复制'));
+    document.getElementById('manageKey').addEventListener('click', () => showToast('这里可以打开 API Key 管理')); 
+    document.querySelectorAll('[data-toast]').forEach(btn => btn.addEventListener('click', () => showToast(btn.dataset.toast)));
+  </script>
+</body>
+</html>
+
