@@ -59,6 +59,7 @@ pub fn run() {
             commands::server::get_video_runtime_info,
             commands::server::ping_local_api,
             commands::server::get_server_logs,
+            commands::server::get_server_logs_tail,
             commands::server::clear_server_logs,
             commands::server::api_token_usage,
             commands::server::start_embedding_server,

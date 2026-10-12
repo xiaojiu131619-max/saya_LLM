@@ -26,13 +26,20 @@ import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
 import {
+  fast27bGetLogs,
+  getDesktopServerLogsTail,
   getDesktopServerStatus,
-  getDesktopServerLogs,
   isDesktopRuntime,
   stopDesktopServer,
 } from '@/lib/desktop';
 import type { ChatSession, MessageStats, ModelInfo } from '@/types';
-import { estimateSessionCtxTokens, latestRuntimeStatsFromServerLogs, sessionBelongsToModel } from '@/features/chat/chatUtils';
+import {
+  estimateSessionCtxTokens,
+  latestEngineRuntimeStats,
+  latestRuntimeStatsFromServerLogs,
+  sessionBelongsToModel,
+} from '@/features/chat/chatUtils';
+import { fast27bServiceView, useEngineStatuses } from '@/hooks/useEngineStatuses';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -51,6 +58,28 @@ function latestStatsForSessions(sessions?: ChatSession[]) {
 function averageTokensPerSec(usage?: { responseCount: number; totalTokensPerSec: number }) {
   if (!usage || usage.responseCount <= 0 || usage.totalTokensPerSec <= 0) return undefined;
   return usage.totalTokensPerSec / usage.responseCount;
+}
+
+/**
+ * 读数未变时返回旧引用：轮询每秒都在跑，而 setState 收到新对象一定会触发重渲染，
+ * 即使界面上的数字一个字都没变。用旧引用让 React 直接跳过这次更新。
+ */
+function sameMessageStats(a: MessageStats | undefined, b: MessageStats | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.ctxUsed === b.ctxUsed
+    && a.ctxTotal === b.ctxTotal
+    && a.outputTokens === b.outputTokens
+    && a.firstTokenDelay === b.firstTokenDelay
+    && a.tokensPerSec === b.tokensPerSec
+    && a.genTime === b.genTime;
+}
+
+/** 引擎日志是追加式的：长度 + 末行不变即视为同一份快照，避免每秒重渲染。 */
+function sameEngineLogs(a: string[], b: string[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.length === 0 || a[a.length - 1] === b[b.length - 1];
 }
 
 function formatTokensPerSec(value?: number) {
@@ -77,6 +106,16 @@ export default function ModelWorkspace() {
   // 触发 systemStats 每秒轮询，便于服务状态卡显示实时显存/内存占用。
   const systemStats = useSystemStats();
   const [apiRuntimeStats, setApiRuntimeStats] = useState<MessageStats | undefined>();
+  // fast-27b 引擎的日志快照：引擎的 tok/s 与已用 ctx 只能从它自己的日志解析
+  // （格式与 llama-server 完全不同，llama 那套正则对它无效），仅在选中引擎后端时轮询。
+  const [engineLogs, setEngineLogs] = useState<string[]>([]);
+
+  // ---- 服务后端：跟随「对话后端」选择（主模型 llama-server / fast-27b 引擎）----
+  // 两套后端共用同一批渲染分支，差异全部收敛到下面那组 service* 派生值。
+  const engineStatuses = useEngineStatuses();
+  const engine = fast27bServiceView(engineStatuses.fast27b);
+  const engineRunning = engine.running;
+  const engineMode = state.chatEngine === 'fast27b';
   const detailOpen = state.currentView === 'modelLoad';
   const llamaLogsOpen = state.currentView === 'llamaLogs';
   // API 状态、Agent、向量服务、fast-27b 同级：保留左侧边栏，在右侧内容区展示。
@@ -108,7 +147,25 @@ export default function ModelWorkspace() {
     ?? loadedModelSessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
   const sessionCtxUsed = estimateSessionCtxTokens(loadedActiveSession?.messages ?? []);
   const sessionCtxCapacity = loadedModel?.loadConfig.ctxLength || loadedModel?.ctxLength || 0;
-  const linkState = state.serverRunning && loadedModel ? '已连接' : state.serverRunning ? '服务在线' : '未连接';
+
+  // 引擎后端的实时读数：来自引擎日志（与 llama 的 prompt eval / eval time 行无关）。
+  const engineStats = useMemo(
+    () => (engineMode ? latestEngineRuntimeStats(engineLogs, engine.effectiveCtxTotal) : undefined),
+    [engineMode, engineLogs, engine.effectiveCtxTotal],
+  );
+
+  // ---- 统一后的服务视图（两套后端共用同一批渲染分支）----
+  const serviceRunning = engineMode ? engineRunning : state.serverRunning;
+  const servicePort = engineMode ? engine.port : state.serverPort;
+  const serviceLabel = engineMode ? engine.modelLabel : (loadedModel ? loadedModel.name : '未加载');
+  const serviceTokensPerSec = engineMode ? engineStats?.tokensPerSec : tokensPerSec;
+  const serviceCtxUsed = engineMode ? (engineStats?.ctxUsed ?? 0) : sessionCtxUsed;
+  // 水位分母：引擎取设备 KV 池优先的有效上限，主模型取当前加载模型的 -c。
+  const serviceCtxCapacity = engineMode ? engine.effectiveCtxTotal : sessionCtxCapacity;
+
+  const linkState = engineMode
+    ? (engine.serviceable ? '已连接' : engine.running ? '引擎异常' : '未连接')
+    : (state.serverRunning && loadedModel ? '已连接' : state.serverRunning ? '服务在线' : '未连接');
   const handleStopServer = async () => {
     try {
       await stopDesktopServer();
@@ -164,8 +221,9 @@ export default function ModelWorkspace() {
     let disposed = false;
     const refreshRuntimeStats = async () => {
       try {
-        const lines = await getDesktopServerLogs();
-        if (!disposed) setApiRuntimeStats(latestRuntimeStatsFromServerLogs(lines, ctxTotal));
+        // 只要尾部若干行就够解析出读数，不必每秒搬整个日志数组。
+        const next = latestRuntimeStatsFromServerLogs(await getDesktopServerLogsTail(), ctxTotal);
+        if (!disposed) setApiRuntimeStats((prev) => (sameMessageStats(prev, next) ? prev : next));
       } catch {
         if (!disposed) setApiRuntimeStats(undefined);
       }
@@ -179,6 +237,28 @@ export default function ModelWorkspace() {
       setApiRuntimeStats(undefined);
     };
   }, [loadedModel, shouldFetchRuntimeStats]);
+
+  // 引擎后端：引擎日志走独立缓冲、格式与 llama-server 不同，需单独轮询再解析。
+  useEffect(() => {
+    if (!engineMode || !isDesktopRuntime()) return;
+    let disposed = false;
+    const refreshEngineLogs = async () => {
+      try {
+        const lines = await fast27bGetLogs();
+        if (!disposed) setEngineLogs((prev) => (sameEngineLogs(prev, lines) ? prev : lines));
+      } catch {
+        if (!disposed) setEngineLogs([]);
+      }
+    };
+
+    void refreshEngineLogs();
+    const timer = window.setInterval(() => void refreshEngineLogs(), 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      setEngineLogs([]);
+    };
+  }, [engineMode]);
 
   // 竖屏 / 窄窗口（≤959px，与对话页侧边栏折叠同一断点）：侧边栏收缩为图标栏，
   // 保留全部导航入口（服务状态与 llama 日志在窄栏下以图标形式可达）。
@@ -244,8 +324,10 @@ export default function ModelWorkspace() {
               icon={Activity}
               label="服务状态"
               active={apiStatusOpen}
-              title={state.serverRunning ? '服务状态 · 运行中' : '服务状态 · 未运行'}
-              indicator={state.serverRunning ? 'ok' : 'off'}
+              title={engineMode
+                ? (engine.serviceable ? `服务状态 · ${engine.label} 运行中（:${engine.port}）` : `服务状态 · ${engine.label} 未运行`)
+                : (state.serverRunning ? '服务状态 · 运行中' : '服务状态 · 未运行')}
+              indicator={serviceRunning ? 'ok' : 'off'}
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'apiStatus' })}
             />
             <RailNavButton
@@ -343,11 +425,12 @@ export default function ModelWorkspace() {
         <div className="mt-5 px-3">
           <LoadedModelPanel model={loadedModel} running={state.serverRunning} onStop={handleStopServer} />
           <ServiceStatusPanel
-            running={state.serverRunning}
-            port={state.serverPort}
-            tokensPerSec={formatTokensPerSec(tokensPerSec)}
-            ctxUsage={formatCtxUsage(sessionCtxUsed, sessionCtxCapacity)}
-            ctxPercent={sessionCtxCapacity > 0 ? Math.min(100, (sessionCtxUsed / sessionCtxCapacity) * 100) : undefined}
+            running={serviceRunning}
+            port={servicePort}
+            label={serviceLabel}
+            tokensPerSec={formatTokensPerSec(serviceTokensPerSec)}
+            ctxUsage={formatCtxUsage(serviceCtxUsed, serviceCtxCapacity)}
+            ctxPercent={serviceCtxCapacity > 0 ? Math.min(100, (serviceCtxUsed / serviceCtxCapacity) * 100) : undefined}
             vramUsage={formatGbPair(systemStats.vramUsed, systemStats.vramTotal)}
             ramUsage={formatGbPair((systemStats.ramUsage / 100) * systemStats.ramTotal, systemStats.ramTotal)}
             linkState={linkState}
@@ -520,9 +603,10 @@ function LlamaLogsCard({ running, active, onOpen }: { running: boolean; active: 
   );
 }
 
-function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, active, onOpenDetails }: {
+function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, active, onOpenDetails }: {
   running: boolean;
   port: number;
+  label: string;
   tokensPerSec: string;
   ctxUsage: string;
   ctxPercent?: number;
@@ -546,7 +630,7 @@ function ServiceStatusPanel({ running, port, tokensPerSec, ctxUsage, ctxPercent,
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
           <Server className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)]' : ''}`} />
-          <span>服务状态</span>
+          <span className="truncate">{label}</span>
         </div>
         <div className="flex items-center gap-1">
           <span className={`text-[10px] font-medium ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`}>

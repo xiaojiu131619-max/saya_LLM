@@ -400,3 +400,107 @@ export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: numbe
     genTime: 0,
   };
 }
+
+// ---------------------------------------------------------------------------
+// fast-27b 引擎日志解析
+// 引擎日志与 llama-server 是两套完全不同的格式（独立缓冲 FAST27B_LOGS），llama 的
+// `prompt eval time` / `eval time = … tokens per second` 正则对它无效。引擎自己的行：
+//   req#25 started | openai-chat stream | 36 messages | max output 32,768 | thinking xhigh
+//   req#30 done | openai-chat | stop token | prompt 19 | output 11 | cache 0 (0.0%) | TTFT 258 ms | total 288 ms
+//   req#26 failed during prepare | openai-chat stream | HTTP 503 | service unavailable
+//   req#7 response failed during transport | HTTP 499 | client disconnected
+// 引擎把所有来源的请求（本应用对话、外部客户端、dsh）都写进这份日志，因此
+// 「有 started 但还没 done/failed」是真实的在途请求判定——比只看本应用对话更准。
+// ---------------------------------------------------------------------------
+
+const ENGINE_REQ_STARTED = /req#(\d+)\s+started\s*\|/;
+const ENGINE_REQ_DONE = /req#(\d+)\s+done\s*\|/;
+const ENGINE_REQ_FAILED = /req#(\d+)[^|]*\bfailed\b/;
+const ENGINE_PROMPT_TOKENS = /\bprompt\s+([\d,]+)\b/;
+const ENGINE_OUTPUT_TOKENS = /\boutput\s+([\d,]+)\b/;
+const ENGINE_TTFT_MS = /\bTTFT\s+([\d.]+)\s*ms/i;
+const ENGINE_TOTAL_MS = /\btotal\s+([\d.]+)\s*ms/i;
+
+export interface EngineLogSnapshot {
+  /** 是否有请求已开始但尚未结束（引擎固定单并发，实际取值只有 true / false）。 */
+  inFlight: boolean;
+  /** 最近一次成功完成的请求读数；缓冲区里没有 done 行时为 null。 */
+  lastDone: {
+    promptTokens: number;
+    outputTokens: number;
+    /** 秒（日志给的是毫秒）。 */
+    firstTokenDelay: number;
+    /** 秒（日志的 total，含首字前的等待）。 */
+    genTime: number;
+    /** 0 = 样本不足，不展示（小样本除出来的速度没有意义）。 */
+    tokensPerSec: number;
+  } | null;
+}
+
+function readLogInt(line: string, pattern: RegExp): number {
+  const match = line.match(pattern);
+  if (!match) return 0;
+  return Math.max(0, Math.round(Number(match[1].replace(/,/g, '')) || 0));
+}
+
+function readLogFloat(line: string, pattern: RegExp): number {
+  const match = line.match(pattern);
+  if (!match) return 0;
+  return Math.max(0, Number(match[1]) || 0);
+}
+
+function engineDoneReadout(line: string): NonNullable<EngineLogSnapshot['lastDone']> {
+  const promptTokens = readLogInt(line, ENGINE_PROMPT_TOKENS);
+  const outputTokens = readLogInt(line, ENGINE_OUTPUT_TOKENS);
+  const ttftMs = readLogFloat(line, ENGINE_TTFT_MS);
+  const totalMs = readLogFloat(line, ENGINE_TOTAL_MS);
+  const decodeMs = Math.max(0, totalMs - ttftMs);
+  // 生成阶段不足 100ms 或输出不足 16 token 时，除出来的速度是噪声：给 0，界面显示占位。
+  const sampleEnough = outputTokens >= 16 && decodeMs >= 100;
+  return {
+    promptTokens,
+    outputTokens,
+    firstTokenDelay: ttftMs / 1000,
+    genTime: totalMs / 1000,
+    tokensPerSec: sampleEnough ? outputTokens / (decodeMs / 1000) : 0,
+  };
+}
+
+export function parseEngineLog(logs: string[]): EngineLogSnapshot {
+  let lastStarted = -1;
+  let lastTerminal = -1;
+  let lastDone: EngineLogSnapshot['lastDone'] = null;
+
+  for (let index = 0; index < logs.length; index += 1) {
+    const line = logs[index];
+    if (!line.includes('req#')) continue;
+    // 顺序要紧：done 行里不会再出现 failed；failed 判定用 `[^|]*`，也吃不下 `done |`。
+    if (ENGINE_REQ_DONE.test(line)) {
+      lastTerminal = index;
+      lastDone = engineDoneReadout(line);
+      continue;
+    }
+    if (ENGINE_REQ_FAILED.test(line)) {
+      lastTerminal = index;
+      continue;
+    }
+    if (ENGINE_REQ_STARTED.test(line)) lastStarted = index;
+  }
+
+  return { inFlight: lastStarted > lastTerminal, lastDone };
+}
+
+/** 引擎的「实时运行」读数；字段与 latestRuntimeStatsFromServerLogs 对齐（共用同一套界面）。 */
+export function latestEngineRuntimeStats(logs: string[], ctxTotal: number): MessageStats | undefined {
+  if (!Number.isFinite(ctxTotal) || ctxTotal <= 0) return undefined;
+  const { lastDone } = parseEngineLog(logs);
+  if (!lastDone) return undefined;
+  return {
+    ctxUsed: lastDone.promptTokens + lastDone.outputTokens,
+    ctxTotal,
+    outputTokens: lastDone.outputTokens,
+    firstTokenDelay: lastDone.firstTokenDelay,
+    tokensPerSec: lastDone.tokensPerSec,
+    genTime: lastDone.genTime,
+  };
+}

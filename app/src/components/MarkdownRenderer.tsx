@@ -58,7 +58,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   const reasoningSegments = useMemo(() => parseReasoningContent(content), [content]);
 
   return (
-    <div className="markdown-body min-w-0 max-w-full text-[16px] leading-8 text-primary-custom">
+    <div className="markdown-body prose-body min-w-0 max-w-full text-primary-custom">
       {reasoningSegments.map((segment, segmentIndex) => {
         if (segment.type === 'thought') {
           return <ThoughtBlock key={`thought-${segmentIndex}`} content={segment.content} />;
@@ -152,12 +152,12 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
   };
 
   return (
-    <div className="my-3 max-w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-[var(--surface)]">
+    <div className="my-3 max-w-full overflow-hidden rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)] dark:border-white/[0.08] dark:bg-[var(--surface)]">
       <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface-muted)] px-4 py-2 dark:border-white/[0.08] dark:bg-[var(--surface-hover)]">
-        <span className="mono-font text-[12px] uppercase text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{lang}</span>
+        <span className="mono-font text-[length:var(--font-eyebrow)] uppercase tracking-[var(--tracking-eyebrow)] text-[var(--text-secondary)]">{lang}</span>
         <button
           onClick={handleCopy}
-          className={`flex items-center gap-1.5 text-[12px] transition-colors ${
+          className={`flex items-center gap-1.5 text-[length:var(--font-caption)] transition-colors ${
             copied
               ? 'text-[var(--state-success)] dark:text-[var(--state-success)]'
               : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] dark:text-[var(--text-secondary)] dark:hover:text-[var(--text-primary)]'
@@ -170,15 +170,15 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
           )}
         </button>
       </div>
-      <pre className="grid max-w-full grid-cols-[auto_minmax(0,1fr)] gap-3 overflow-x-hidden p-4 text-[14px] leading-7">
+      <pre className="grid max-w-full grid-cols-[auto_minmax(0,1fr)] gap-3 overflow-x-hidden p-4 text-[length:var(--font-body)] leading-[var(--leading-code)]">
         <span
           aria-hidden="true"
-          className="mono-font select-none whitespace-pre text-right text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]"
+          className="mono-font select-none whitespace-pre text-right text-[var(--text-tertiary)]"
         >
           {codeLines.map((_, index) => index + 1).join('\n')}
         </span>
         <code
-          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[var(--text-primary)] dark:text-[var(--border)]"
+          className="hljs mono-font min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[var(--text-primary)]"
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       </pre>
@@ -199,7 +199,7 @@ export function ThoughtBlock({ content }: { content: string }) {
 
   return (
     <div
-      className="my-3 max-w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-muted)]/70 transition-all dark:border-white/[0.08] dark:bg-white/[0.03]"
+      className="my-3 max-w-full overflow-hidden rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/70 transition-all dark:border-white/[0.08] dark:bg-white/[0.03]"
       style={{ overflowAnchor: 'none' }}
     >
       <button
@@ -211,16 +211,16 @@ export function ThoughtBlock({ content }: { content: string }) {
           // 否则流式输出会把视口重新拽到最底部，导致无法停留阅读和折叠。
           window.dispatchEvent(new CustomEvent('agent-llm:thought-toggle'));
         }}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.06]"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.06]"
       >
         <span className="flex min-w-0 items-center gap-2">
           <Brain className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
           <span className="truncate">思考过程</span>
-          <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <span className="flex-shrink-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--app-bg)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04]">
             {lineCount} 行 · {wordCount} 字
           </span>
         </span>
-        <span className="flex items-center gap-1 text-[11px] text-[var(--text-tertiary)]">
+        <span className="flex items-center gap-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
           <span>{expanded ? '收起' : '展开'}</span>
           <ChevronDown
             className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-200 ${expanded ? 'rotate-180' : 'rotate-0'}`}
@@ -234,7 +234,7 @@ export function ThoughtBlock({ content }: { content: string }) {
           className="relative overflow-hidden border-t border-dashed border-[var(--border)] dark:border-white/[0.06]"
           style={{ maxHeight: '3.6rem' }}
         >
-          <div className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[13px] leading-relaxed text-[var(--text-tertiary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
+          <div className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[13px] leading-[var(--leading-code)] text-[var(--text-tertiary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
             {trimmed}
           </div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-[var(--surface-muted)] to-transparent dark:from-[var(--surface-raised)]" />
@@ -242,7 +242,7 @@ export function ThoughtBlock({ content }: { content: string }) {
       )}
 
       {expanded && (
-        <div className="border-t border-[var(--border)] px-3.5 py-3 font-mono text-[13px] leading-relaxed text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:border-white/[0.06] dark:text-[var(--text-secondary)]">
+        <div className="border-t border-[var(--border)] px-3.5 py-3 font-mono text-[13px] leading-[var(--leading-code)] text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:border-white/[0.06]">
           {trimmed}
         </div>
       )}
@@ -325,10 +325,18 @@ function InlineMarkdown({ content }: { content: string }) {
     if (headingMatch) {
       flushList();
       const level = headingMatch[1].length;
-      const sizes: Record<number, string> = { 1: 'text-xl', 2: 'text-lg', 3: 'text-base', 4: 'text-base', 5: 'text-sm', 6: 'text-sm' };
-      const sizeClass = sizes[level] || 'text-sm';
+      // 标题阶梯：靠字号与字距拉开层级（本机 Win10 无 Segoe UI Variable，不能靠可变字重）。
+      const sizes: Record<number, string> = {
+        1: 'text-[20px] font-bold',
+        2: 'text-[17px] font-semibold',
+        3: 'text-[length:var(--font-subtitle)] font-semibold',
+        4: 'text-[length:var(--font-chat)] font-semibold',
+        5: 'text-[length:var(--font-body)] font-semibold',
+        6: 'text-[length:var(--font-body)] font-semibold',
+      };
+      const sizeClass = sizes[level] || 'text-[length:var(--font-body)] font-semibold';
       const HeadingTag = `h${Math.min(level, 6)}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
-      elements.push(<HeadingTag key={idx} className={`${sizeClass} font-semibold mt-4 mb-2 text-primary-custom`}>{renderInline(headingMatch[2])}</HeadingTag>);
+      elements.push(<HeadingTag key={idx} className={`${sizeClass} mt-4 mb-2 tracking-[var(--tracking-tight)] text-primary-custom`}>{renderInline(headingMatch[2])}</HeadingTag>);
       idx += 1;
       continue;
     }
@@ -338,7 +346,7 @@ function InlineMarkdown({ content }: { content: string }) {
       if (!inList || listType !== 'ul') flushList();
       inList = true;
       listType = 'ul';
-      listItems.push(<li key={idx} className="break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(ulMatch[1])}</li>);
+      listItems.push(<li key={idx} className="prose-body break-words text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(ulMatch[1])}</li>);
       idx += 1;
       continue;
     }
@@ -348,7 +356,7 @@ function InlineMarkdown({ content }: { content: string }) {
       if (!inList || listType !== 'ol') flushList();
       inList = true;
       listType = 'ol';
-      listItems.push(<li key={idx} className="break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(olMatch[1])}</li>);
+      listItems.push(<li key={idx} className="prose-body break-words text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(olMatch[1])}</li>);
       idx += 1;
       continue;
     }
@@ -356,7 +364,7 @@ function InlineMarkdown({ content }: { content: string }) {
     if (trimmed.startsWith('>')) {
       flushList();
       elements.push(
-        <blockquote key={idx} className="my-2 break-words border-l-2 border-[var(--accent)] pl-3 text-[16px] leading-8 text-secondary-custom italic [overflow-wrap:anywhere]">
+        <blockquote key={idx} className="prose-body my-2 break-words border-l-2 border-[var(--accent)] pl-3 text-secondary-custom italic [overflow-wrap:anywhere]">
           {renderInline(trimmed.slice(1).trim())}
         </blockquote>
       );
@@ -366,13 +374,13 @@ function InlineMarkdown({ content }: { content: string }) {
 
     if (trimmed.match(/^---+$/)) {
       flushList();
-      elements.push(<hr key={idx} className="my-4 border-white/10" />);
+      elements.push(<hr key={idx} className="my-4 border-[var(--border)]" />);
       idx += 1;
       continue;
     }
 
     flushList();
-    elements.push(<p key={idx} className="my-1.5 whitespace-pre-wrap break-words text-[16px] leading-8 text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(trimmed)}</p>);
+    elements.push(<p key={idx} className="prose-body my-1.5 whitespace-pre-wrap break-words text-primary-custom/90 [overflow-wrap:anywhere]">{renderInline(trimmed)}</p>);
     idx += 1;
   }
 
@@ -417,8 +425,8 @@ function MarkdownTable({
   rows: string[][];
 }) {
   return (
-    <div className="my-3 max-w-full overflow-x-auto rounded-lg border border-[var(--border)] dark:border-white/[0.08]">
-      <table className="w-full border-collapse text-[15px] leading-7">
+    <div className="my-3 max-w-full overflow-x-auto rounded-[var(--radius-field)] border border-[var(--border)] dark:border-white/[0.08]">
+      <table className="w-full border-collapse text-[length:var(--font-body)] leading-[var(--leading-code)] [font-variant-numeric:tabular-nums]">
         <thead>
           <tr className="bg-[var(--surface-muted)] dark:bg-[var(--surface-hover)]">
             {header.map((cell, i) => (
@@ -471,7 +479,7 @@ function renderInline(text: string): React.ReactNode {
       parts.push(<em key={match.index} className="italic">{match[4]}</em>);
     } else if (match[5]) {
       parts.push(
-        <code key={match.index} className="mono-font rounded-md bg-[var(--state-danger-bg)] px-1.5 py-0.5 text-[14px] text-[var(--accent)] break-words [overflow-wrap:anywhere] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">
+        <code key={match.index} className="mono-font rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-body)] text-[var(--accent)] break-words [overflow-wrap:anywhere] dark:bg-[var(--surface-raised)]">
           {match[5]}
         </code>
       );

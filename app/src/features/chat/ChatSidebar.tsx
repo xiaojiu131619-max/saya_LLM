@@ -15,8 +15,6 @@ import type { ChatSession, ModelInfo, ThemeType } from '@/types';
 interface ChatSidebarProps {
   activeModel?: ModelInfo;
   canChat: boolean;
-  /** 非空 = 当前对话走 fast-27b 引擎后端：模型卡整体切换为引擎展示。 */
-  engineTarget?: { label: string; statusText: string; running: boolean; avatar: string };
   collapsed: boolean;
   collapseLocked?: boolean;
   selectionMode: boolean;
@@ -45,7 +43,6 @@ interface ChatSidebarProps {
 export default function ChatSidebar({
   activeModel,
   canChat,
-  engineTarget,
   collapsed,
   collapseLocked = false,
   selectionMode,
@@ -71,12 +68,8 @@ export default function ChatSidebar({
   vramPercent,
 }: ChatSidebarProps) {
   const expandedTransition = { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const };
-  const modelStatusLabel = engineTarget
-    ? (engineTarget.running ? '引擎可用' : '引擎未启动')
-    : canChat ? '可用' : activeModel ? '已加载' : '未加载';
-  const modelStatusDotClass = engineTarget
-    ? (engineTarget.running ? 'bg-[var(--state-success)]' : 'bg-[var(--state-warning)]')
-    : canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
+  const modelStatusLabel = canChat ? '可用' : activeModel ? '已加载' : '未加载';
+  const modelStatusDotClass = canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
   const selectionActionLabel = selectionMode
     ? selectedSessionIds.size > 0
       ? `删除已选的 ${selectedSessionIds.size} 个对话`
@@ -110,20 +103,20 @@ export default function ChatSidebar({
           <button
             type="button"
             onClick={onSwitchToModel}
-            className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-lg bg-black/[0.045] text-[14px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]"
+            className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-[var(--radius-field)] bg-black/[0.045] text-[length:var(--font-body)] font-semibold text-[var(--text-primary)] transition-colors hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]"
             title="切换到模型管理"
             aria-label="切换到模型管理"
           >
             {collapsed
-              ? (engineTarget?.avatar ?? activeModel?.family?.[0]?.toUpperCase() ?? 'L')
-              : (engineTarget?.avatar ?? activeModel?.family?.slice(0, 2).toUpperCase() ?? 'LL')}
+              ? (activeModel?.family?.[0]?.toUpperCase() ?? 'L')
+              : (activeModel?.family?.slice(0, 2).toUpperCase() ?? 'LL')}
           </button>
           <AnimatePresence initial={false}>
             {!collapsed && (
               <motion.div {...expandedMotion} className="min-w-0">
-                <div className="truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">本地对话</div>
-                <div className="truncate text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
-                  {engineTarget?.label ?? (canChat ? activeModel?.name ?? '模型已连接' : '模型未连接')}
+                <div className="truncate text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">本地对话</div>
+                <div className="truncate text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
+                  {canChat ? activeModel?.name ?? '模型已连接' : '模型未连接'}
                 </div>
               </motion.div>
             )}
@@ -132,7 +125,7 @@ export default function ChatSidebar({
 
         <button
           onClick={onNewSession}
-          className={`flex h-10 items-center gap-2 rounded-lg bg-black/[0.055] text-sm font-medium text-[var(--text-primary)] transition-[width,background-color,color] duration-200 hover:bg-black/[0.085] dark:bg-white/[0.065] dark:text-[var(--text-primary)] dark:hover:bg-[var(--surface-raised)] ${
+          className={`flex h-9 items-center gap-2 rounded-[var(--radius-field)] bg-black/[0.055] text-[length:var(--font-body)] font-medium text-[var(--text-primary)] transition-[width,background-color,color] duration-200 hover:bg-black/[0.085] dark:bg-white/[0.065] dark:hover:bg-[var(--surface-raised)] ${
             collapsed ? 'w-10 justify-center px-0' : 'w-full justify-start px-3'
           }`}
           title="新建对话"
@@ -145,16 +138,16 @@ export default function ChatSidebar({
 
         <AnimatePresence initial={false}>
           {!collapsed && (
-            <motion.label {...expandedMotion} className="mt-2 flex h-9 items-center gap-2 rounded-lg px-3 text-[var(--text-tertiary)] transition-colors focus-within:bg-white dark:text-[var(--text-secondary)] dark:focus-within:bg-[var(--surface-raised)]">
+            <motion.label {...expandedMotion} className="mt-2 flex h-9 items-center gap-2 rounded-[var(--radius-field)] px-3 text-[var(--text-tertiary)] transition-colors focus-within:bg-white dark:text-[var(--text-secondary)] dark:focus-within:bg-[var(--surface-raised)]">
               <Search className="h-4 w-4 flex-shrink-0" />
               <input
                 value={sessionSearch}
                 onChange={(event) => onSearchChange(event.target.value)}
                 placeholder="搜索对话"
                 aria-label="搜索对话"
-                className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
+                className="min-w-0 flex-1 bg-transparent text-[length:var(--font-body)] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] dark:placeholder:text-[var(--text-tertiary)]"
               />
-              <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--text-tertiary)] dark:bg-[var(--surface-raised)] dark:text-[var(--text-secondary)]">/</span>
+              <span className="rounded-[var(--radius-sm)] bg-black/[0.05] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-tertiary)] dark:bg-[var(--surface-raised)] dark:text-[var(--text-secondary)]">/</span>
             </motion.label>
           )}
         </AnimatePresence>
@@ -162,7 +155,7 @@ export default function ChatSidebar({
         <button
           type="button"
           onClick={selectionMode && selectedSessionIds.size > 0 ? onDeleteSelectedSessions : onSelectionMode}
-          className={`flex items-center gap-2 rounded-lg text-xs font-medium transition-[width,background-color,color] duration-200 ${
+          className={`flex items-center gap-2 rounded-[var(--radius-field)] text-[length:var(--font-caption)] font-medium transition-[width,background-color,color] duration-200 ${
             selectionMode
               ? 'bg-[var(--state-danger-border)] text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:bg-[var(--surface-raised)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--state-danger-bg)]'
               : 'text-[var(--text-secondary)] hover:bg-[var(--border)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
@@ -185,16 +178,16 @@ export default function ChatSidebar({
         {!collapsed && (
           <>
             <AnimatePresence initial={false}>
-              <motion.div {...expandedMotion} className="mb-2 px-2 text-xs font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">会话</motion.div>
+              <motion.div {...expandedMotion} className="mb-2 px-2 text-[length:var(--font-eyebrow)] font-semibold tracking-[var(--tracking-eyebrow)] text-[var(--text-secondary)]">会话</motion.div>
             </AnimatePresence>
             {sessionGroups.length === 0 ? (
-              <div className="px-3 py-8 text-center text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">暂无对话</div>
+              <div className="px-3 py-8 text-center text-[length:var(--font-caption)] text-[var(--text-tertiary)]">暂无对话</div>
             ) : (
               <div className="space-y-4">
                 {sessionGroups.map(([label, sessions]) => (
                   <div key={label}>
                     <AnimatePresence initial={false}>
-                      <motion.div {...expandedMotion} className="mb-1 px-2 text-xs font-semibold text-[var(--accent)] dark:text-[var(--accent)]">{label}</motion.div>
+                      <motion.div {...expandedMotion} className="mb-1 px-2 text-[length:var(--font-eyebrow)] font-semibold tracking-[var(--tracking-eyebrow)] text-[var(--accent)]">{label}</motion.div>
                     </AnimatePresence>
                     <div className="space-y-1">
                       {sessions.map((session) => (
@@ -223,25 +216,25 @@ export default function ChatSidebar({
         <button
           type="button"
           onClick={onOpenModelLoad}
-          className={`mb-2 min-w-0 rounded-lg bg-black/[0.035] text-left transition-colors hover:bg-black/[0.06] dark:bg-white/[0.035] dark:hover:bg-white/[0.065] ${
+          className={`mb-2 min-w-0 rounded-[var(--radius-field)] bg-black/[0.035] text-left transition-colors hover:bg-black/[0.06] dark:bg-white/[0.035] dark:hover:bg-white/[0.065] ${
             collapsed ? 'flex h-12 w-full flex-col items-center justify-center gap-1 px-1 py-1 text-center' : 'w-full px-3 py-2.5'
           }`}
-          title={engineTarget ? '对话后端为 fast-27b 引擎（可在 fast-27b 页启停）' : activeModel ? '打开模型加载界面' : '打开模型管理'}
+          title={activeModel ? '打开模型加载界面' : '打开模型管理'}
         >
           {collapsed ? (
             <>
               <span className={`h-2.5 w-2.5 rounded-full ${modelStatusDotClass}`} />
-              <span className="max-w-full truncate text-[11px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{modelStatusLabel}</span>
+              <span className="max-w-full truncate text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-primary)]">{modelStatusLabel}</span>
             </>
           ) : (
             <>
-              <div className="truncate text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{engineTarget?.label ?? activeModel?.name ?? '未加载模型'}</div>
-              <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+              <div className="truncate text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">{activeModel?.name ?? '未加载模型'}</div>
+              <div className="mt-1 flex items-center gap-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                 <span className={`h-2 w-2 rounded-full ${modelStatusDotClass}`} />
-                {engineTarget ? engineTarget.statusText : canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
+                {canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
               </div>
-              {!engineTarget && (ctxPercent !== undefined || vramPercent !== undefined) && (
-                <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+              {(ctxPercent !== undefined || vramPercent !== undefined) && (
+                <div className="mt-2 grid grid-cols-2 gap-1.5 text-[length:var(--font-eyebrow)]">
                   <UsageChip label="ctx" percent={ctxPercent} />
                   <UsageChip label="显存" percent={vramPercent} />
                 </div>
@@ -253,7 +246,7 @@ export default function ChatSidebar({
           <ThemeToggleButton theme={theme} onClick={onToggleTheme} />
           <MiniToolButton icon={Settings} label="软件设置" onClick={onOpenGlobalSettings} />
           <AnimatePresence initial={false}>
-            {!collapsed && <motion.span {...expandedMotion} className="ml-auto text-xs text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">Agent LLM</motion.span>}
+            {!collapsed && <motion.span {...expandedMotion} className="ml-auto text-[length:var(--font-caption)] text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">Agent LLM</motion.span>}
           </AnimatePresence>
         </div>
       </div>
@@ -273,7 +266,7 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
 }) {
   return (
     <div
-      className={`group flex items-center gap-2 rounded-lg text-left transition-[width,height,background-color,color] duration-200 ${
+      className={`group flex items-center gap-2 rounded-[var(--radius-field)] text-left transition-[width,height,background-color,color] duration-200 ${
         selected ? 'bg-black/[0.065] dark:bg-[var(--surface-raised)]' : 'hover:bg-black/[0.045] dark:hover:bg-[var(--surface-raised)]'
       } ${collapsed ? 'mx-auto h-10 w-10 justify-center rounded-full' : 'min-h-9 w-full'}`}
     >
@@ -285,11 +278,11 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
         aria-current={selected ? 'page' : undefined}
       >
         {collapsed ? (
-          <span className="block max-w-[2.7rem] truncate text-xs font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+          <span className="block max-w-[2.7rem] truncate text-[length:var(--font-caption)] font-medium text-[var(--text-primary)]">
             {session.title}
           </span>
         ) : (
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+          <span className="min-w-0 flex-1 truncate text-[length:var(--font-chat)] font-medium text-[var(--text-primary)]">
             {selectionMode && (
               <span className={`mr-2 inline-block h-3.5 w-3.5 align-[-2px] rounded border ${checked ? 'border-[var(--accent)] bg-[var(--accent)]' : 'border-[var(--text-tertiary)] dark:border-white/20'}`} />
             )}
@@ -305,7 +298,7 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
               event.stopPropagation();
               onExport(session.id);
             }}
-            className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] hover:text-[var(--accent)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08] dark:hover:text-[var(--accent)]"
+            className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[var(--radius-field)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] hover:text-[var(--accent)] dark:hover:bg-white/[0.08] dark:hover:text-[var(--accent)]"
             title="导出会话"
             aria-label={`导出会话：${session.title}`}
           >
@@ -317,7 +310,7 @@ function SessionRow({ session, selected, checked, collapsed, selectionMode, onSe
               event.stopPropagation();
               onDelete(session.id);
             }}
-            className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] hover:text-[var(--state-danger)] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--state-danger)]"
+            className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[var(--radius-field)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] hover:text-[var(--state-danger)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--state-danger)]"
             title="删除会话"
             aria-label={`删除会话：${session.title}`}
           >
@@ -338,7 +331,7 @@ function MiniToolButton({ icon: Icon, label, onClick }: {
     <button
       type="button"
       onClick={onClick}
-      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-black/[0.06] hover:text-[var(--accent)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.07] dark:hover:text-[var(--accent)]"
+      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-field)] text-[var(--text-secondary)] transition-colors hover:bg-black/[0.06] hover:text-[var(--accent)] dark:hover:bg-white/[0.07] dark:hover:text-[var(--accent)]"
       title={label}
       aria-label={label}
     >

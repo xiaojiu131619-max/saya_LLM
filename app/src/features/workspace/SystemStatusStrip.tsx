@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Activity, Cpu, Globe2, HardDrive, MemoryStick, ShieldCheck } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
+import { fast27bServiceView, useEngineStatuses } from '@/hooks/useEngineStatuses';
 import SystemStatusOverlay from '@/pages/SystemStatusOverlay';
 
 function percent(value: number) {
@@ -14,6 +15,14 @@ export default function SystemStatusStrip() {
   const stats = useSystemStats();
   const [showOverlay, setShowOverlay] = useState(false);
   const vramPercent = stats.vramTotal > 0 ? (stats.vramUsed / stats.vramTotal) * 100 : 0;
+
+  // 对外 API 徽标跟随「当前对话后端」：引擎模式下显示引擎自己的端口与 Key。
+  const engineStatuses = useEngineStatuses();
+  const engine = fast27bServiceView(engineStatuses.fast27b);
+  const engineMode = state.chatEngine === 'fast27b';
+  const apiVisible = engineMode ? engine.running : state.apiConfig.enabled;
+  const apiPort = engineMode ? engine.port : state.serverPort;
+  const apiHasKey = engineMode ? Boolean(engine.apiKey) : state.apiConfig.hasApiKey;
 
   return (
     <div className="flex h-11 flex-shrink-0 border-t border-[var(--border-subtle)]">
@@ -46,11 +55,14 @@ export default function SystemStatusStrip() {
         </div>
 
         <div className="ml-auto hidden items-center gap-2 text-xs text-[var(--text-tertiary)] xl:flex">
-          {state.apiConfig.enabled && (
-            <span className="flex items-center gap-1 rounded-full bg-[var(--accent)]/10 px-2 py-1 text-[var(--accent)]">
+          {apiVisible && (
+            <span
+              className="flex items-center gap-1 rounded-full bg-[var(--accent)]/10 px-2 py-1 text-[var(--accent)]"
+              title={engineMode ? `${engine.label} 引擎的 OpenAI 兼容端点` : '主模型 llama-server 的对外 API'}
+            >
               <Globe2 className="h-3.5 w-3.5" />
-              <span className="mono-font">API:{state.serverPort}</span>
-              {state.apiConfig.hasApiKey && <ShieldCheck className="h-3.5 w-3.5" />}
+              <span className="mono-font">{engineMode ? `引擎 API:${apiPort}` : `API:${apiPort}`}</span>
+              {apiHasKey && <ShieldCheck className="h-3.5 w-3.5" />}
             </span>
           )}
           <span>{state.backendAvailable ? '桌面后端就绪' : '桌面后端离线'}</span>

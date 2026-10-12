@@ -21,12 +21,30 @@
     --radius-md: 4px;
     --radius-lg: 8px;
     --radius-pill: 9999px;
+    /* 面板级圆角：与上面 4/8px 并存，用于卡片、输入卡片、用户气泡。 */
+    --radius-field: 10px;
+    --radius-panel: 14px;
+    --radius-bubble: 16px;
 
+    /* 字号刻度：唯一口径。UI 里不要再写 text-[Npx]。 */
+    --font-eyebrow: 11px;
     --font-caption: 12px;
     --font-body: 14px;
+    --font-chat: 15px;
     --font-subtitle: 16px;
-    --font-title: 20px;
-    --font-display: 28px;
+    --font-title: 18px;
+    --font-display: 22px;
+
+    /* 行高：界面 1.5；中文长段落 1.78（原先 leading-8 = 2.0 偏松）；代码 1.6。 */
+    --leading-tight: 1.25;
+    --leading-ui: 1.5;
+    --leading-prose: 1.78;
+    --leading-code: 1.6;
+
+    /* 字距：eyebrow 拉开做标签，标题收紧做层级。 */
+    --tracking-eyebrow: 0.16em;
+    --tracking-tight: -0.02em;
+    --tracking-display: -0.035em;
 
     --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
     --shadow-flyout: 0 8px 16px rgba(0, 0, 0, 0.14);
@@ -315,6 +333,62 @@
   .text-primary-custom { color: var(--text-primary); }
   .text-secondary-custom { color: var(--text-secondary); }
   .text-tertiary-custom { color: var(--text-tertiary); }
+
+  /* ===== 排版原子类（混合方向：Fluent 令牌 + 原型排版节奏）=====
+     只消费既有令牌，明暗主题与毛玻璃模式自动生效；此处禁止写死颜色。 */
+  .eyebrow {
+    font-size: var(--font-eyebrow);
+    font-weight: 700;
+    line-height: var(--leading-tight);
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .display-title {
+    font-size: var(--font-display);
+    font-weight: 700;
+    line-height: var(--leading-tight);
+    letter-spacing: var(--tracking-display);
+    color: var(--text-primary);
+  }
+
+  /* 页面主标题：PageHeader 的 h1 消费这个类。
+     此前该类全仓库未定义，导致 11 个页面的主标题无任何规则、
+     实际继承 body 的 14px/400——比同页 15px/600 的区块标题更小更轻。
+     层级口径：页面主标题 (--font-title 18px/600) > 区块标题 (15px/600) > 正文 (14px)。 */
+  .page-title {
+    font-size: var(--font-title);
+    font-weight: 600;
+    line-height: var(--leading-tight);
+    letter-spacing: var(--tracking-tight);
+    color: var(--text-primary);
+  }
+
+  .panel {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-panel);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+  }
+
+  .metric-value {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    letter-spacing: var(--tracking-tight);
+  }
+
+  .prose-body {
+    font-size: var(--font-subtitle);
+    line-height: var(--leading-prose);
+  }
+
+  /* accent 淡描边 + 淡底：端点地址块、Key 提示等强调区域。 */
+  .accent-soft {
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
 
   .titlebar {
     background: var(--titlebar-bg);

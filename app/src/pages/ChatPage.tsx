@@ -24,13 +24,12 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
-import { useEngineStatuses, type EngineStatusMap } from '@/hooks/useEngineStatuses';
 import ChatBubble from '@/components/ChatBubble';
 import ChatSidebar from '@/features/chat/ChatSidebar';
 import { checkVideoRuntime, callMcpTool, effectiveRequestApiKey, fetchServerReasoningEffortCap, isDesktopRuntime, listenDesktopFileDrops, partialMetricsFromError, readDesktopFileContent, readDesktopMedia, serverErrorHint, stopActiveChatCompletion, stopDesktopServer, streamChatCompletion, type ChatCompletionMessage, type VideoRuntimeInfo } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { MAX_TOOL_ROUNDS, collectMcpToolSpecs, runChatToolLoop as runToolLoop, type ChatRoundRunner } from '@/features/chat/mcpTools';
-import type { ChatMessageContentPart, ChatEngineId, ToolActivity } from '@/types';
+import type { ChatEngineId, ChatMessageContentPart, ToolActivity } from '@/types';
 import {
   CHAT_HISTORY_MODEL_ID,
   MAX_ATTACHMENT_BYTES,
@@ -58,6 +57,13 @@ import type { ReasoningMode, ReasoningProfile } from '@/types';
 import { planReasoning, reasoningProfileFromModel } from '@/lib/reasoningGears';
 import { toolLabel } from '@/lib/llamaTools';
 import useMediaQuery from '@/hooks/useMediaQuery';
+import {
+  FAST27B_SERVICE_COLOR,
+  FAST27B_SERVICE_ID,
+  fast27bServiceView,
+  useEngineStatuses,
+  type EngineServiceView,
+} from '@/hooks/useEngineStatuses';
 
 const REASONING_OPTIONS: Array<{ mode: ReasoningMode; label: string; description: string }> = [
   { mode: 'off', label: '关闭', description: '不请求 thinking 输出' },
@@ -66,70 +72,8 @@ const REASONING_OPTIONS: Array<{ mode: ReasoningMode; label: string; description
   { mode: 'deep', label: '深思', description: '使用更高思考预算' },
 ];
 
-/**
- * fast-27b 引擎不在 GGUF 扫描范围内，没有对话模板可解析：按引擎启动参数
- * （--default-reasoning-effort high）固定成 minimal…high 四挡，界面意图照旧映射为
- * 思考→minimal、深思→high，与接入引擎之前的下发参数保持一致。
- */
-const ENGINE_REASONING_PROFILE: ReasoningProfile = {
-  canDisable: true,
-  efforts: ['minimal', 'low', 'medium', 'high'],
-  knobs: ['enable_thinking', 'reasoning_effort'],
-  source: 'name',
-  summary: '引擎（fast-27b）：按服务端默认挡位 minimal…high，界面下发 minimal / high。',
-};
-
 const AUTO_SCROLL_MAGNET_PX = 56;
 const SCROLL_RELEASE_DELTA_PX = 2;
-
-// ---------------------------------------------------------------------------
-// 自带对话的后端扩展：主模型之外，可选择 fast-27b 引擎。
-// 引擎自带 OpenAI 兼容 API，把发送参数（端口 / Key / 模型名 / 上下文）整体替换
-// 即可复用同一条对话链路；会话仍存全局桶，靠 runtimeModelId/modelName 快照区分。
-// ---------------------------------------------------------------------------
-
-/** 引擎对话目标（选中 fast-27b 后端且拿到状态快照后非空）。 */
-type ChatEngineTarget = {
-  key: 'fast27b';
-  label: string;
-  /** 会话快照 / 用量记录用的合成运行时模型 ID。 */
-  runtimeModelId: string;
-  displayName: string;
-  color: string;
-  port: number;
-  apiKey: string;
-  modelId: string;
-  contextWindow: number;
-  supportsReasoning: boolean;
-  running: boolean;
-};
-
-const CHAT_ENGINE_COLORS: Record<'fast27b', string> = {
-  fast27b: '#0ea5e9',
-};
-
-function engineTargetFromStatuses(
-  engine: ChatEngineId,
-  statuses: EngineStatusMap,
-): ChatEngineTarget | null {
-  if (engine === 'main') return null;
-  const status = statuses.fast27b;
-  return {
-    key: 'fast27b',
-    label: 'fast-27b',
-    runtimeModelId: 'engine:fast27b',
-    displayName: `fast-27b · ${status?.selected_model === 'swift' ? 'Swift 27B' : 'Heretic 27B'}`,
-    color: CHAT_ENGINE_COLORS.fast27b,
-    port: status?.port ?? 8094,
-    apiKey: status?.api_key ?? '',
-    modelId: status?.model_id ?? 'qwen3.8-27b',
-    contextWindow: status?.context_window ?? 262144,
-    // 引擎以 --default-reasoning-effort high 启动，思考由引擎默认开启。
-    supportsReasoning: true,
-    running: Boolean(status?.running),
-  };
-}
-
 
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return dataTransfer.files.length > 0 || Array.from(dataTransfer.types).some((type) => type === 'Files');
@@ -188,6 +132,65 @@ function terminatedMessageStats(error: unknown, startTime: number, ctxTotal = 0)
   };
 }
 
+/**
+ * fast-27b 引擎不在 GGUF 扫描范围内，没有对话模板可解析：按引擎启动参数
+ * （--default-reasoning-effort high）固定成 minimal…high 四挡，界面意图照旧映射为
+ * 思考→minimal、深思→high，与接入引擎之前的下发参数保持一致。
+ */
+const ENGINE_REASONING_PROFILE: ReasoningProfile = {
+  canDisable: true,
+  efforts: ['minimal', 'low', 'medium', 'high'],
+  knobs: ['enable_thinking', 'reasoning_effort'],
+  source: 'name',
+  summary: '引擎（fast-27b）：按服务端默认挡位 minimal…high，界面下发 minimal / high。',
+};
+
+// ---------------------------------------------------------------------------
+// 自带对话的后端扩展：主模型之外，可选择 fast-27b 引擎。
+// 引擎自带 OpenAI 兼容 API，把发送参数（端口 / Key / 模型名 / 上下文）整体替换
+// 即可复用同一条对话链路；会话仍存全局桶，靠 runtimeModelId/modelName 快照区分。
+// ---------------------------------------------------------------------------
+
+/** 引擎对话目标（选中 fast-27b 后端后非空）。 */
+interface ChatEngineTarget {
+  label: string;
+  /** 会话快照 / 用量记录用的合成运行时模型 ID。 */
+  runtimeModelId: string;
+  displayName: string;
+  color: string;
+  port: number;
+  apiKey: string;
+  modelId: string;
+  contextWindow: number;
+  supportsReasoning: boolean;
+  /** 进程存活。 */
+  running: boolean;
+  /** 可对话：进程存活 + 引擎日志未报失效（degraded 时不再放行新请求）。 */
+  serviceable: boolean;
+}
+
+function engineTargetFromService(
+  engine: ChatEngineId,
+  service: EngineServiceView,
+): ChatEngineTarget | null {
+  if (engine === 'main') return null;
+  return {
+    label: service.label,
+    runtimeModelId: FAST27B_SERVICE_ID,
+    displayName: `${service.label} · ${service.modelLabel}`,
+    color: FAST27B_SERVICE_COLOR,
+    port: service.port,
+    apiKey: service.apiKey,
+    modelId: service.modelId,
+    // 水位分母取设备 KV 池优先的有效上限——它才是真正卡住长上下文的那个数。
+    contextWindow: service.effectiveCtxTotal,
+    // 引擎以 --default-reasoning-effort high 启动，思考由引擎默认开启。
+    supportsReasoning: true,
+    running: service.running,
+    serviceable: service.serviceable,
+  };
+}
+
 export default function ChatPage() {
   const { state, dispatch } = useApp();
   const [inputText, setInputText] = useState('');
@@ -224,9 +227,10 @@ export default function ChatPage() {
 
   // ---- 对话后端：主模型 / fast-27b 引擎 ----
   const chatEngine = state.chatEngine;
-  // 引擎运行状态：复用同一套轮询 Hook（Agent 页 WebUI 面板用它轮询自己那份后端选择，互不影响）。
-  const engineStatuses = useEngineStatuses(chatEngine);
-  const engineTarget = engineTargetFromStatuses(chatEngine, engineStatuses);
+  // 引擎状态：全应用共享的单例轮询，与 Agent 页 WebUI 面板的后端选择互不影响。
+  const engineStatuses = useEngineStatuses();
+  const engineService = fast27bServiceView(engineStatuses.fast27b);
+  const engineTarget = engineTargetFromService(chatEngine, engineService);
   // 消息与用量记录的模型身份：引擎目标用合成 ID（engine:*），主模型用真实模型信息。
   const chatIdentity = engineTarget
     ? { id: engineTarget.runtimeModelId, name: engineTarget.displayName, color: engineTarget.color }
@@ -319,9 +323,9 @@ export default function ChatPage() {
   const sidebarModel = loadedModel ?? activeModel;
   const desktopReady = isDesktopRuntime();
   const systemStats = useSystemStats();
-  // 引擎目标：引擎在跑即可对话；主模型目标：需要已加载模型 + 主服务在线。
+  // 可对话：引擎目标要求引擎可对话（存活且未失效）；主模型目标需要已加载模型 + 主服务在线。
   const canChat = engineTarget
-    ? engineTarget.running
+    ? engineTarget.serviceable
     : Boolean(desktopReady && activeModel?.filePath && state.serverRunning);
   const chatSessions = useMemo(
     () => Object.values(state.chatSessions).flat().sort((a, b) => b.updatedAt - a.updatedAt),
@@ -353,7 +357,7 @@ export default function ChatPage() {
       return acc;
     });
   }, [modelMessages]);
-  // 水位基准：引擎后端取引擎配置的上下文容量，主模型取当前加载模型的 -c。
+  // 水位基准：引擎后端取引擎配置的有效上下文容量，主模型取当前加载模型的 -c。
   const ctxCapacity = engineTarget
     ? engineTarget.contextWindow
     : (activeModel?.loadConfig.ctxLength || activeModel?.ctxLength || 0);
@@ -659,6 +663,11 @@ export default function ChatPage() {
 
   const processAttachmentPaths = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return;
+    // 引擎后端：与文件选择框同一道闸（拖拽路径也走这里）。
+    if (engineTarget) {
+      setAttachmentError('fast-27b 引擎对话暂不支持附件：请切回「主模型」后端后再使用。');
+      return;
+    }
 
     const nextAttachments: PendingAttachment[] = [];
     const errors: string[] = [];
@@ -711,7 +720,7 @@ export default function ChatPage() {
 
     setPendingAttachments((current) => [...current, ...nextAttachments]);
     setAttachmentError(errors.length > 0 ? errors.join(' ') : null);
-  }, []);
+  }, [engineTarget]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -823,23 +832,23 @@ export default function ChatPage() {
       setAttachmentError(sendErrors.join(' '));
       return;
     }
-    // 媒体附件能力校验（引擎后端已在附件入口整体禁用，这里只校验主模型目标）
+    // 媒体附件能力校验
     const imageParts = mediaAttachments.filter((a) => a.kind === 'image');
     const videoParts = mediaAttachments.filter((a) => a.kind === 'video');
     const audioParts = mediaAttachments.filter((a) => a.kind === 'audio');
-    if (imageParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsVision) {
+    if (imageParts.length > 0 && activeModel && !activeModel.supportsVision) {
       setAttachmentError('当前模型不支持图片输入（未检测到视觉 mmproj）。');
       return;
     }
-    if (videoParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsVision) {
+    if (videoParts.length > 0 && activeModel && !activeModel.supportsVision) {
       setAttachmentError('当前模型没有视觉 mmproj，无法处理视频或视频抽帧。');
       return;
     }
-    if (videoParts.length > 0 && !engineTarget && activeVideoSupport === 'none') {
+    if (videoParts.length > 0 && activeVideoSupport === 'none') {
       setAttachmentError('当前模型未检测到视频能力，请切换到已验证的视频模型。');
       return;
     }
-    if (audioParts.length > 0 && !engineTarget && activeModel && !activeModel.supportsAudio) {
+    if (audioParts.length > 0 && activeModel && !activeModel.supportsAudio) {
       setAttachmentError('当前模型不支持音频输入。');
       return;
     }
@@ -1441,7 +1450,7 @@ export default function ChatPage() {
   const inputPlaceholder = engineTarget
     ? canChat
       ? '输入消息...'
-      : `请先到 Agent 页启动 ${engineTarget.label} 引擎`
+      : `请先到 fast-27b 页启动 ${engineTarget.label} 引擎`
     : activeModel
       ? canChat
         ? '输入消息...'
@@ -1451,7 +1460,7 @@ export default function ChatPage() {
   const emptyMessage = engineTarget
     ? canChat
       ? `${engineTarget.displayName} · 引擎已连接，直接输入即可对话（fast-27b 引擎暂不支持附件；已连接的 MCP 工具可参与调用）`
-      : `${engineTarget.label} 引擎未运行：到 Agent 页启动引擎后再对话`
+      : `${engineTarget.label} 引擎未运行：到 fast-27b 页启动引擎后再对话`
     : activeModel
       ? canChat
         ? `${activeModel.params} ${activeModel.modelType === 'moe' ? 'MoE' : '稠密'} 模型 · ${activeModel.quant} · llama-server 已连接`
@@ -1479,7 +1488,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)] text-[15.5px] text-[var(--text-primary)] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
+      className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1495,8 +1504,8 @@ export default function ChatPage() {
           >
             <div className="border-b border-[var(--border-subtle)] px-5 py-4 text-center">
               <FileText className="mx-auto mb-2 h-6 w-6 text-[var(--accent)]" />
-              <div className="text-[15px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">松开即可上传到当前对话</div>
-              <div className="mt-1 text-[13px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
+              <div className="text-[length:var(--font-chat)] font-semibold text-[var(--text-primary)]">松开即可上传到当前对话</div>
+              <div className="mt-1 text-[length:var(--font-body)] text-[var(--text-secondary)]">支持文本、代码、JSON、Markdown、图片、音频、视频等文件</div>
             </div>
           </motion.div>
         )}
@@ -1504,12 +1513,6 @@ export default function ChatPage() {
       <ChatSidebar
         activeModel={sidebarModel}
         canChat={canChat}
-        engineTarget={engineTarget ? {
-          label: engineTarget.label,
-          statusText: engineTarget.running ? '引擎运行中 · 可对话' : '引擎未启动 · 到 fast-27b 页开启',
-          running: engineTarget.running,
-          avatar: '27B',
-        } : undefined}
         collapsed={sidebarCollapsed}
         collapseLocked={compactSidebar}
         selectionMode={selectionMode}
@@ -1525,27 +1528,29 @@ export default function ChatPage() {
         onDeleteSession={handleDeleteSession}
         onExportSession={handleExportSession}
         onOpenGlobalSettings={() => {
-          if (typeof window !== 'undefined') {
-            window.sessionStorage.setItem('agent-llm-settings-return-view', 'chat');
-          }
+          window.sessionStorage.setItem('agent-llm-settings-return-view', 'chat');
           dispatch({ type: 'SET_VIEW', payload: 'settings' });
         }}
-        onOpenModelLoad={handleOpenModelLoad}
         onToggleTheme={() => dispatch({ type: 'TOGGLE_THEME' })}
-        onToggleCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
         onSwitchToModel={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
         theme={state.theme}
+        onOpenModelLoad={handleOpenModelLoad}
+        onToggleCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
         sidebarWidth={sidebarWidth}
         ctxPercent={ctxPercent}
         vramPercent={vramPercent}
       />
 
-      <section className="relative grid min-w-0 flex-1 grid-rows-[54px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)] dark:bg-[var(--app-bg)]">
+      {/* 页头行高 72px：三行（eyebrow 11px + 标题 18px + 状态 12px）实际占约 56px，
+          原先的 60px 在字号令牌修复后会把内容挤到溢出（实测 scrollHeight 61 > clientHeight 59），
+          72px 给上下各留约 8px 余量。 */}
+      <section className="relative grid min-w-0 flex-1 grid-rows-[72px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)]">
         <header className="flex min-w-0 items-center justify-between border-b border-black/[0.055] px-5 dark:border-white/[0.055]">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{activeTitle}</h1>
-              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+              <div className="eyebrow truncate">{engineTarget ? `本地对话 / ${engineTarget.label}` : '本地对话 / 主模型'}</div>
+              <h1 className="mt-0.5 truncate text-[length:var(--font-title)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h1>
+              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                 <span className="truncate">{compactModelName(activeHeaderModelName)}</span>
                 <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/30" />
                 <span className="truncate">
@@ -1560,21 +1565,21 @@ export default function ChatPage() {
           <div className="flex flex-shrink-0 items-center gap-1.5">
             {/* 对话后端：主模型 / fast-27b（引擎需先到 fast-27b 页启动） */}
             <label
-              className="mr-1 hidden flex-shrink-0 items-center gap-1.5 text-xs sm:inline-flex"
+              className="mr-1 hidden flex-shrink-0 items-center gap-1.5 text-[length:var(--font-caption)] sm:inline-flex"
               title="选择自带对话使用的后端：主模型走模型页的 llama-server；fast-27b 走托管引擎"
             >
-              <span className="text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">后端</span>
+              <span className="text-[var(--text-tertiary)]">后端</span>
               <select
                 value={chatEngine}
                 onChange={(event) => dispatch({ type: 'SET_CHAT_ENGINE', payload: event.target.value as ChatEngineId })}
-                className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-xs text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:bg-[var(--surface-muted)]"
+                className="rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-[length:var(--font-caption)] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)]"
               >
                 <option value="main">主模型</option>
                 <option value="fast27b">fast-27b</option>
               </select>
             </label>
             <span
-              className={`mr-1 hidden h-8 flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium transition-colors sm:inline-flex ${
+              className={`mr-1 hidden h-8 flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-[length:var(--font-caption)] font-medium transition-colors sm:inline-flex ${
                 isGenerating
                     ? 'text-[var(--state-warning)] dark:text-[var(--accent)]'
                     : canChat
@@ -1588,7 +1593,7 @@ export default function ChatPage() {
             {isAnyGenerating && (
               <IconButton icon={Square} label="停止生成" tone="danger" onClick={handleStopGeneration} />
             )}
-            {/* 卸载模型只对主模型后端有意义；引擎在 Agent 页启停。 */}
+            {/* 卸载模型只对主模型后端有意义；引擎在 fast-27b 页启停。 */}
             {!engineTarget && (
               <IconButton icon={Power} label="卸载模型" tone="danger" onClick={() => void handleUnloadModel()} disabled={!activeModel || !state.serverRunning} />
             )}
@@ -1645,9 +1650,9 @@ export default function ChatPage() {
               {modelMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-center">
                   <div className="max-w-md px-8 py-9">
-                    <div className="mx-auto mb-4 text-sm font-semibold tracking-[0.22em] text-[var(--accent)] dark:text-[var(--accent)]">LOCAL LLM</div>
-                    <h2 className="mb-2 text-xl font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{activeTitle}</h2>
-                    <p className="text-sm leading-relaxed text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">{emptyMessage}</p>
+                    <div className="eyebrow mb-3">Local LLM</div>
+                    <h2 className="display-title mb-2">{activeTitle}</h2>
+                    <p className="text-[length:var(--font-body)] leading-[var(--leading-ui)] text-[var(--text-tertiary)]">{emptyMessage}</p>
                   </div>
                 </div>
               ) : (
@@ -1712,9 +1717,9 @@ export default function ChatPage() {
                     {pendingAttachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
                         {pendingAttachments.map((file) => (
-                          <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-md bg-black/[0.045] px-3 py-2 text-xs text-[var(--text-secondary)] dark:bg-white/[0.055] dark:text-[var(--text-secondary)]">
+                          <div key={file.id} className="flex max-w-full min-w-0 items-center gap-2 rounded-[var(--radius-field)] bg-black/[0.045] px-3 py-2 text-[length:var(--font-caption)] text-[var(--text-secondary)] dark:bg-white/[0.055]">
                             <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
-                            <span className="max-w-[220px] truncate text-[var(--text-primary)] dark:text-[var(--text-primary)]">{file.name}</span>
+                            <span className="max-w-[220px] truncate text-[var(--text-primary)]">{file.name}</span>
                             <span className="mono-font flex-shrink-0">{formatFileSize(file.size)}</span>
                             <button
                               onClick={() => removeAttachment(file.id)}
@@ -1728,26 +1733,26 @@ export default function ChatPage() {
                       </div>
                     )}
                     {attachmentError && (
-                      <div className="flex items-center gap-2 text-xs text-[var(--state-danger)] dark:text-[var(--state-danger)]">
+                      <div className="flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--state-danger)]">
                         <FileWarning className="h-3.5 w-3.5 flex-shrink-0" />
                         <span>{attachmentError}</span>
                       </div>
                     )}
                     {attachmentNotice && !attachmentError && (
-                      <div className="flex items-center gap-2 text-xs text-[var(--state-danger)] dark:text-[var(--accent)]">
+                      <div className="flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--state-danger)] dark:text-[var(--accent)]">
                         <Info className="h-3.5 w-3.5 flex-shrink-0" />
                         <span>{attachmentNotice}</span>
                       </div>
                     )}
                     {stopMessage && (
-                      <div className="text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{stopMessage}</div>
+                      <div className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">{stopMessage}</div>
                     )}
                   </div>
                 )}
 
                 {/* 注意：这里不能加 overflow-hidden——思考强度菜单从卡片内向上弹出，
                     裁剪会把菜单剪到只剩一项（其余项不可见且无法点击）。 */}
-                <div className="min-h-[82px] rounded-[18px] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.14] dark:bg-[var(--surface)] dark:focus-within:border-white/25">
+                <div className="min-h-[82px] rounded-[var(--radius-panel)] border border-black/[0.11] bg-white transition-colors focus-within:border-black/25 dark:border-white/[0.14] dark:bg-[var(--surface)] dark:focus-within:border-white/25">
                   <textarea
                     ref={textareaRef}
                     value={inputText}
@@ -1759,7 +1764,7 @@ export default function ChatPage() {
                     spellCheck={false}
                     autoCorrect="off"
                     autoCapitalize="off"
-                    className="chat-composer-input max-h-[180px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] placeholder:text-[var(--text-secondary)] disabled:opacity-60 dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
+                    className="chat-composer-input max-h-[168px] min-h-[58px] w-full resize-none bg-transparent px-4 pt-3.5 text-[length:var(--font-chat)] leading-[1.6] text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] placeholder:text-[var(--text-secondary)] disabled:opacity-60 dark:placeholder:text-[var(--text-tertiary)]"
                   />
                   <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2.5">
                     <input
@@ -1777,7 +1782,7 @@ export default function ChatPage() {
                           setReasoningMenuOpen((value) => !value);
                         }}
                         disabled={!canChat}
-                        className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+                        className={`flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] border px-2.5 text-[length:var(--font-caption)] font-medium transition-colors disabled:opacity-40 ${
                           state.chatConfig.reasoningMode === 'deep'
                             ? 'border-[var(--accent)]/55 bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-subtle)] dark:border-[var(--accent)]/35 dark:bg-[var(--accent-subtle)] dark:text-[var(--accent)] dark:hover:bg-[var(--accent-subtle)]'
                             : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
@@ -1788,7 +1793,7 @@ export default function ChatPage() {
                         <span>{currentReasoningOption.label}</span>
                         {/* 自动识别出的实际挡位：与请求里真正下发的参数一致 */}
                         <span
-                          className={`rounded-md border px-1.5 py-0.5 text-[10px] font-normal ${
+                          className={`rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-normal ${
                             reasoningPlan.honored
                               ? 'border-[var(--border)] bg-[var(--app-bg)] text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--text-secondary)]'
                               : 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)]'
@@ -1804,7 +1809,7 @@ export default function ChatPage() {
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             exit={{ opacity: 0, y: 6, scale: 0.98 }}
                             transition={{ duration: 0.14 }}
-                            className="absolute bottom-10 left-0 z-20 w-72 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                            className="absolute bottom-10 left-0 z-20 w-72 overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
                           >
                             {reasoningMenuItems.map((item) => (
                               <button
@@ -1814,27 +1819,27 @@ export default function ChatPage() {
                                   dispatch({ type: 'SET_CHAT_CONFIG', payload: { reasoningMode: item.mode } });
                                   setReasoningMenuOpen(false);
                                 }}
-                                className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                                className={`w-full rounded-[var(--radius-field)] px-3 py-2 text-left transition-colors ${
                                   state.chatConfig.reasoningMode === item.mode
                                     ? 'bg-[var(--surface-muted)] text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]'
-                                    : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
+                                    : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]'
                                 }`}
                               >
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-sm font-semibold">{item.label}</span>
+                                  <span className="text-[length:var(--font-body)] font-semibold">{item.label}</span>
                                   {!item.plan.honored && (
-                                    <span className="rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-warning)]">
+                                    <span className="rounded-[var(--radius-sm)] border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--state-warning)]">
                                       模型不支持
                                     </span>
                                   )}
                                 </div>
-                                <div className="mt-0.5 font-mono text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{item.plan.requestLabel}</div>
+                                <div className="mt-0.5 font-mono text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">{item.plan.requestLabel}</div>
                                 {item.plan.note && (
-                                  <div className="mt-0.5 text-[11px] leading-4 text-[var(--state-warning)]">{item.plan.note}</div>
+                                  <div className="mt-0.5 text-[length:var(--font-eyebrow)] leading-4 text-[var(--state-warning)]">{item.plan.note}</div>
                                 )}
                               </button>
                             ))}
-                            <div className="mt-1 border-t border-[var(--border)] px-3 py-2 text-[10px] leading-4 text-[var(--text-tertiary)] dark:border-white/[0.08]">
+                            <div className="mt-1 border-t border-[var(--border)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)] dark:border-white/[0.08]">
                               自动识别（{displayReasoningProfile.source === 'template' ? '对话模板' : displayReasoningProfile.source === 'none' ? '无证据' : '架构/名字兜底'}）：{displayReasoningProfile.summary}
                             </div>
                           </motion.div>
@@ -1847,7 +1852,7 @@ export default function ChatPage() {
                       onClick={handleOpenToolsSettings}
                     />
                     <InputToolButton icon={Trash2} label="清除上下文" onClick={handleClearContext} disabled={!activeSession || isGenerating} />
-                    <span className="ml-auto hidden min-w-0 truncate px-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)] min-[960px]:block">
+                    <span className="ml-auto hidden min-w-0 truncate px-2 text-[length:var(--font-caption)] text-[var(--text-secondary)] min-[960px]:block">
                       Enter 发送，Shift + Enter 换行
                     </span>
                     <button
@@ -1901,7 +1906,7 @@ function IconButton({ icon: Icon, label, onClick, disabled, tone = 'neutral' }: 
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
+      className={`flex h-9 w-9 items-center justify-center rounded-[var(--radius-field)] transition-colors disabled:opacity-35 ${
         tone === 'danger'
           ? 'text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:text-[var(--state-danger)] dark:hover:bg-[var(--surface-raised)]'
           : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]'
@@ -2024,7 +2029,7 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.12 }}
-                  className={`pointer-events-none absolute left-10 z-40 w-[min(300px,calc(100vw-148px))] rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 text-left shadow-[0_8px_24px_rgba(61,53,42,0.16)] dark:border-white/[0.10] dark:bg-[var(--surface-raised)] ${
+                  className={`pointer-events-none absolute left-10 z-40 w-[min(300px,calc(100vw-148px))] rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] p-3 text-left shadow-[0_8px_24px_rgba(61,53,42,0.16)] dark:border-white/[0.10] dark:bg-[var(--surface-raised)] ${
                     index === 0
                       ? 'top-0'
                       : index === turns.length - 1
@@ -2032,16 +2037,16 @@ function ConversationQuickRail({ messages, activeMessageId, onSelect }: {
                         : 'top-1/2 -translate-y-1/2'
                   }`}
                 >
-                  <span className="mb-2 block text-[11px] font-semibold text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                  <span className="mb-2 block text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-secondary)]">
                     第 {index + 1} 组问答
                   </span>
                   <span className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[11px] font-semibold text-[var(--accent)] dark:bg-[var(--surface-raised)] dark:text-[var(--accent)]">问</span>
-                    <span className="line-clamp-2 text-xs leading-5 text-[var(--text-primary)] dark:text-[var(--text-primary)]">{questionPreview}</span>
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--surface-muted)] text-[length:var(--font-eyebrow)] font-semibold text-[var(--accent)] dark:bg-[var(--surface-raised)]">问</span>
+                    <span className="line-clamp-2 text-[length:var(--font-caption)] leading-5 text-[var(--text-primary)]">{questionPreview}</span>
                   </span>
                   <span className="mt-2 flex items-start gap-2 border-t border-[var(--border)] pt-2 dark:border-white/[0.08]">
-                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[11px] font-semibold text-[var(--text-secondary)] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]">答</span>
-                    <span className="line-clamp-2 text-xs leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{answerPreview}</span>
+                    <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--surface-muted)] text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-secondary)] dark:bg-white/[0.06]">答</span>
+                    <span className="line-clamp-2 text-[length:var(--font-caption)] leading-5 text-[var(--text-secondary)]">{answerPreview}</span>
                   </span>
                 </motion.span>
               )}
@@ -2097,17 +2102,17 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="mb-4 flex items-center justify-between">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 truncate text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+          <h2 className="flex items-center gap-2 truncate text-[length:var(--font-subtitle)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
             <SlidersHorizontal className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
             对话参数
           </h2>
-          <p className="mt-1 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">当前会话 · 默认预设</p>
+          <p className="mt-1 truncate text-[length:var(--font-caption)] text-[var(--text-secondary)]">当前会话 · 默认预设</p>
         </div>
         <button
           onClick={onClose}
           aria-label="关闭对话参数"
           title="关闭对话参数"
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[var(--radius-field)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--border)] dark:hover:bg-white/[0.08]"
         >
           <X className="h-4 w-4" />
         </button>
@@ -2117,14 +2122,14 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
         <div>
           <div className="border-b border-black/[0.06] pb-5 dark:border-white/[0.06]">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <label className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">系统提示词</label>
+              <label className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">系统提示词</label>
               {activePreset ? (
-                <span className="flex min-w-0 items-center gap-1 text-xs text-[var(--accent)]" title={`使用标签「${activePreset.title}」`}>
+                <span className="flex min-w-0 items-center gap-1 text-[length:var(--font-caption)] text-[var(--accent)]" title={`使用标签「${activePreset.title}」`}>
                   <Tag className="h-3 w-3 flex-shrink-0" />
                   <span className="truncate">{activePreset.title}</span>
                 </span>
               ) : (
-                <span className="flex-shrink-0 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                <span className="flex-shrink-0 text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                   {state.chatConfig.systemPrompt.length > 0 ? `${state.chatConfig.systemPrompt.length} 字` : '未设置'}
                 </span>
               )}
@@ -2134,7 +2139,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
               onChange={(event) => dispatch({ type: 'SET_CHAT_CONFIG', payload: { systemPrompt: event.target.value } })}
               rows={7}
               placeholder="为当前对话设置角色、规则或输出格式"
-              className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm leading-6 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
+              className="w-full resize-none rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-body)] leading-[var(--leading-ui)] text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:placeholder:text-[var(--text-tertiary)]"
             />
 
             <div className="mt-3 flex min-w-0 items-center gap-2">
@@ -2144,18 +2149,18 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                   onClick={() => setPresetMenuOpen((value) => !value)}
                   disabled={state.systemPromptPresets.length === 0}
                   aria-expanded={presetMenuOpen}
-                  className="flex h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:hover:bg-white/[0.05]"
+                  className="flex h-10 w-full min-w-0 items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--app-bg)] px-3 text-[length:var(--font-body)] transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:hover:bg-white/[0.05]"
                   title={state.systemPromptPresets.length === 0 ? '暂无预设，保存后可在此快速切换' : '选择已保存的预设'}
                 >
-                  <ChevronDown className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
-                  <span className={`min-w-0 truncate ${activePreset ? 'font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]' : 'text-[var(--text-secondary)] dark:text-[var(--text-secondary)]'}`}>
+                  <ChevronDown className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
+                  <span className={`min-w-0 truncate ${activePreset ? 'font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'}`}>
                     {state.systemPromptPresets.length === 0
                       ? '暂无预设'
                       : activePreset
                         ? activePreset.title
                         : '选择预设'}
                   </span>
-                  <span className="ml-auto flex-shrink-0 text-xs text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                  <span className="ml-auto flex-shrink-0 text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                     {state.systemPromptPresets.length} 个
                   </span>
                 </button>
@@ -2166,7 +2171,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: -4, scale: 0.98 }}
                       transition={{ duration: 0.14 }}
-                      className="absolute left-0 top-full z-30 mt-1.5 max-h-64 w-full overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                      className="absolute left-0 top-full z-30 mt-1.5 max-h-64 w-full overflow-y-auto rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
                     >
                       {state.systemPromptPresets.map((preset) => {
                         const selected = preset.prompt === state.chatConfig.systemPrompt;
@@ -2176,23 +2181,23 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                             type="button"
                             onClick={() => applyPresetPrompt(preset.prompt)}
                             title={preset.prompt}
-                            className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                            className={`w-full rounded-[var(--radius-field)] px-3 py-2 text-left transition-colors ${
                               selected
                                 ? 'bg-[var(--surface-muted)] text-[var(--accent)] dark:bg-white/[0.07] dark:text-[var(--accent)]'
-                                : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:text-[var(--text-primary)] dark:hover:bg-white/[0.07]'
+                                : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]'
                             }`}
                           >
                             <div className="flex items-center justify-between gap-2">
-                              <span className="truncate text-sm font-semibold">{preset.title}</span>
+                              <span className="truncate text-[length:var(--font-body)] font-semibold">{preset.title}</span>
                               {selected && <Check className="h-3.5 w-3.5 flex-shrink-0" />}
                             </div>
-                            <div className="mt-0.5 truncate text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+                            <div className="mt-0.5 truncate text-[length:var(--font-caption)] text-[var(--text-secondary)]">
                               {preset.prompt || '（空）'}
                             </div>
                           </button>
                         );
                       })}
-                      <div className="px-3 pb-1 pt-2 text-[11px] leading-4 text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                      <div className="px-3 pb-1 pt-2 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
                         点击应用，同名保存会覆盖更新；删除请使用下方标签。
                       </div>
                     </motion.div>
@@ -2204,7 +2209,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                   type="button"
                   onClick={() => setSavingPreset(true)}
                   disabled={!currentPrompt}
-                  className="h-10 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] dark:disabled:bg-white/[0.08] dark:disabled:text-[var(--text-tertiary)]"
+                  className="h-10 flex-shrink-0 rounded-[var(--radius-field)] bg-[var(--text-primary)] px-3 text-[length:var(--font-body)] font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:hover:bg-[var(--accent-hover)] dark:disabled:bg-white/[0.08] dark:disabled:text-[var(--text-tertiary)]"
                 >
                   存为标签
                 </button>
@@ -2231,20 +2236,20 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                         else if (event.key === 'Escape') cancelSavePreset();
                       }}
                       placeholder="输入标签名称，留空自动编号"
-                      className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:placeholder:text-[var(--text-tertiary)]"
+                      className="min-w-0 flex-1 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-body)] text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:placeholder:text-[var(--text-tertiary)]"
                     />
                     <button
                       type="button"
                       onClick={confirmSavePreset}
                       disabled={!currentPrompt}
-                      className="h-9 flex-shrink-0 rounded-lg bg-[var(--text-primary)] px-3 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:text-[var(--app-bg)] dark:hover:bg-[var(--accent-hover)] disabled:dark:bg-white/[0.08] disabled:dark:text-[var(--text-tertiary)]"
+                      className="h-9 flex-shrink-0 rounded-[var(--radius-field)] bg-[var(--text-primary)] px-3 text-[length:var(--font-body)] font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:cursor-not-allowed disabled:bg-[var(--border)] disabled:text-[var(--text-secondary)] dark:bg-[var(--accent)] dark:hover:bg-[var(--accent-hover)] disabled:dark:bg-white/[0.08] disabled:dark:text-[var(--text-tertiary)]"
                     >
                       确认
                     </button>
                     <button
                       type="button"
                       onClick={cancelSavePreset}
-                      className="h-9 flex-shrink-0 rounded-lg px-3 text-sm text-[var(--text-secondary)] transition-colors hover:bg-black/[0.05] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.08]"
+                      className="h-9 flex-shrink-0 rounded-[var(--radius-field)] px-3 text-[length:var(--font-body)] text-[var(--text-secondary)] transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                     >
                       取消
                     </button>
@@ -2255,7 +2260,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
 
             {state.systemPromptPresets.length > 0 && (
               <div className="mt-4">
-                <div className="mb-2 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">预设标签 · 点击应用</div>
+                <div className="mb-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">预设标签 · 点击应用</div>
                 <div className="flex flex-wrap gap-1.5">
                   {state.systemPromptPresets.map((preset) => {
                     const selected = preset.prompt === state.chatConfig.systemPrompt;
@@ -2271,7 +2276,7 @@ function ChatSettingsPanel({ onClose }: { onClose: () => void }) {
                         <button
                           type="button"
                           onClick={() => applyPresetPrompt(preset.prompt)}
-                          className="max-w-[160px] truncate text-xs"
+                          className="max-w-[160px] truncate text-[length:var(--font-caption)]"
                           title={selected ? `当前使用：${preset.title}` : `${preset.title}：${preset.prompt}`}
                         >
                           {preset.title}
@@ -2363,7 +2368,7 @@ function ChatNumberSetting({ label, description, value, min, max, step, onChange
   return (
     <div className="border-b border-black/[0.06] py-4 last:border-b-0 dark:border-white/[0.06]">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <label className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</label>
+        <label className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">{label}</label>
         <input
           type="number"
           value={safeValue}
@@ -2374,11 +2379,11 @@ function ChatNumberSetting({ label, description, value, min, max, step, onChange
             const next = Number(event.target.value);
             if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, next)));
           }}
-          className="mono-font w-24 rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 text-right text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
+          className="mono-font w-24 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1 text-right text-[length:var(--font-body)] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08]"
         />
       </div>
       {description && (
-        <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{description}</p>
+        <p className="mb-3 text-[length:var(--font-caption)] leading-5 text-[var(--text-secondary)]">{description}</p>
       )}
       <input
         type="range"

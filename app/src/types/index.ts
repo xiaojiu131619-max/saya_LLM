@@ -385,7 +385,7 @@ export interface AppState {
   currentView: ViewType;
   /** 对话后端：main = 主 llama-server；fast27b = fast-27b 引擎（自带 OpenAI API）。 */
   chatEngine: ChatEngineId;
-  /** Agent 页 WebUI 标签的后端：与对话页的后端选择彼此独立（fast-27b 由同源桥提供官方页面）。 */
+  /** Agent 页 WebUI 标签的后端：主模型 / fast-27b（fast-27b 由同源桥提供官方页面）。 */
   webuiEngine: WebUiEngineId;
   /** Agent 页当前标签（dsh / WebUI 之间互相跳转用）。 */
   agentTab: AgentTabId;

@@ -84,6 +84,15 @@ pub fn get_server_logs() -> Result<Vec<String>, String> {
     Ok(process_manager::get_logs())
 }
 
+/// 只返回最后 `count` 行服务日志。
+///
+/// 服务状态轮询（1Hz）只需要尾部若干行就能解析出 token 读数，拉全量会让每秒都
+/// 克隆并序列化整个数组。要看完整日志用 `get_server_logs`。
+#[tauri::command]
+pub fn get_server_logs_tail(count: usize) -> Result<Vec<String>, String> {
+    Ok(process_manager::get_logs_tail(count))
+}
+
 #[tauri::command]
 pub fn clear_server_logs() -> Result<(), String> {
     process_manager::clear_logs();

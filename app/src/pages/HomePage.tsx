@@ -1,5 +1,5 @@
 import { useMemo, useState, type PointerEvent } from 'react';
-import { Database, ExternalLink, FolderPlus, RefreshCw, Search } from 'lucide-react';
+import { ExternalLink, FolderPlus, RefreshCw, Search } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import ModelCard from '@/components/ModelCard';
 import SortDropdown from '@/components/SortDropdown';
@@ -122,16 +122,20 @@ export default function HomePage() {
       onPointerMove={handleSurfacePointerMove}
       onPointerLeave={handleSurfacePointerLeave}
     >
-      <header className="flex-shrink-0 border-b border-[var(--border)] bg-[var(--app-bg)] px-4 py-4 sm:px-6">
+      <header className="model-library-header flex-shrink-0 border-b border-[var(--border)] bg-[var(--app-bg)] px-4 py-4 sm:px-6">
         <div className="mx-auto flex max-w-[1180px] min-[1600px]:max-w-[1520px] min-w-0 items-center gap-3">
-          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center text-[var(--accent)]">
-            <Database className="h-5 w-5" />
-          </div>
           <div className="min-w-0">
+            <div className="eyebrow mb-2">模型工作台 / 本地 GGUF</div>
             <h1 className="truncate text-xl font-bold leading-tight text-[var(--text-primary)]">模型管理</h1>
             <p className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)]">
               扫描本地 GGUF 文件，选择模型并进入参数加载。
             </p>
+          </div>
+          <div className="model-library-count ml-auto flex-shrink-0 text-right">
+            {/* 直接显示真实数量：原 padStart(2,'0') 在 0 个模型时渲染成「00」，
+                空状态下看起来像未初始化的占位符。 */}
+            <div className="mono-font text-3xl font-semibold leading-none text-[var(--text-primary)]">{state.models.length}</div>
+            <div className="mt-2 text-xs text-[var(--text-secondary)]">本地模型</div>
           </div>
         </div>
       </header>
@@ -177,7 +181,7 @@ export default function HomePage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
         <div className="model-list-container mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px]">
-          <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <div className="model-library-meta mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
             <span className="px-0.5 py-1">
               {state.models.length} 个模型
             </span>
@@ -221,7 +225,7 @@ export default function HomePage() {
             {sortedModels.length === 0 && (
               <div className="flex min-h-[320px] items-center justify-center sm:min-h-[420px]">
                 {state.gridColumns === 1 ? (
-                  <div className="w-full border-b border-[var(--border-subtle)] px-1 py-6 sm:px-2">
+                  <div className="model-library-empty w-full border-b border-[var(--border-subtle)] px-1 py-6 sm:px-2">
                     <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                       <div className="flex min-w-0 items-start gap-3">
                         <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--accent)]">
@@ -275,7 +279,7 @@ export default function HomePage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="w-full max-w-lg border-b border-[var(--border-subtle)] px-2 py-8 text-center">
+                  <div className="model-library-empty w-full max-w-lg border-b border-[var(--border-subtle)] px-2 py-8 text-center">
                     <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--accent)]">
                       <FolderPlus className="h-6 w-6" />
                     </div>
@@ -284,7 +288,7 @@ export default function HomePage() {
                     </div>
                     <p className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">
                       {state.models.length === 0
-                        ? '请先在设置中添加包含 .gguf 文件的目录，或点击上方「下载」面板在线拉取模型。'
+                        ? '请先在设置中添加包含 .gguf 文件的目录，或点击上方「魔搭下载」在浏览器中打开魔搭模型库。'
                         : '请调整搜索关键词或排序方式。'}
                     </p>
                     {state.models.length === 0 && (

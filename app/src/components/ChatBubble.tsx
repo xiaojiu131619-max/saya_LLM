@@ -328,15 +328,15 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 10 }}
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-        className="group grid w-full justify-items-end gap-1.5 pb-7"
+        className="group grid w-full justify-items-end gap-1.5 pb-8"
       >
-        <div className="flex max-w-[80%] items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+        <div className="flex max-w-[80%] items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
           <strong className="font-medium text-[var(--text-primary)] dark:text-[var(--text-secondary)]">你</strong>
           <span>{formatMessageTime(message.timestamp)}</span>
         </div>
 
         {editing ? (
-          <div className="w-full max-w-[80%] rounded-[18px] border border-black/[0.08] bg-[var(--surface-muted)] p-2 shadow-none dark:border-white/[0.08] dark:bg-[var(--surface-raised)]">
+          <div className="w-full max-w-[80%] rounded-[var(--radius-panel)] border border-black/[0.08] bg-[var(--surface-muted)] p-2 shadow-none dark:border-white/[0.08] dark:bg-[var(--surface-raised)]">
             <textarea
               value={draftContent}
               onChange={(event) => setDraftContent(event.target.value)}
@@ -351,7 +351,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 }
               }}
               rows={Math.min(8, Math.max(3, draftContent.split('\n').length))}
-              className="max-h-[220px] min-h-[92px] w-full resize-y rounded-xl border border-black/[0.10] bg-white px-3 py-2 text-[15px] leading-7 text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] focus:border-black/25 dark:border-white/[0.10] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:focus:border-[var(--accent)]/45"
+              className="max-h-[220px] min-h-[92px] w-full resize-y rounded-[var(--radius-field)] border border-black/[0.10] bg-white px-3 py-2 text-[length:var(--font-chat)] leading-[1.6] text-[var(--text-primary)] outline-none [overflow-wrap:anywhere] focus:border-black/25 dark:border-white/[0.10] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)] dark:focus:border-[var(--accent)]/45"
               autoFocus
             />
             <div className="mt-2 flex items-center justify-end gap-2">
@@ -359,7 +359,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={cancelEdit}
                 disabled={savingEdit}
-                className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--text-secondary)]"
+                className="h-8 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3 text-[length:var(--font-body)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.06]"
               >
                 取消
               </button>
@@ -367,14 +367,14 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={() => void submitEdit(draftContent)}
                 disabled={savingEdit || !draftContent.trim()}
-                className="h-8 rounded-md bg-[var(--accent)] px-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                className="h-8 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-body)] font-semibold text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
               >
                 {savingEdit ? '发送中' : '保存并发送'}
               </button>
             </div>
           </div>
         ) : (
-          <div className="max-w-[78%] rounded-[16px] bg-black/[0.045] px-4 py-2.5 text-[15px] leading-7 text-[var(--text-primary)] dark:bg-white/[0.065] dark:text-[var(--text-primary)]">
+          <div className="max-w-[78%] rounded-[var(--radius-bubble)] bg-black/[0.045] px-4 py-2.5 text-[length:var(--font-chat)] leading-[1.6] text-[var(--text-primary)] dark:bg-white/[0.065]">
             {message.content && (
               <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</p>
             )}
@@ -400,29 +400,28 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
       transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-      className="group grid w-full min-w-0 gap-2.5 pb-9 text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+      className="group grid w-full min-w-0 gap-2.5 pb-8 text-[var(--text-primary)]"
     >
-      <div className="flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-        <strong className="truncate font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
+      <div className="flex min-w-0 items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+        <strong className="truncate font-semibold text-[var(--text-primary)]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
         <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/25" />
         <span className="truncate">{formatMessageTime(message.timestamp)}</span>
       </div>
 
       {message.reasoningContent && !hasEmbeddedThinking && (
-        <div className="max-w-[760px]">
-          <ThoughtBlock content={message.reasoningContent} />
-        </div>
+        <ThoughtBlock content={message.reasoningContent} />
       )}
 
       {message.toolActivity && message.toolActivity.length > 0 && (
         <ToolActivityPanel activities={message.toolActivity} />
       )}
 
-      {/* 正文与思考块同宽（760px）：宽窗口下不限行长的中文长段落可读性差。 */}
-      <div className="min-w-0 max-w-[760px] text-[15.5px] leading-[1.9] text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+      {/* 列宽跟随消息列（768/896px），字号与行高由 MarkdownRenderer 的 prose-body 决定；
+          外层不再声明字号，否则会与内层打架（历史上这里写 15.5px 是死声明）。 */}
+      <div className="min-w-0 text-[var(--text-primary)]">
         <MarkdownRenderer content={message.content} />
         {message.isStreaming && (
-          <div className="mt-3 flex w-fit items-center gap-2 py-1 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+          <div className="mt-3 flex w-fit items-center gap-2 py-1 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
             <span className="relative flex h-4 w-4 items-center justify-center">
               <span className="absolute h-4 w-4 rounded-full border-2 border-[var(--border)] dark:border-white/[0.14]" />
               <motion.span
@@ -445,11 +444,11 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       </div>
 
       {message.isStreaming ? (
-        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[length:var(--font-caption)] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
           <Metric icon={Clock} label={`已用 ${formatDuration(streamingElapsed)}`} />
         </div>
       ) : (
-        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+        <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[length:var(--font-caption)] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
           {/* ctx 与侧边栏服务状态同口径：本地会话累计水位（估算）。 */}
           {/* 终止 / 出错的回复拿不到完整统计：整行保留，缺的值一律 -- 占位，不再隐藏整行。 */}
           <Metric icon={Gauge} label={formatSessionCtxUsage(sessionCtx)} />
@@ -468,8 +467,8 @@ function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
   const pendingCount = activities.filter((item) => item.pending).length;
 
   return (
-    <div className="max-w-[760px] rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
+    <div className="rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="mb-2 flex items-center gap-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
         {pendingCount > 0
           ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
           : <Wrench className="h-3.5 w-3.5 text-[var(--accent)]" />}
@@ -489,7 +488,7 @@ function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
               <button
                 type="button"
                 onClick={() => hasDetail && setExpandedId(expanded ? null : item.id)}
-                className={`flex w-full min-w-0 items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                className={`flex w-full min-w-0 items-start gap-2 rounded-[var(--radius-field)] px-2 py-1.5 text-left transition-colors ${
                   hasDetail ? 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]' : 'cursor-default'
                 }`}
               >
@@ -500,26 +499,26 @@ function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
                 )}
                 <span className="min-w-0 flex-1">
                   <span className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="mono-font text-xs font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">
+                    <span className="mono-font text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">
                       {item.tool}
                     </span>
-                    <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] dark:bg-white/[0.07]">
+                    <span className="rounded-[var(--radius-sm)] bg-black/[0.05] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:bg-white/[0.07]">
                       {item.server}
                     </span>
                     {item.pending && (
-                      <span className="text-[11px] text-[var(--accent)]">执行中…</span>
+                      <span className="text-[length:var(--font-eyebrow)] text-[var(--accent)]">执行中…</span>
                     )}
                     {!item.pending && item.isError && (
-                      <span className="text-[11px] font-medium text-[var(--state-danger)]">执行失败</span>
+                      <span className="text-[length:var(--font-eyebrow)] font-medium text-[var(--state-danger)]">执行失败</span>
                     )}
                   </span>
-                  <span className="mono-font mt-0.5 block truncate text-[11px] text-[var(--text-tertiary)]">
+                  <span className="mono-font mt-0.5 block truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                     {formatToolArguments(item.arguments)}
                   </span>
                 </span>
               </button>
               {expanded && hasDetail && (
-                <pre className="mono-font mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/[0.04] px-3 py-2 text-[11.5px] leading-5 text-[var(--text-secondary)] dark:bg-black/30 dark:text-[var(--text-secondary)]">
+                <pre className="mono-font mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-field)] bg-black/[0.04] px-3 py-2 text-[length:var(--font-caption)] leading-[var(--leading-code)] text-[var(--text-secondary)] dark:bg-black/30">
                   {item.result}
                 </pre>
               )}
@@ -542,7 +541,7 @@ function ActionButton({ icon: Icon, label, onClick, disabled, danger }: {
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-35 ${
+      className={`flex h-8 w-8 items-center justify-center rounded-[var(--radius-field)] transition-colors disabled:opacity-35 ${
         danger ? 'hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400' : 'hover:bg-black/[0.055] hover:text-[var(--text-primary)] dark:hover:bg-[var(--surface-raised)] dark:hover:text-[var(--text-primary)]'
       }`}
       title={label}
@@ -579,14 +578,14 @@ function MultimodalAttachments({ parts }: { parts: Array<{ type: string; text?: 
               key={idx}
               src={part.image_url.url}
               alt="用户上传的图片"
-              className="max-w-full rounded-lg border border-[var(--border)] shadow-sm dark:border-white/[0.1]"
+              className="max-w-full rounded-[var(--radius-field)] border border-[var(--border)] shadow-sm dark:border-white/[0.1]"
               style={{ maxHeight: '320px', width: 'auto' }}
             />
           );
         }
         if (part.type === 'audio_url' && part.audio_url) {
           return (
-            <div key={idx} className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-3 dark:border-white/[0.1] dark:bg-[var(--surface-raised)]">
+            <div key={idx} className="rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--app-bg)] p-3 dark:border-white/[0.1] dark:bg-[var(--surface-raised)]">
               <audio
                 controls
                 src={part.audio_url.url}
@@ -601,7 +600,7 @@ function MultimodalAttachments({ parts }: { parts: Array<{ type: string; text?: 
               key={idx}
               controls
               src={part.video_url.url}
-              className="max-w-full rounded-lg border border-[var(--border)] shadow-sm dark:border-white/[0.1]"
+              className="max-w-full rounded-[var(--radius-field)] border border-[var(--border)] shadow-sm dark:border-white/[0.1]"
               style={{ maxHeight: '480px', width: 'auto' }}
             />
           );

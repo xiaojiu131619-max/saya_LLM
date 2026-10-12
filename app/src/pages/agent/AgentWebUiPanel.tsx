@@ -27,7 +27,8 @@ const ENGINE_OPTIONS: Array<{ id: WebUiEngineId; label: string }> = [
 export default function AgentWebUiPanel() {
   const { state, dispatch } = useApp();
   const engine = state.webuiEngine;
-  const statuses = useEngineStatuses(engine);
+  // 共享轮询：与对话页 / 服务状态页读同一份引擎快照（只跑一个 3 秒 interval）。
+  const statuses = useEngineStatuses();
   const [serverApiKey, setServerApiKey] = useState<string | null>(null);
   const [copied, setCopied] = useState<'url' | 'key' | null>(null);
   const [bridge, setBridge] = useState<WebuiBridgeInfo | null>(null);

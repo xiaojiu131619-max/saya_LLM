@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>模型加载页 · 布局优化原型（1440 宽）</title>
+<style>
+  :root{
+    --app-bg:#FAFAFA; --surface:#FFFFFF; --surface-raised:#FFFFFF; --surface-muted:#F3F3F3;
+    --surface-hover:#EDEDED; --border:#E3E1DC; --border-subtle:#EDEBE7;
+    --text-primary:#1C1B19; --text-secondary:#5F5C56; --text-tertiary:#8C877F;
+    --accent:#4A6FA5; --accent-hover:#3D5C8B; --accent-subtle:#E4EBF5;
+    --state-danger:#B4413C; --state-danger-bg:#FAECEB; --state-danger-border:#E8C4C2;
+    --state-success:#3F7D52; --state-success-bg:#E8F3EC;
+    --state-warning:#9A6B18; --state-warning-bg:#FBF2E0;
+    --font-sans:"Segoe UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  }
+  html.dark{
+    --app-bg:#1B1B1B; --surface:#262626; --surface-raised:#303030; --surface-muted:#353535;
+    --surface-hover:#404040; --border:#3A3A3A; --border-subtle:#2E2E2E;
+    --text-primary:#EDEBE7; --text-secondary:#B5B1A9; --text-tertiary:#7E7A73;
+    --accent:#8AB0E0; --accent-hover:#A5C2E8; --accent-subtle:#2A3446;
+    --state-danger:#E09B97; --state-danger-bg:#3A2523; --state-danger-border:#5E3A37;
+    --state-success:#8FC7A3; --state-success-bg:#23331F;
+    --state-warning:#D9B36A; --state-warning-bg:#38301F;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--app-bg);color:var(--text-primary);font-family:var(--font-sans);font-size:14px;-webkit-font-smoothing:antialiased}
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+
+  /* ---------- 原型外壳：模拟 1440 窗口 ---------- */
+  .proto-bar{position:sticky;top:0;z-index:90;display:flex;align-items:center;gap:3px;padding:8px 16px;background:var(--surface-raised);border-bottom:1px solid var(--border);font-size:12px}
+  .proto-bar .sp{flex:1}
+  .proto-bar button{height:26px;padding:0 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text-secondary);font-size:12px;cursor:pointer;font-family:inherit}
+  .proto-bar button:hover{background:var(--surface-muted);color:var(--text-primary)}
+  .proto-bar button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+  .proto-bar .hint{color:var(--text-tertiary)}
+
+  .frame{width:1440px;margin:0 auto;display:flex;height:860px;border-left:1px solid var(--border);border-right:1px solid var(--border);background:var(--app-bg)}
+
+  /* ---------- 侧栏（复制现状） ---------- */
+  .side{width:240px;flex-shrink:0;padding:8px;background:var(--surface-muted);border-right:1px solid var(--border);display:flex;flex-direction:column}
+  .side-brand{display:flex;align-items:center;gap:12px;padding:12px 16px 16px}
+  .side-logo{width:36px;height:36px;border-radius:50%;background:var(--surface-muted);display:grid;place-items:center;font-weight:600;color:var(--text-tertiary);font-size:14px}
+  .side-brand .t1{font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .side-brand .t2{font-size:12px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .nav-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;border-radius:6px;background:transparent;color:var(--text-primary);font-size:14px;font-family:inherit;cursor:pointer;text-align:left}
+  .nav-item:hover{background:var(--surface-hover)}
+  .nav-item.active{background:var(--surface-selected,var(--surface-hover))}
+  .nav-ico{width:16px;text-align:center;color:var(--text-secondary);font-size:13px;flex-shrink:0}
+  .nav-item span.t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .side-box{margin-top:20px;padding:0 12px;font-size:12px}
+  .side-card{border:1px solid var(--border-subtle);border-radius:8px;padding:10px;background:var(--surface);margin-bottom:8px}
+  .side-card .h{font-size:11px;color:var(--text-tertiary);margin-bottom:4px}
+  .side-card .v{font-weight:600}
+
+  /* ---------- 内容区 ---------- */
+  .content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+
+  /* ===== 改造后的顶栏（L1 + L2 + 状态行） ===== */
+  .topbar{flex-shrink:0;background:var(--app-bg);border-bottom:1px solid var(--border-subtle);padding:10px 24px 0}
+
+  /* L1 行：身份 + 主行动（右列独占，位置永不漂移） */
+  .l1{display:flex;align-items:center;gap:16px}
+  .ident{display:flex;align-items:center;gap:12px;min-width:0;flex:1}
+  .avatar{width:40px;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--surface);display:grid;place-items:center;font-weight:700;font-size:15px;flex-shrink:0;color:#fff}
+  .ident-txt{min-width:0}
+  .name-row{display:flex;align-items:center;gap:8px;min-width:0}
+  .name-row .nm{font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .apiname{width:144px;height:24px;flex-shrink:0;border:1px solid transparent;background:transparent;border-radius:6px;padding:0 6px;font-size:12px;color:var(--text-secondary);outline:none}
+  .apiname::placeholder{color:var(--text-tertiary)}
+  .apiname:hover{background:var(--surface-muted)}
+  .apiname:focus{background:var(--surface);border-color:var(--accent);color:var(--text-primary)}
+  .meta-row{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:var(--text-secondary)}
+  .chip{display:inline-flex;align-items:center;padding:2px 6px;border-radius:5px;font-size:10px;font-weight:500}
+  .chip.moe{background:var(--accent-subtle);color:var(--accent)}
+  .chip.dense{background:var(--state-success-bg);color:var(--state-success)}
+
+  .actions{flex-shrink:0;display:flex;flex-direction:column;align-items:stretch;gap:6px;width:150px}
+  .btn{display:flex;align-items:center;justify-content:center;gap:6px;height:32px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text-primary);font-size:13px;font-family:inherit;cursor:pointer;white-space:nowrap}
+  .btn:hover{background:var(--surface-muted)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500;height:36px}
+  .btn.primary:hover{background:var(--accent-hover)}
+  .btn.ghost{background:transparent}
+  .btn .mini{font-size:11px;opacity:.75}
+
+  /* L2 行：结论 + 分项摘要 */
+  .l2{display:flex;align-items:center;gap:12px;margin-top:12px;padding:8px 0 10px}
+  .conclusion{display:flex;align-items:baseline;gap:8px;flex-shrink:0}
+  .conclusion .lb{font-size:11px;color:var(--text-secondary)}
+  .conclusion .big{font-size:22px;font-weight:600;color:var(--accent);line-height:1}
+  .calib{font-size:9px;font-weight:500;color:var(--accent);background:var(--accent-subtle);border-radius:3px;padding:1px 4px}
+  .summary{display:flex;align-items:center;gap:8px;padding-left:12px;border-left:1px solid var(--border-subtle);min-width:0;flex-wrap:wrap}
+  .summary .it{display:flex;align-items:baseline;gap:4px;font-size:11px;color:var(--text-secondary)}
+  .summary .it b{font-family:var(--font-mono);font-size:12px;font-weight:600;color:var(--text-primary)}
+  .summary .toggle{margin-left:auto;font-size:11px;color:var(--accent);background:none;border:0;cursor:pointer;font-family:inherit}
+
+  /* 状态行：tab + 进度 */
+  .statusline{display:flex;align-items:center;gap:14px;padding:6px 0;border-top:1px solid var(--border-subtle)}
+  .tabs{display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--surface-muted);flex-shrink:0}
+  .tab{position:relative;display:flex;align-items:center;gap:6px;height:28px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:var(--text-secondary);font-size:13px;font-family:inherit;cursor:pointer}
+  .tab[aria-selected="true"]{background:var(--surface);color:var(--accent);font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+  .cfg-summary{margin-left:auto;font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary);white-space:nowrap}
+
+  /* 进度行：只在加载/错误时出现 */
+  .progress-row{display:flex;align-items:center;gap:10px;padding:7px 0 9px;font-size:12px}
+  .progress-row .txt{color:var(--text-secondary)}
+  .progress-row .pct{margin-left:auto;font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
+  .bar{height:4px;border-radius:999px;background:var(--surface-muted);overflow:hidden}
+  .bar > i{display:block;height:100%;border-radius:999px;background:var(--accent);transition:width .3s ease-out}
+
+  /* ===== 正文 ===== */
+  .body{flex:1;min-height:0;overflow-y:auto;padding:20px 24px 32px}
+  .wrap{max-width:1180px;margin:0 auto}
+
+  .section{margin-bottom:24px;border:1px solid var(--border-subtle);border-radius:10px;background:var(--surface);overflow:hidden}
+  .section-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border-subtle)}
+  .section-head .ic{color:var(--accent);font-size:14px}
+  .section-head h3{font-size:13px;font-weight:600}
+  .section-head .tail{margin-left:auto;font-size:11px;color:var(--text-tertiary)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;align-items:start}
+  .cols > div{min-width:0}
+  .cols > div:first-child{border-right:1px solid var(--border-subtle)}
+
+  .row{padding:10px 14px;border-bottom:1px solid var(--border-subtle)}
+  .row:last-child{border-bottom:0}
+  .row .lab{font-size:13px;font-weight:500}
+  .row .desc{font-size:11px;color:var(--text-secondary);margin-top:2px;line-height:1.5}
+  .row .desc .rng{color:var(--text-tertiary)}
+  .badge{display:inline-block;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:500;background:var(--state-warning-bg);color:var(--state-warning);vertical-align:1px}
+
+  /* 滑杆 */
+  .slider{display:flex;align-items:center;gap:12px;margin-top:8px}
+  .track{position:relative;flex:1;height:6px;border-radius:999px;background:linear-gradient(to right,var(--accent) var(--p,50%),rgba(125,118,107,.22) var(--p,50%))}
+  .track .knob{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;border:2px solid var(--accent);transform:translate(-50%,-50%);left:var(--p,50%)}
+  .numbox{display:flex;align-items:center;gap:4px;width:112px;flex-shrink:0;height:30px;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:var(--app-bg)}
+  .numbox input{width:100%;border:0;background:transparent;text-align:right;font-family:var(--font-mono);font-size:13px;color:var(--text-primary);outline:none}
+  .numbox .sfx{font-size:11px;color:var(--text-secondary);flex-shrink:0}
+  /* 轨道刻度线（替代原来的整行按钮） */
+  .ticks{position:relative;height:14px;margin-top:4px}
+  .ticks .tk{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer}
+  .ticks .tk i{display:block;width:1px;height:5px;background:var(--border)}
+  .ticks .tk.on i{background:var(--accent);height:6px}
+  .ticks .tk b{font-family:var(--font-mono);font-size:9px;font-weight:500;color:var(--text-tertiary)}
+  .ticks .tk.on b{color:var(--accent)}
+
+  /* 开关行 */
+  .togrow{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border-subtle)}
+  .togrow:last-child{border-bottom:0}
+  .togrow .tx{min-width:0;flex:1}
+  .tog{display:relative;width:38px;height:22px;border-radius:999px;background:var(--border);flex-shrink:0}
+  .tog::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+  .tog.on{background:var(--accent)}
+  .tog.on::after{transform:translateX(16px)}
+
+  /* 折叠高级参数 */
+  .adv-head{display:flex;align-items:center;gap:8px;width:100%;padding:12px 14px;border:0;background:transparent;color:inherit;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;text-align:left}
+  .adv-head .cv{color:var(--text-secondary);font-size:12px}
+  .adv-head .sub{font-size:11px;font-weight:400;color:var(--text-secondary)}
+
+  /* 运行记录（已下沉到末尾） */
+  .rr{display:flex;align-items:center;gap:8px;padding:12px 14px;border:1px solid var(--border-subtle);border-radius:10px;background:var(--surface);font-size:13px;font-weight:600;cursor:pointer}
+  .rr .n{font-size:12px;font-weight:400;color:var(--text-tertiary)}
+  .rr .badge-new{margin-left:auto;padding:2px 7px;border-radius:999px;background:var(--accent-subtle);color:var(--accent);font-size:11px;font-weight:500}
+
+  /* 错误内联卡 */
+  .errcard{margin-bottom:24px;border:1px solid var(--state-danger-border);border-radius:10px;background:var(--state-danger-bg);overflow:hidden}
+  .errcard .eh{display:flex;align-items:center;gap:8px;padding:11px 14px;font-size:13px;font-weight:600;color:var(--state-danger)}
+  .errcard .eb{padding:0 14px 12px}
+  .errcard .eb p{font-size:12px;color:var(--text-secondary);line-height:1.6}
+  .errcard pre{margin-top:8px;padding:10px;border-radius:6px;background:var(--app-bg);border:1px solid var(--border-subtle);font-family:var(--font-mono);font-size:11px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all}
+  .errcard a{display:inline-block;margin-top:10px;font-size:12px;color:var(--accent)}
+
+  /* ---------- 标注 ---------- */
+  .note{position:absolute;z-index:60;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;font-size:13px;font-weight:700;display:grid;place-items:center;box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:default}
+  .callout{position:fixed;z-index:100;max-width:330px;padding:12px 14px;border-radius:9px;background:var(--surface-raised);border:1px solid var(--accent);box-shadow:0 8px 28px rgba(0,0,0,.22);font-size:12px;line-height:1.65;display:none}
+  .callout b{display:block;margin-bottom:5px;font-size:12px;color:var(--accent)}
+  .callout .q{display:block;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);color:var(--text-tertiary);font-size:11px}
+  body.notes .note{display:grid}
+  .rel{position:relative}
+</style>
+</head>
+<body>
+
+<div class="proto-bar">
+  <span style="font-weight:600;color:var(--text-primary)">模型加载页 · 布局优化原型</span>
+  <span class="hint">1440 × 860 窗口 · 左栏 240px · 内容区 1152px（现状断点盲区，本次一并修掉）</span>
+  <span class="sp"></span>
+  <button id="tNotes" aria-pressed="false">标注</button>
+  <button id="tErr" aria-pressed="false">加载失败态</button>
+  <button id="tLoad" aria-pressed="false">加载中</button>
+  <button id="tDark" aria-pressed="false">深色</button>
+</div>
+
+<div class="frame">
+  <!-- ================= 侧栏 ================= -->
+  <aside class="side">
+    <div class="side-brand">
+      <div class="side-logo">Q</div>
+      <div style="min-width:0">
+        <div class="t1">Agent LLM PC</div>
+        <div class="t2">本地模型加载中心</div>
+      </div>
+    </div>
+    <nav style="display:flex;flex-direction:column;gap:4px">
+      <button class="nav-item"><span class="nav-ico">▤</span><span class="t">模型列表</span></button>
+      <button class="nav-item"><span class="nav-ico">◈</span><span class="t">Agent</span></button>
+      <button class="nav-item"><span class="nav-ico">▦</span><span class="t">向量服务</span></button>
+      <button class="nav-item"><span class="nav-ico">⚡</span><span class="t">fast-27b</span></button>
+      <button class="nav-item" style="background:var(--surface-hover)"><span class="nav-ico">←</span><span class="t">退出参数界面</span></button>
+    </nav>
+    <div class="side-box">
+      <div class="side-card">
+        <div class="h">当前加载</div>
+        <div class="v" style="font-size:13px">Qwen3-30B-A3B</div>
+        <div class="h" style="margin-top:6px">已停止</div>
+      </div>
+      <div class="side-card">
+        <div class="h">服务状态</div>
+        <div class="v" style="font-size:13px;color:var(--state-danger)">未连接</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ================= 内容区 ================= -->
+  <div class="content">
+
+    <!-- 改造后顶栏 -->
+    <div class="topbar rel" id="topbar">
+      <!-- L1 行 -->
+      <div class="l1">
+        <div class="ident">
+          <div class="avatar" style="background:var(--accent)">Q</div>
+          <div class="ident-txt">
+            <div class="name-row">
+              <span class="nm">Qwen3-30B-A3B</span>
+              <input class="apiname mono" value="qwen3-30b-a3b" aria-label="API 调用名" />
+            </div>
+            <div class="meta-row">
+              <span class="mono">30.5B</span><span>·</span>
+              <span>Q4_K_M</span><span>·</span>
+              <span class="mono">18.6 GB</span>
+              <span class="chip moe">MoE</span>
+            </div>
+          </div>
+        </div>
+        <div class="actions" id="actions">
+          <button class="btn primary" id="btnLoad">▶ <span id="btnLoadText">加载模型</span></button>
+          <button class="btn ghost" id="btnTune">✦ 自动调参</button>
+          <button class="btn ghost" id="btnLast">↩ 上次成功配置</button>
+        </div>
+      </div>
+
+      <!-- L2 行 -->
+      <div class="l2" id="l2">
+        <div class="conclusion">
+          <span class="lb">预计 GPU 显存</span>
+          <span class="big mono">11.42 GB</span>
+          <span class="calib">实测校准 ×1.08</span>
+        </div>
+        <div class="summary">
+          <span class="it">权重 <b>9.81</b></span>
+          <span class="it">KV <b>0.92</b></span>
+          <span class="it">计算 <b>0.41</b></span>
+          <span class="it">运行 <b>0.28</b></span>
+          <span class="it">层 <b>100%</b></span>
+          <span class="it">专家 <b>100%</b></span>
+          <button class="toggle">明细 ▾</button>
+        </div>
+      </div>
+
+      <!-- 状态行：tab 下沉到这里 -->
+      <div class="statusline">
+        <div class="tabs">
+          <button class="tab" aria-selected="true"># 加载参数</button>
+          <button class="tab" aria-selected="false">◫ 模型信息</button>
+        </div>
+        <span class="cfg-summary">ctx 32,768 · ngl 45 · KV f16 · ubatch 512</span>
+      </div>
+
+      <!-- 进度行：仅加载中 / 出错时渲染 -->
+      <div class="progress-row" id="progressRow" style="display:none">
+        <span class="txt" id="progressTxt">42% · 加载权重到 GPU</span>
+        <span class="pct" id="progressPct">42%</span>
+      </div>
+      <div class="bar" id="bar" style="display:none;margin-bottom:10px"><i style="width:42%"></i></div>
+    </div>
+
+    <!-- 正文 -->
+    <div class="body" id="body">
+      <div class="wrap">
+
+        <!-- 失败内联卡（仅错误态显示） -->
+        <div class="errcard" id="errCard" style="display:none">
+          <div class="eh">✕ <span id="errTitle">llama-server 启动失败</span></div>
+          <div class="eb">
+            <p>内核不支持该量化格式，请到软件设置指定自编译核心。</p>
+            <pre id="errDetail">llama_model_loader: failed to load model
+error loading model: invalid magic characters
+  file: models\Qwen3-30B-A3B-Q4_K_M.gguf
+  n_tensors = 512, n_meta = 30</pre>
+            <a>查看完整日志 →</a>
+          </div>
+        </div>
+
+        <!-- 参数区：两个独立卡片块，mb-6 节奏 -->
+        <div class="cols" id="cols" style="margin-bottom:24px">
+          <!-- 左：推理与显存 -->
+          <section class="section" style="margin:0">
+            <div class="section-head"><span class="ic">⬢</span><h3>推理与显存</h3></div>
+
+            <div class="row">
+              <div class="lab">上下文长度</div>
+              <div class="desc">模型最多支持 32,768 个 token <span class="rng">· 可调范围 512 – 32,768</span></div>
+              <div class="slider">
+                <div class="track" style="--p:100%"><span class="knob" style="--p:100%"></span></div>
+                <div class="numbox"><input value="32768" /><span class="sfx">token</span></div>
+              </div>
+              <div class="ticks">
+                <span class="tk" style="left:3%"><i></i><b>10K</b></span>
+                <span class="tk on" style="left:50%"><i></i><b>32K</b></span>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="lab">GPU 卸载</div>
+              <div class="desc">模型层数 48；内核把输出层也算一层，拉满需 49（含输出层） <span class="rng">· 可调范围 0 – 49</span></div>
+              <div class="slider">
+                <div class="track" style="--p:91.8%"><span class="knob" style="--p:91.8%"></span></div>
+                <div class="numbox"><input value="45" /></div>
+              </div>
+            </div>
+
+            <!-- ncmoe 已从右列移到这里，紧跟 ngl -->
+            <div class="row">
+              <div class="lab">强制 MoE 权重留在 CPU 的层数 <span class="badge">实验</span></div>
+              <div class="desc">-ncmoe / --n-cpu-moe <span class="rng">· 可调范围 0 – 48</span></div>
+              <div class="slider">
+                <div class="track" style="--p:0%"><span class="knob" style="--p:0%"></span></div>
+                <div class="numbox"><input value="0" /></div>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="lab">物理批处理大小（ubatch）</div>
+              <div class="desc">--ubatch-size / -ub</div>
+              <div class="slider">
+                <div class="track" style="--p:6.3%"><span class="knob" style="--p:6.3%"></span></div>
+                <div class="numbox"><input value="512" /></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 右：缓存与运行行为 -->
+          <section class="section" style="margin:0">
+            <div class="section-head"><span class="ic">▤</span><h3>缓存与运行行为</h3></div>
+            <div class="togrow">
+              <div class="tx">
+                <div class="lab" style="font-size:13px">将 KV 缓存卸载到 GPU 内存</div>
+                <div class="desc">--kv-offload / --no-kv-offload</div>
+              </div>
+              <span class="tog on"></span>
+            </div>
+            <div class="togrow">
+              <div class="tx">
+                <div class="lab" style="font-size:13px">快速注意力</div>
+                <div class="desc">--flash-attn</div>
+              </div>
+              <span class="tog on"></span>
+            </div>
+            <div class="togrow">
+              <div class="tx">
+                <div class="lab" style="font-size:13px">空闲后自动卸载</div>
+                <div class="desc">闲置超过 <span class="mono">15</span> 分钟自动释放显存</div>
+              </div>
+              <span class="tog"></span>
+            </div>
+            <div class="togrow">
+              <div class="tx">
+                <div class="lab" style="font-size:13px">记住本模型的加载设置</div>
+                <div class="desc">下次进入自动沿用本次参数</div>
+              </div>
+              <span class="tog on"></span>
+            </div>
+          </section>
+        </div>
+
+        <!-- 高级参数（折叠） -->
+        <div class="section" style="margin-bottom:24px">
+          <button class="adv-head"><span class="cv">▸</span><span>高级参数</span><span class="sub">线程、批处理、RoPE、投机解码、聊天模板等</span></button>
+        </div>
+
+        <!-- 运行记录：已下沉到页面末尾 -->
+        <div class="rr">
+          <span class="cv" style="color:var(--text-tertiary)">▸</span>
+          <span>⌛ 运行记录</span>
+          <span class="n">7 条 · 含调参与启动实测</span>
+          <span class="badge-new">上次：ngl 45 · ctx 32,768 · 实测 11.9 GB</span>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 标注锚点 -->
+<div class="note" data-n="1" style="top:8px;right:18px">1</div>
+<div class="note" data-n="2" style="top:78px;left:300px">2</div>
+<div class="note" data-n="3" style="top:118px;right:18px">3</div>
+<div class="note" data-n="4" style="top:152px;left:24px">4</div>
+<div class="note" data-n="5" style="top:196px;right:18px">5</div>
+<div class="note" data-n="6" style="top:262px;left:24px">6</div>
+<div class="note" data-n="7" style="top:520px;right:18px">7</div>
+<div class="note" data-n="8" style="top:640px;left:24px">8</div>
+
+<div class="callout" id="callout"></div>
+
+<script>
+(function(){
+  var notes = {
+    1:{b:'① 主行动独占右列，双态互斥',q:'现状：tab / 自动调参 / 重置 / 加载模型 / 停止 挤在一个 flex-wrap 里，加载时追加「停止」会让整组按钮重排——刚点下的按钮在手指离开前就移动了。改为右侧 150px 独占列，加载时「加载模型」原地换成「停止加载」，按钮数量恒定、位置永不漂移。'},
+    2:{b:'② tab 切换器移出动作组，下沉到状态行',q:'现状 tab 切换器外壳与 action 按钮同形状同边框，只是底色不同，用户必须逐字读才能分清「导航」还是「动作」。现在动作组只剩三个真动作，从右往左 = 主行动 → 次行动 → 回退。'},
+    3:{b:'③ 结论与推导过程分层',q:'「预计显存 11.42 GB」是唯一结论，权重/KV/计算/运行/层/专家 是推导明细。现状 7 个数字等权并排，第一眼看到的是一串小数。分项收成一行摘要，「明细」按需展开。'},
+    4:{b:'④ 顶栏横排断点 1340 → 1120',q:'这是最关键的一条。容器宽 = 窗口 −240 侧栏 −48 内边距，所以现状要窗口 ≥1668 才横排——你的 1440~1600 主力窗口全部落在盲区，顶栏永远竖排、按钮换行、主按钮掉到第二行。分项摘要独立成行后，宽度需求降到 ~200px，断点可以下调到 1120，1440 起就横排。'},
+    5:{b:'⑤ 空闲态不渲染进度条和 0%',q:'现状进度条永远在，没任务时文案回落到「显存预测会随参数实时更新」、数字恒为 0%，占 36px 常驻高度且零信息，还让「加载中」失去对比。空闲态这一行改放当前参数摘要。'},
+    6:{b:'⑥ 一级区块改卡片 + mb-6 节奏',q:'现状区块之间只有 1px 边框、零间距，整页读起来像一张表格。行内收紧（py-3→2.5）、块间放开（新增 mb-6），形成「密-疏」节奏；两组参数各自成卡片后，高度不齐也不会读成「右边少了内容」。'},
+    7:{b:'⑦ ncmoe 从右列移入，紧跟 ngl',q:'调显存时「多少层上 GPU / 多少层留 CPU」是同一个决策，现在分居左右两列，每次都要视线跳转。物理相邻后认知负担下降——这是动线优化不只是减少点击。'},
+    8:{b:'⑧ 运行记录下沉到页面末尾',q:'它回答的是「上次发生了什么」，是回溯信息，却占据首屏第一块，把要调的参数推下去。现在移到末尾并加「上次：ngl 45 · ctx 32,768 · 实测 11.9 GB」角标——首屏让位给参数，回溯信息仍一键可达。'}
+  };
+
+  var cal = document.getElementById('callout');
+  document.querySelectorAll('.note').forEach(function(n){
+    n.addEventListener('mouseenter', function(){
+      var d = notes[n.dataset.n]; if(!d) return;
+      cal.innerHTML = '<b>'+d.b+'</b>'+d.q;
+      var r = n.getBoundingClientRect();
+      var left = Math.min(window.innerWidth-346, Math.max(8, r.left - 340));
+      var top = Math.min(window.innerHeight-200, r.bottom + 10);
+      cal.style.left = left+'px'; cal.style.top = top+'px';
+      cal.style.display='block';
+    });
+  });
+  document.addEventListener('mouseover', function(e){
+    if(!(e.target.classList && e.target.classList.contains('note'))) cal.style.display='none';
+  });
+
+  var btnNotes = document.getElementById('tNotes');
+  btnNotes.addEventListener('click', function(){
+    var on = document.body.classList.toggle('notes');
+    btnNotes.setAttribute('aria-pressed', on);
+  });
+
+  var btnDark = document.getElementById('tDark');
+  btnDark.addEventListener('click', function(){
+    var on = document.documentElement.classList.toggle('dark');
+    btnDark.setAttribute('aria-pressed', on);
+  });
+
+  var btnLoad = document.getElementById('tLoad');
+  var btnErr = document.getElementById('tErr');
+  var pr = document.getElementById('progressRow'), bar = document.getElementById('bar'), err = document.getElementById('errCard');
+
+  function apply(){
+    var loading = btnLoad.getAttribute('aria-pressed')==='true';
+    var error = btnErr.getAttribute('aria-pressed')==='true';
+    pr.style.display = (loading||error) ? 'flex' : 'none';
+    bar.style.display = (loading||error) ? 'block' : 'none';
+    err.style.display = error ? 'block' : 'none';
+    document.getElementById('progressTxt').textContent = error ? '启动失败' : '42% · 加载权重到 GPU';
+    document.getElementById('progressTxt').style.color = error ? 'var(--state-danger)' : '';
+    document.getElementById('progressPct').textContent = error ? '' : '42%';
+    bar.querySelector('i').style.background = error ? 'var(--state-danger)' : 'var(--accent)';
+    document.getElementById('btnLoad').className = 'btn ' + (loading||error ? 'primary' : 'primary');
+    document.getElementById('btnLoadText').textContent = loading ? '停止加载' : (error ? '重试加载' : '加载模型');
+    document.getElementById('btnLoad').style.background = loading || error ? 'var(--state-danger)' : '';
+    document.getElementById('btnLoad').style.borderColor = loading || error ? 'var(--state-danger)' : '';
+  }
+  btnLoad.addEventListener('click', function(){ this.setAttribute('aria-pressed', this.getAttribute('aria-pressed')!=='true'); apply(); });
+  btnErr.addEventListener('click', function(){ this.setAttribute('aria-pressed', this.getAttribute('aria-pressed')!=='true'); apply(); });
+  apply();
+})();
+</script>
+</body>
+</html>

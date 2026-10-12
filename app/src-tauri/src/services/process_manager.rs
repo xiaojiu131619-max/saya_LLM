@@ -3018,6 +3018,20 @@ pub fn get_logs() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 只取最后 `count` 行服务日志（count = 0 表示全部）。
+///
+/// 服务状态卡每秒轮询一次，只需要尾部若干行就能解析出 token 读数；返回全量
+/// （最多 2000 行）会让每秒都克隆并序列化整个数组，属于纯浪费。
+pub fn get_logs_tail(count: usize) -> Vec<String> {
+    let Ok(logs) = SERVER_LOGS.lock() else {
+        return Vec::new();
+    };
+    if count == 0 || logs.len() <= count {
+        return logs.clone();
+    }
+    logs[logs.len() - count..].to_vec()
+}
+
 /// 读取统一日志中枢。since_ms 大于 0 时只返回该时间戳及之后的增量，供前端轮询。
 /// 注意：使用 >= 而非 > 以避免同毫秒日志丢失，前端应根据 seq 字段去重。
 pub fn get_system_logs(since_ms: u64) -> Vec<SystemLogEntry> {
