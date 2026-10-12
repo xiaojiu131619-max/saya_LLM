@@ -780,7 +780,12 @@ mod tests {
         ));
     }
 
+    /// 实机探测：`GpuMonitor::new()` 需要真实显卡与可用的监测后端，
+    /// CI runner 上会返回「未检测到可用的显卡监测后端」而 panic。
+    /// 按仓库既有惯例（`live_public_endpoint_round_trip` 等）忽略。
+    /// 运行：cargo test --lib live_windows_gpu_monitor -- --ignored --nocapture
     #[test]
+    #[ignore = "需要真实显卡与可用的显卡监测后端"]
     fn live_windows_gpu_monitor_reads_dedicated_memory() {
         let mut monitor = super::GpuMonitor::new().expect("应能初始化显卡监测");
         assert!(monitor.device_count() > 0, "应至少检测到一张显卡");

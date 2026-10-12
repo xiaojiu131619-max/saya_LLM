@@ -46,6 +46,7 @@
   - 消除 3 处 `react-hooks/set-state-in-effect`（eslint-plugin-react-hooks v7 新增规则，随 `configs.flat.recommended` 引入，插件升级后让既有写法突然变成 error）：`ModelLoadPage` 的「调参开始自动展开卡片」改用渲染期调整 state；`KernelUpdatePage` 的覆盖路径读取改为内联 async IIFE（setState 落在 `await` 之后）；`EnvCheckDialog` 的手动检测启动延后一个宏任务。三处行为均不变。
   - `AppContext`：3 处 `useEffect` 补 `dispatch` 依赖（`useCallback(…, [])` 包装，引用稳定，运行期无操作），消除 `exhaustive-deps` 告警。
   - `process_manager`：`native_video_runtime_requires_ffmpeg_and_ffprobe` 的断言依赖宿主机 PATH——`media_search_dirs` 含 PATH 回退，于是「本地目录缺 ffmpeg 就该不可用」在装了 ffmpeg 的开发机和自带 ffmpeg 的 windows runner 上必然失败。新增 `video_runtime_info_for_exe_with_path` 注入 PATH 来源：生产入口读真实环境变量、行为不变，测试传 `None` 获得与环境无关的确定结果；并补一条显式验证 PATH 回退顺序的测试。
+  - `gpu_monitor`：`live_windows_gpu_monitor_reads_dedicated_memory` 是实机探测——`GpuMonitor::new()` 需要真实显卡与可用的监测后端，CI runner 上返回「未检测到可用的显卡监测后端」而 panic（本机有独显所以过）。它是仓库里唯一没加 `#[ignore]` 的 `live_` 测试，按既有惯例（`live_public_endpoint_round_trip`、`live_download_and_validate` 等）补上 `#[ignore]` 并注明运行方式。
 - **CI 运行时升级**：`actions/checkout`、`actions/setup-node`、`actions/cache` 由 v4 升到 v5（Node 24 运行时），消除 Node 20 弃用告警。
 
 ---
