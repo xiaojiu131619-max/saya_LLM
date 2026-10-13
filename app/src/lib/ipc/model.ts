@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { VideoSupportLevel } from '@/types';
+import type { ModelMemoryLayout, VideoSupportLevel } from '@/types';
 import { isDesktopRuntime } from '../desktopRuntime';
 
 /**
@@ -28,6 +28,10 @@ export interface DesktopModelInfo {
   head_count_kv: number | null;
   /** 混合架构逐层 head_count_kv 数组的求和；标量形式时为 null。 */
   kv_heads_sum?: number | null;
+  kv_heads_by_layer?: number[] | null;
+  swa_layer_pattern?: boolean[] | null;
+  full_attention_interval?: number | null;
+  memory_layout?: ModelMemoryLayout | null;
   kv_heads_sum_full?: number | null;
   kv_heads_sum_swa?: number | null;
   sliding_window?: number | null;
@@ -136,6 +140,44 @@ export interface TuneHistoryEntry {
 
 // 模型运行记录：启动参数 + 实测表现，单独存放在 AppData 的 model_records.json，
 // 供显存预测校准、推荐启动参数与自动调参做数据支持。
+export interface ModelVramMeasurement {
+  version: number;
+  model_signature: string;
+  gpu_name: string;
+  gpu_total_gb: number;
+  kernel_version?: string | null;
+  config: {
+    gpu_layers: number;
+    ctx_length: number;
+    batch_size: number;
+    ubatch_size: number;
+    parallel: number;
+    flash_attn: boolean;
+    kv_offload: boolean;
+    kv_unified: boolean;
+    cache_type_k: string;
+    cache_type_v: string;
+    moe_cpu_layers: number;
+    speculative: string;
+    no_warmup?: boolean;
+    draft_tokens?: number | null;
+  };
+  baseline_gb: number | null;
+  loaded_gb: number | null;
+  baseline_spread_gb: number | null;
+  loaded_spread_gb: number | null;
+  quality: 'stable' | 'unverified' | 'adapted' | 'contaminated';
+  buffers: {
+    weights_gb: number | null;
+    kv_gb: number | null;
+    compute_gb: number | null;
+    context: number | null;
+    gpu_layers: number | null;
+    backend: string | null;
+    parallel?: number | null;
+  };
+}
+
 export interface ModelRunRecord {
   model_id: string;
   model_name: string;
@@ -151,6 +193,7 @@ export interface ModelRunRecord {
   first_token_ms?: number | null;
   vram_gb?: number | null;
   vram_predicted_gb?: number | null;
+  vram_measurement?: ModelVramMeasurement | null;
   note?: string | null;
 }
 

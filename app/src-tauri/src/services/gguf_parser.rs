@@ -1,11 +1,16 @@
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 
-const BUF_SIZE: u64 = 100 * 1024 * 1024; // 100MB buffer for large tokenizer data
+use crate::models::model_info::{GgufLayerMemoryLayout, GgufMemoryAccuracy, GgufMemoryLayout};
+
+const BUF_SIZE: u64 = 100 * 1024 * 1024; // 头部上限，按字段读取，不扫描大体积张量数据
+const MAX_LAYOUT_LAYERS: u64 = 100_000;
 const MAX_ARRAY: u64 = 10_000_000; // 支持大词表模型（如 10M+ tokens）
 const MAX_STR_LEN: u64 = 100_000_000;
 /// 数组嵌套深度上限。GGUF 规范中数组元素不应再是数组，这里留 2 层容错。
@@ -49,7 +54,11 @@ pub struct GgufMetadata {
     // Attention head metadata — needed for an accurate KV-cache size estimate.
     pub head_count: Option<u64>,
     pub head_count_kv: Option<u64>,
-    /// 逐层 head_count_kv 数组的求和（混合架构专用）；标量形式时为 None。
+    /// 全量逐层 KV 头数，必须与 block_count 对齐；0 = SSM/recurrent 层。
+    pub kv_heads_by_layer: Option<Vec<u64>>,
+    pub swa_layer_pattern: Option<Vec<bool>>,
+    pub full_attention_interval: Option<u64>,
+    /// 有效逐层 KV 头数的求和；无逐层信息时为 None。
     pub kv_heads_sum: Option<u64>,
     /// SWA 分列求和（仅逐层数组 + 滑窗模式齐备时有值）：pattern=0 全注意力 / pattern≠0 SWA。
     pub kv_heads_sum_full: Option<u64>,
@@ -74,10 +83,326 @@ pub struct GgufMetadata {
     pub tokenizer_add_eos: Option<bool>,
     pub(crate) tokenizer_tokens_hash: Option<[u8; 32]>,
     pub metadata_entries: Vec<(String, String)>,
+    pub memory_layout: Option<GgufMemoryLayout>,
+    // 分片内部信息仅供完整性校验，不传到前端。
+    pub(crate) split_no: Option<u64>,
+    pub(crate) split_count: Option<u64>,
+    pub(crate) split_tensors_count: Option<u64>,
+    pub(crate) tensor_names: Vec<String>,
+    pub(crate) layout_source: Option<GgufLayoutSource>,
+    pub(crate) kv_heads_array_present: bool,
     // 真实读出的能力信号：来自 HuggingFace 模型卡的 tags 数组（包含 vision / tool-use 等）
     pub tags: Vec<String>,
     // chat_template 原文，用来判断模型是否有工具调用语法
     pub chat_template: Option<String>,
+}
+
+/// 只累积元数据和 tensor table。BufReader 最多预读少量数据，避免原先固定
+/// 读取文件前 100 MB 时把 tensor payload 一并读入。
+struct HeaderReader {
+    reader: BufReader<File>,
+    buf: Vec<u8>,
+    file_len: u64,
+}
+
+impl HeaderReader {
+    fn take(&mut self, len: u64) -> Result<()> {
+        let end = (self.buf.len() as u64)
+            .checked_add(len)
+            .filter(|end| *end <= BUF_SIZE && *end <= self.file_len)
+            .ok_or_else(|| anyhow::anyhow!("GGUF 头部截断或超过 {} MB", BUF_SIZE / 1024 / 1024))?;
+        let start = self.buf.len();
+        self.buf.resize(end as usize, 0);
+        self.reader.read_exact(&mut self.buf[start..])?;
+        Ok(())
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        self.take(4)?;
+        Ok(u32::from_le_bytes(
+            self.buf[self.buf.len() - 4..].try_into()?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        self.take(8)?;
+        Ok(u64::from_le_bytes(
+            self.buf[self.buf.len() - 8..].try_into()?,
+        ))
+    }
+
+    fn string(&mut self) -> Result<()> {
+        let len = self.u64()?;
+        if len > MAX_STR_LEN {
+            bail!("GGUF 字符串过长：{}", len);
+        }
+        self.take(len)
+    }
+
+    fn value(&mut self, ty: u32, depth: u32) -> Result<()> {
+        match ty {
+            0 | 1 | 7 => self.take(1),
+            2 | 3 => self.take(2),
+            4..=6 => self.take(4),
+            8 => self.string(),
+            9 => {
+                if depth >= MAX_NEST_DEPTH {
+                    bail!("GGUF 数组嵌套过深：{}", depth);
+                }
+                let element_type = self.u32()?;
+                let count = self.u64()?;
+                if count > MAX_ARRAY {
+                    bail!("GGUF 数组过长：{}", count);
+                }
+                let width = match element_type {
+                    0 | 1 | 7 => Some(1u64),
+                    2 | 3 => Some(2),
+                    4..=6 => Some(4),
+                    10..=12 => Some(8),
+                    8 | 9 => None,
+                    _ => bail!("GGUF 数组元素类型无效：{}", element_type),
+                };
+                if let Some(width) = width {
+                    self.take(count * width)?;
+                } else {
+                    for _ in 0..count {
+                        self.value(element_type, depth + 1)?;
+                    }
+                }
+                Ok(())
+            }
+            10..=12 => self.take(8),
+            _ => bail!("GGUF 元数据类型无效：{}", ty),
+        }
+    }
+}
+
+fn read_header(file: File, file_len: u64) -> Result<Vec<u8>> {
+    let mut reader = HeaderReader {
+        reader: BufReader::new(file),
+        buf: Vec::new(),
+        file_len,
+    };
+    reader.take(4)?;
+    if &reader.buf[..4] != b"GGUF" {
+        bail!("文件不是 GGUF");
+    }
+    let version = reader.u32()?;
+    if !matches!(version, 2 | 3) {
+        bail!("不支持的 GGUF 版本：{}", version);
+    }
+    let tensor_count = reader.u64()?;
+    let metadata_count = reader.u64()?;
+    if tensor_count > file_len / 32 || metadata_count > file_len / 13 {
+        bail!("GGUF 头部计数超出文件边界");
+    }
+    for _ in 0..metadata_count {
+        reader.string()?;
+        let ty = reader.u32()?;
+        reader.value(ty, 0)?;
+    }
+    for _ in 0..tensor_count {
+        reader.string()?;
+        let n_dims = reader.u32()?;
+        if n_dims > 8 {
+            bail!("GGUF 张量维数无效：{}", n_dims);
+        }
+        reader.take(n_dims as u64 * 8 + 12)?;
+    }
+    Ok(reader.buf)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GgufLayoutSource {
+    tensors: Vec<TensorDescriptor>,
+    header_len: u64,
+    file_len: u64,
+    alignment: Option<u64>,
+    mtime: Option<std::time::Duration>,
+    header_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct TensorDescriptor {
+    name: String,
+    dims: Vec<u64>,
+    tensor_type: u32,
+    offset: u64,
+}
+
+/// 已知 GGML 量化的 (block 元素数, block 字节数)。未确认的分支/重排类型
+/// 故意不猜 bpw，交由 offset 跨度保守估算。
+fn ggml_type_layout(tensor_type: u32) -> Option<(u64, u64)> {
+    match tensor_type {
+        0 | 26 => Some((1, 4)),
+        1 | 25 | 30 => Some((1, 2)),
+        24 => Some((1, 1)),
+        27 | 28 => Some((1, 8)),
+        2 | 20 => Some((32, 18)),
+        3 => Some((32, 20)),
+        6 => Some((32, 22)),
+        7 => Some((32, 24)),
+        8 => Some((32, 34)),
+        9 => Some((32, 36)),
+        10 => Some((256, 84)),
+        11 => Some((256, 110)),
+        12 => Some((256, 144)),
+        13 => Some((256, 176)),
+        14 => Some((256, 210)),
+        15 => Some((256, 292)),
+        16 => Some((256, 66)),
+        17 => Some((256, 74)),
+        18 => Some((256, 98)),
+        19 => Some((256, 50)),
+        21 => Some((256, 110)),
+        22 => Some((256, 82)),
+        23 => Some((256, 136)),
+        29 => Some((256, 56)),
+        34 => Some((256, 54)),
+        35 => Some((256, 66)),
+        39 => Some((32, 17)),
+        _ => None,
+    }
+}
+
+fn tensor_byte_size(tensor: &TensorDescriptor) -> Result<Option<u64>> {
+    let Some(&first_dim) = tensor.dims.first() else {
+        bail!("GGUF 张量没有维度");
+    };
+    let elements = tensor.dims.iter().try_fold(1u64, |count, dim| {
+        if *dim == 0 {
+            bail!("GGUF 张量维度为零");
+        }
+        count
+            .checked_mul(*dim)
+            .ok_or_else(|| anyhow::anyhow!("GGUF 张量维度溢出"))
+    })?;
+    let Some((block, bytes)) = ggml_type_layout(tensor.tensor_type) else {
+        return Ok(None);
+    };
+    if first_dim % block != 0 {
+        bail!("GGUF 量化张量行宽与 block 不对齐");
+    }
+    Ok(Some(
+        elements
+            .checked_div(block)
+            .and_then(|n| n.checked_mul(bytes))
+            .ok_or_else(|| anyhow::anyhow!("GGUF 张量字节数溢出"))?,
+    ))
+}
+
+fn build_memory_layout(
+    tensors: &[TensorDescriptor],
+    block_count: u64,
+    header_len: u64,
+    file_len: u64,
+    alignment: u64,
+    mtime: Option<std::time::Duration>,
+    header_hash: [u8; 32],
+) -> Option<GgufMemoryLayout> {
+    if tensors.is_empty()
+        || block_count == 0
+        || block_count > MAX_LAYOUT_LAYERS
+        || alignment == 0
+        || !alignment.is_power_of_two()
+    {
+        return None;
+    }
+    let data_start = header_len.checked_add(alignment - 1)? / alignment * alignment;
+    let data_len = file_len.checked_sub(data_start)?;
+    let mut ordered: Vec<_> = tensors.iter().collect();
+    ordered.sort_by_key(|tensor| tensor.offset);
+    // 第一张量前出现未描述的数据时，布局无法覆盖整个 tensor data 区域。
+    if ordered.first()?.offset != 0 {
+        return None;
+    }
+    let mut names = HashSet::new();
+    let mut layout = GgufMemoryLayout {
+        version: 1,
+        layers: vec![GgufLayerMemoryLayout::default(); block_count as usize],
+        input_bytes: 0,
+        output_bytes: 0,
+        other_bytes: 0,
+        total_bytes: 0,
+        signature: String::new(),
+        accuracy: GgufMemoryAccuracy::Exact,
+        tied_output: tensors
+            .iter()
+            .any(|tensor| tensor.name == "token_embd.weight")
+            && !tensors.iter().any(|tensor| tensor.name == "output.weight"),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentllm.gguf.memory_layout.v1");
+    hasher.update(file_len.to_le_bytes());
+    hasher.update(data_start.to_le_bytes());
+    hasher.update(alignment.to_le_bytes());
+    hasher.update(block_count.to_le_bytes());
+    hasher.update(header_hash);
+    hasher.update([u8::from(mtime.is_some())]);
+    if let Some(mtime) = mtime {
+        hasher.update(mtime.as_secs().to_le_bytes());
+        hasher.update(mtime.subsec_nanos().to_le_bytes());
+    }
+    for (index, tensor) in ordered.iter().enumerate() {
+        if tensor.name.is_empty()
+            || tensor.name.contains('\u{fffd}')
+            || tensor.name.contains('\0')
+            || !names.insert(&tensor.name)
+            || tensor.offset % alignment != 0
+            || tensor.offset >= data_len
+        {
+            return None;
+        }
+        let next_offset = ordered.get(index + 1).map_or(data_len, |next| next.offset);
+        let span = next_offset
+            .checked_sub(tensor.offset)
+            .filter(|span| *span > 0)?;
+        let exact = tensor_byte_size(tensor).ok()?;
+        if exact.is_some_and(|bytes| bytes > span) {
+            return None;
+        }
+        // 已知类型一律使用真实 payload 尺寸，排除所有 alignment padding/footer。
+        // 未知类型使用完整跨度：对齐 padding 通常每张量多计至多 alignment - 1
+        // 字节，末张量可能包含 footer，明确标记 upper_bound。
+        let bytes = exact.unwrap_or(span);
+        if exact.is_none() {
+            layout.accuracy = GgufMemoryAccuracy::UpperBound;
+        }
+        if tensor.name.starts_with("blk.") {
+            let block = tensor_block_index(&tensor.name)?;
+            let layer = layout.layers.get_mut(usize::try_from(block).ok()?)?;
+            layer.weight_bytes = layer.weight_bytes.checked_add(bytes)?;
+            // 对齐 -ncmoe 的 ffn_(up|down|gate).*_exps 匹配；ffn_*_shexp
+            // 共享专家、ffn_gate_inp 路由器以及其它 block 张量仍计 GPU 权重。
+            let suffix = tensor.name.splitn(3, '.').nth(2)?;
+            if ["ffn_gate", "ffn_up", "ffn_down"].iter().any(|prefix| {
+                suffix
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.contains("_exps"))
+            }) {
+                layer.expert_bytes = layer.expert_bytes.checked_add(bytes)?;
+            }
+        } else if tensor.name.starts_with("token_embd.") {
+            layout.input_bytes = layout.input_bytes.checked_add(bytes)?;
+        } else if tensor.name.starts_with("output.") || tensor.name.starts_with("output_norm.") {
+            layout.output_bytes = layout.output_bytes.checked_add(bytes)?;
+        } else {
+            layout.other_bytes = layout.other_bytes.checked_add(bytes)?;
+        }
+        layout.total_bytes = layout.total_bytes.checked_add(bytes)?;
+        hasher.update((tensor.name.len() as u64).to_le_bytes());
+        hasher.update(tensor.name.as_bytes());
+        hasher.update((tensor.dims.len() as u64).to_le_bytes());
+        for dim in &tensor.dims {
+            hasher.update(dim.to_le_bytes());
+        }
+        hasher.update(tensor.tensor_type.to_le_bytes());
+        hasher.update(tensor.offset.to_le_bytes());
+    }
+    hasher.update([u8::from(layout.accuracy == GgufMemoryAccuracy::UpperBound)]);
+    hasher.update([u8::from(layout.tied_output)]);
+    layout.signature = format!("{:x}", hasher.finalize());
+    Some(layout)
 }
 
 fn adv(buf: &[u8], p: &mut usize, n: usize) -> Result<()> {
@@ -257,11 +582,15 @@ fn tensor_block_index(name: &str) -> Option<u64> {
 }
 
 fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
-    let mut file = File::open(path)?;
-    let file_len = file.metadata()?.len();
-    let buf_size = std::cmp::min(file_len, BUF_SIZE) as usize;
-    let mut buf = vec![0u8; buf_size];
-    file.read_exact(&mut buf)?;
+    let file = File::open(path)?;
+    let file_metadata = file.metadata()?;
+    let file_len = file_metadata.len();
+    let mtime = file_metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+    let buf = read_header(file, file_len)?;
+    let header_hash: [u8; 32] = Sha256::digest(&buf).into();
 
     let mut p: usize = 4;
     if buf.len() < 4 || &buf[0..4] != b"GGUF" {
@@ -323,12 +652,22 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
     let mut tags: Vec<String> = Vec::new();
     let mut chat_template: Option<String> = None;
     let mut entries: Vec<(String, String)> = Vec::new();
+    let mut metadata_keys = HashSet::new();
+    let mut alignment = Some(32u64);
+    let mut split_no = None;
+    let mut split_count = None;
+    let mut split_tensors_count = None;
+    let mut full_attention_interval = None;
+    let mut layout_metadata_valid = true;
 
     for _ in 0..kvn {
         if p >= buf.len() {
             bail!("GGUF metadata exceeds {} MB", BUF_SIZE / 1024 / 1024);
         }
         let key = rstr(&buf, &mut p)?;
+        if key.contains('\u{fffd}') || !metadata_keys.insert(key.clone()) {
+            bail!("GGUF 元数据键无效或重复：{}", key);
+        }
         let ty = r32(&buf, &mut p)?;
 
         if key == "tokenizer.ggml.tokens" {
@@ -340,6 +679,10 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         }
 
         let keep = key.starts_with("general.")
+            || key.starts_with("split.")
+            || key.contains(".ssm.")
+            || key.starts_with("ssm.")
+            || key.ends_with(".full_attention_interval")
             || key.ends_with(".block_count")
             || key.ends_with(".context_length")
             || key.ends_with(".embedding_length")
@@ -399,32 +742,28 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
             // 跳过并放弃该键。
             let numeric = matches!(et, 0 | 1 | 2 | 3 | 4 | 5 | 7 | 10 | 11);
             let mut vals: Vec<u64> = Vec::with_capacity(cnt.min(1024) as usize);
+            let mut valid = numeric;
             for _ in 0..cnt {
                 if !numeric {
                     skip(&buf, &mut p, et)?;
                     continue;
                 }
-                let n: i64 = match et {
-                    0 | 7 => r8(&buf, &mut p)? as i64,
-                    1 => r8(&buf, &mut p)? as i8 as i64,
-                    2 => u16::from_le_bytes(rbytes(&buf, &mut p, 2)?.try_into().unwrap()) as i64,
-                    3 => i16::from_le_bytes(rbytes(&buf, &mut p, 2)?.try_into().unwrap()) as i64,
-                    4 => r32(&buf, &mut p)? as i64,
-                    5 => r32(&buf, &mut p)? as i32 as i64,
-                    10 => r64(&buf, &mut p)? as i64,
-                    11 => i64::from_le_bytes(rbytes(&buf, &mut p, 8)?.try_into().unwrap()),
-                    _ => unreachable!(),
-                };
-                vals.push(n.max(0) as u64);
+                let value = read_val(&buf, &mut p, et)?;
+                let n = value.as_u64().or_else(|| value.as_bool().map(u64::from));
+                if let Some(n) = n {
+                    vals.push(n);
+                } else {
+                    // 负头数不能静默夹成 0，也不能把 u64 转 i64 截断。
+                    valid = false;
+                }
             }
             // 数组内容已从缓冲区消费完毕，无论元素类型都直接进入下一个键。
-            if numeric {
-                entries.push((key.clone(), format!("array[{}]", cnt)));
-                if key.ends_with(".attention.head_count_kv") {
-                    kv_heads_layers = Some(vals);
-                } else {
-                    swa_pattern_layers = Some(vals);
-                }
+            entries.push((key.clone(), format!("array[{}]", cnt)));
+            if key.ends_with(".attention.head_count_kv") {
+                // 无效数组也保留“键存在”信号，避免再用标量公式冒充有效向量。
+                kv_heads_layers = Some(if valid { vals } else { Vec::new() });
+            } else {
+                swa_pattern_layers = Some(if valid { vals } else { Vec::new() });
             }
             continue;
         }
@@ -435,6 +774,19 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         }
 
         match key.as_str() {
+            "general.alignment" => alignment = v.as_u64(),
+            "split.no" => {
+                split_no = v.as_u64();
+                layout_metadata_valid &= split_no.is_some();
+            }
+            "split.count" => {
+                split_count = v.as_u64();
+                layout_metadata_valid &= split_count.is_some_and(|count| count > 0);
+            }
+            "split.tensors.count" => {
+                split_tensors_count = v.as_u64();
+                layout_metadata_valid &= split_tensors_count.is_some();
+            }
             "general.architecture" => {
                 if let Some(s) = v.as_str() {
                     arch = s.to_string();
@@ -508,6 +860,8 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
                     klen = v.as_u64();
                 } else if key.ends_with(".attention.value_length") {
                     vlen = v.as_u64();
+                } else if key.ends_with(".full_attention_interval") {
+                    full_attention_interval = v.as_u64();
                 } else if key.ends_with(".attention.causal") {
                     attention_causal = v.as_bool();
                 } else if key.ends_with(".pooling_type") {
@@ -535,6 +889,7 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
     }
 
     let mut has_main_model_tensors = false;
+    let mut tensors = Vec::new();
     for _ in 0..tensor_count {
         if p >= buf.len() {
             bail!("GGUF tensor table exceeds {} MB", BUF_SIZE / 1024 / 1024);
@@ -544,11 +899,12 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         if n_dims > 8 {
             bail!("tensor dims {}", n_dims);
         }
+        let mut dims = Vec::with_capacity(n_dims as usize);
         for _ in 0..n_dims {
-            let _ = r64(&buf, &mut p)?;
+            dims.push(r64(&buf, &mut p)?);
         }
         let tensor_type = r32(&buf, &mut p)?;
-        let _offset = r64(&buf, &mut p)?;
+        let offset = r64(&buf, &mut p)?;
         let main_layer_count = blk.saturating_sub(nextn_predict_layers);
         if name == "blk.0.attn_norm.weight"
             || tensor_block_index(&name).is_some_and(|index| index < main_layer_count)
@@ -566,7 +922,41 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         } else {
             tensor_type_counts.push((tensor_type, 1));
         }
+        tensors.push(TensorDescriptor {
+            name,
+            dims,
+            tensor_type,
+            offset,
+        });
     }
+    if !layout_metadata_valid {
+        alignment = None;
+    }
+    let memory_layout = alignment.and_then(|alignment| {
+        build_memory_layout(
+            &tensors,
+            blk,
+            p as u64,
+            file_len,
+            alignment,
+            mtime,
+            header_hash,
+        )
+    });
+    let tensor_names = tensors.iter().map(|tensor| tensor.name.clone()).collect();
+    let layout_source = if blk == 0 && split_count.is_some_and(|count| count > 1) {
+        // 标准后续分片可能只有 split.*：保留描述，待首片给出 block_count 后估算。
+        Some(GgufLayoutSource {
+            tensors,
+            header_len: p as u64,
+            file_len,
+            alignment,
+            mtime,
+            header_hash,
+        })
+    } else {
+        None
+    };
 
     let mut tensor_type_summary: Vec<(String, u64)> = tensor_type_counts
         .into_iter()
@@ -581,25 +971,20 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         has_main_model_tensors,
     );
 
-    // 逐层 KV 头聚合：总求和；有滑窗模式且层数对齐时，再按
-    // 全注意力（pattern=0）/ SWA（pattern≠0）分列，供 KV 公式按滑窗估算。
-    let kv_heads_sum = kv_heads_layers.as_ref().map(|layers| layers.iter().sum());
-    let mut kv_heads_sum_full: Option<u64> = None;
-    let mut kv_heads_sum_swa: Option<u64> = None;
-    if let (Some(heads), Some(pattern)) = (&kv_heads_layers, &swa_pattern_layers) {
-        if heads.len() == pattern.len() {
-            let (mut full, mut swa) = (0u64, 0u64);
-            for (h, p) in heads.iter().zip(pattern.iter()) {
-                if *p == 0 {
-                    full += h;
-                } else {
-                    swa += h;
-                }
-            }
-            kv_heads_sum_full = Some(full);
-            kv_heads_sum_swa = Some(swa);
-        }
-    }
+    // 全量数组先按 block_count 校验；分片中的实际 KV/SSM 张量证据须待合并后再用。
+    let kv_heads_array_present = kv_heads_layers.is_some();
+    let kv_heads_by_layer = kv_heads_layers.filter(|values| {
+        blk > 0
+            && blk <= MAX_LAYOUT_LAYERS
+            && values.len() as u64 == blk
+            && values
+                .iter()
+                .try_fold(0u64, |sum, value| sum.checked_add(*value))
+                .is_some()
+    });
+    let swa_layer_pattern = swa_pattern_layers
+        .filter(|values| blk > 0 && blk <= MAX_LAYOUT_LAYERS && values.len() as u64 == blk)
+        .map(|values| values.into_iter().map(|value| value != 0).collect());
 
     Ok(GgufMetadata {
         gguf_version,
@@ -631,9 +1016,12 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         attention_causal,
         head_count: hc,
         head_count_kv: hckv,
-        kv_heads_sum,
-        kv_heads_sum_full,
-        kv_heads_sum_swa,
+        kv_heads_by_layer,
+        swa_layer_pattern,
+        full_attention_interval,
+        kv_heads_sum: None,
+        kv_heads_sum_full: None,
+        kv_heads_sum_swa: None,
         sliding_window: swa_window,
         key_length_swa: klen_swa,
         value_length_swa: vlen_swa,
@@ -653,6 +1041,13 @@ fn parse_gguf_header_single(path: &Path) -> Result<GgufMetadata> {
         tokenizer_add_eos,
         tokenizer_tokens_hash,
         metadata_entries: entries,
+        memory_layout,
+        split_no,
+        split_count,
+        split_tensors_count,
+        tensor_names,
+        layout_source,
+        kv_heads_array_present,
         tags,
         chat_template,
     })
@@ -770,34 +1165,317 @@ fn split_gguf_info(path: &Path) -> Option<(String, u32, u32)> {
     Some((prefix.to_string(), part.parse().ok()?, count.parse().ok()?))
 }
 
-pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
-    let mut metadata = parse_gguf_header_single(path)?;
-    let Some((prefix, _part, count)) = split_gguf_info(path) else {
-        return Ok(metadata);
-    };
-    if count <= 1 || !metadata.mtp_architecture_supported || metadata.nextn_predict_layers == 0 {
-        return Ok(metadata);
+fn refresh_kv_metadata(metadata: &mut GgufMetadata, complete_tensors: bool) {
+    let layer_count = metadata.block_count;
+    metadata.kv_heads_by_layer = metadata.kv_heads_by_layer.take().filter(|heads| {
+        layer_count > 0
+            && layer_count <= MAX_LAYOUT_LAYERS
+            && heads.len() as u64 == layer_count
+            && heads
+                .iter()
+                .try_fold(0u64, |sum, value| sum.checked_add(*value))
+                .is_some()
+    });
+    metadata.swa_layer_pattern = metadata
+        .swa_layer_pattern
+        .take()
+        .filter(|pattern| layer_count > 0 && pattern.len() as u64 == layer_count);
+    let hybrid_qwen = matches!(
+        metadata.architecture.as_str(),
+        "qwen35" | "qwen35moe" | "qwen3next"
+    );
+    if hybrid_qwen && layer_count > 0 && layer_count <= MAX_LAYOUT_LAYERS {
+        let mut attention = vec![false; layer_count as usize];
+        let mut recurrent = vec![false; layer_count as usize];
+        for name in &metadata.tensor_names {
+            let Some(block) = tensor_block_index(name).filter(|block| *block < layer_count) else {
+                continue;
+            };
+            let suffix = name.splitn(3, '.').nth(2).unwrap_or_default();
+            if matches!(suffix, "attn_k.weight" | "attn_kv.weight") {
+                attention[block as usize] = true;
+            }
+            if suffix.starts_with("ssm_") || suffix.starts_with("ssm.") {
+                recurrent[block as usize] = true;
+            }
+        }
+        if !metadata.kv_heads_array_present {
+            // 只对已知 Qwen 混合架构应用 (层号 + 1) % interval == 0。
+            // 显式数组优先；NextN 层用 tensor 证据，不能套主模型的周期公式。
+            metadata.kv_heads_by_layer = metadata.head_count_kv.and_then(|heads| {
+                let interval = metadata
+                    .full_attention_interval
+                    .filter(|interval| *interval > 0);
+                if interval.is_none()
+                    && (!complete_tensors
+                        || !(0..layer_count as usize)
+                            .all(|index| attention[index] != recurrent[index]))
+                {
+                    return None;
+                }
+                let main_layers = layer_count.checked_sub(metadata.nextn_predict_layers)?;
+                let mut values = Vec::with_capacity(layer_count as usize);
+                for index in 0..layer_count {
+                    let full = if index < main_layers {
+                        interval.map_or(attention[index as usize], |interval| {
+                            (index + 1) % interval == 0
+                        })
+                    } else if complete_tensors
+                        && attention[index as usize] != recurrent[index as usize]
+                    {
+                        attention[index as usize]
+                    } else {
+                        return None;
+                    };
+                    values.push(if full { heads } else { 0 });
+                }
+                values
+                    .iter()
+                    .try_fold(0u64, |sum, value| sum.checked_add(*value))?;
+                Some(values)
+            });
+        }
+        if let Some(heads) = &metadata.kv_heads_by_layer {
+            // 实际 tensor 与元数据冲突时不输出貌似有效的 KV 向量。
+            let valid = heads.iter().enumerate().all(|(index, heads)| {
+                if attention[index] && recurrent[index] {
+                    return false;
+                }
+                (!attention[index] || *heads > 0) && (!recurrent[index] || *heads == 0)
+            });
+            if !valid {
+                metadata.kv_heads_by_layer = None;
+            }
+        }
     }
+    if !hybrid_qwen
+        && !metadata.kv_heads_array_present
+        && complete_tensors
+        && layer_count > 0
+        && layer_count <= MAX_LAYOUT_LAYERS
+        && metadata.full_attention_interval.is_none()
+        && !metadata
+            .metadata_entries
+            .iter()
+            .any(|(key, _)| key.contains(".ssm.") || key.starts_with("ssm."))
+    {
+        // dense 标量只在全部层都有注意力张量、且没有 recurrent 信号时展开。
+        // qkv 对 dense 是有效证据；Qwen 混合层仍由上面的专用逻辑判定。
+        let mut attention = vec![false; layer_count as usize];
+        let mut has_recurrent = false;
+        for name in &metadata.tensor_names {
+            let Some(block) = tensor_block_index(name).filter(|block| *block < layer_count) else {
+                continue;
+            };
+            let suffix = name.splitn(3, '.').nth(2).unwrap_or_default();
+            if matches!(
+                suffix,
+                "attn_k.weight" | "attn_kv.weight" | "attn_qkv.weight"
+            ) {
+                attention[block as usize] = true;
+            }
+            has_recurrent |= suffix.starts_with("ssm_") || suffix.starts_with("ssm.");
+        }
+        if !has_recurrent && attention.iter().all(|has_attention| *has_attention) {
+            metadata.kv_heads_by_layer = metadata
+                .head_count_kv
+                .filter(|heads| *heads > 0)
+                .filter(|heads| heads.checked_mul(layer_count).is_some())
+                .map(|heads| vec![heads; layer_count as usize]);
+        }
+    }
+    metadata.kv_heads_sum = metadata.kv_heads_by_layer.as_ref().and_then(|heads| {
+        heads
+            .iter()
+            .try_fold(0u64, |sum, value| sum.checked_add(*value))
+    });
+    metadata.kv_heads_sum_full = None;
+    metadata.kv_heads_sum_swa = None;
+    if let (Some(heads), Some(pattern)) = (&metadata.kv_heads_by_layer, &metadata.swa_layer_pattern)
+    {
+        let sums =
+            heads
+                .iter()
+                .zip(pattern)
+                .try_fold((0u64, 0u64), |(full, swa), (heads, is_swa)| {
+                    if *is_swa {
+                        Some((full, swa.checked_add(*heads)?))
+                    } else {
+                        Some((full.checked_add(*heads)?, swa))
+                    }
+                });
+        if let Some((full, swa)) = sums {
+            metadata.kv_heads_sum_full = Some(full);
+            metadata.kv_heads_sum_swa = Some(swa);
+        }
+    }
+}
 
-    let Some(parent) = path.parent() else {
-        return Ok(metadata);
-    };
-    for part in (1..=count).rev() {
-        let shard = parent.join(format!("{}-{:05}-of-{:05}.gguf", prefix, part, count));
-        if shard == path || !shard.exists() {
+fn fold_memory_layout(shards: &[GgufMetadata], expected_count: u32) -> Option<GgufMemoryLayout> {
+    if shards.len() != expected_count as usize {
+        return None;
+    }
+    let first = shards.first()?;
+    let mut layout = first.memory_layout.clone()?;
+    let mut names = HashSet::new();
+    let mut tensors_count = 0u64;
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentllm.gguf.memory_layout.split.v1");
+    hasher.update(expected_count.to_le_bytes());
+    for (index, shard) in shards.iter().enumerate() {
+        let part = shard.memory_layout.as_ref()?;
+        if shard.block_count != first.block_count
+            || shard.architecture != first.architecture
+            || part.layers.len() != layout.layers.len()
+            || part.version != 1
+            || shard.split_no.is_some_and(|number| number != index as u64)
+            || shard
+                .split_count
+                .is_some_and(|count| count != expected_count as u64)
+        {
+            return None;
+        }
+        for name in &shard.tensor_names {
+            if !names.insert(name) {
+                return None;
+            }
+        }
+        tensors_count = tensors_count.checked_add(shard.tensor_count)?;
+        hasher.update((index as u64).to_le_bytes());
+        hasher.update((part.signature.len() as u64).to_le_bytes());
+        hasher.update(part.signature.as_bytes());
+        if part.accuracy == GgufMemoryAccuracy::UpperBound {
+            layout.accuracy = GgufMemoryAccuracy::UpperBound;
+        }
+        if index == 0 {
             continue;
         }
-        let shard_metadata = parse_gguf_header_single(&shard)?;
-        metadata.mtp_tensor_count = metadata
-            .mtp_tensor_count
-            .saturating_add(shard_metadata.mtp_tensor_count);
-        metadata.has_main_model_tensors |= shard_metadata.has_main_model_tensors;
+        for (layer, extra) in layout.layers.iter_mut().zip(&part.layers) {
+            layer.weight_bytes = layer.weight_bytes.checked_add(extra.weight_bytes)?;
+            layer.expert_bytes = layer.expert_bytes.checked_add(extra.expert_bytes)?;
+        }
+        layout.input_bytes = layout.input_bytes.checked_add(part.input_bytes)?;
+        layout.output_bytes = layout.output_bytes.checked_add(part.output_bytes)?;
+        layout.other_bytes = layout.other_bytes.checked_add(part.other_bytes)?;
+        layout.total_bytes = layout.total_bytes.checked_add(part.total_bytes)?;
+    }
+    if shards.iter().any(|shard| {
+        shard
+            .split_tensors_count
+            .is_some_and(|count| count != tensors_count)
+    }) {
+        return None;
+    }
+    layout.tied_output = names
+        .iter()
+        .any(|name| name.as_str() == "token_embd.weight")
+        && !names.iter().any(|name| name.as_str() == "output.weight");
+    hasher.update([u8::from(layout.accuracy == GgufMemoryAccuracy::UpperBound)]);
+    hasher.update([u8::from(layout.tied_output)]);
+    layout.signature = format!("{:x}", hasher.finalize());
+    Some(layout)
+}
 
-        if metadata.mtp_tensor_count > 0 && metadata.has_main_model_tensors {
-            break;
+pub fn parse_gguf_header(path: &Path) -> Result<GgufMetadata> {
+    let mut metadata = parse_gguf_header_single(path)?;
+    let Some((prefix, part_number, count)) = split_gguf_info(path) else {
+        let complete = metadata.split_count.unwrap_or(1) == 1
+            && metadata.split_no.unwrap_or(0) == 0
+            && metadata
+                .split_tensors_count
+                .map_or(true, |count| count == metadata.tensor_count);
+        if !complete {
+            metadata.memory_layout = None;
+        }
+        refresh_kv_metadata(&mut metadata, complete);
+        return Ok(metadata);
+    };
+    let Some(parent) = path.parent() else {
+        metadata.memory_layout = None;
+        refresh_kv_metadata(&mut metadata, false);
+        return Ok(metadata);
+    };
+    if count == 0 || part_number == 0 || part_number > count {
+        metadata.memory_layout = None;
+        refresh_kv_metadata(&mut metadata, false);
+        return Ok(metadata);
+    }
+    let mut shards = Vec::new();
+    let mut complete = true;
+    for part in 1..=count {
+        if part == part_number {
+            shards.push(metadata.clone());
+            continue;
+        }
+        let shard = parent.join(format!(
+            "{}-{:05}-of-{:05}.{}",
+            prefix,
+            part,
+            count,
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("gguf")
+        ));
+        match parse_gguf_header_single(&shard) {
+            Ok(shard_metadata) => shards.push(shard_metadata),
+            Err(_) => complete = false,
         }
     }
+    if complete {
+        let first_arch = shards[0].architecture.clone();
+        let first_block_count = shards[0].block_count;
+        for shard in &mut shards {
+            if let Some(source) = shard.layout_source.take() {
+                if shard.architecture == "unknown" {
+                    shard.architecture = first_arch.clone();
+                }
+                shard.block_count = first_block_count;
+                shard.memory_layout = source.alignment.and_then(|alignment| {
+                    build_memory_layout(
+                        &source.tensors,
+                        first_block_count,
+                        source.header_len,
+                        source.file_len,
+                        alignment,
+                        source.mtime,
+                        source.header_hash,
+                    )
+                });
+            }
+        }
+        metadata = shards[0].clone();
+    }
+    metadata.memory_layout = if complete {
+        fold_memory_layout(&shards, count)
+    } else {
+        None
+    };
+    let mut names = Vec::new();
+    let mut mtp_count = 0u64;
+    let mut tensor_count = 0u64;
+    let mut type_counts: Vec<(String, u64)> = Vec::new();
+    for shard in &shards {
+        metadata.has_main_model_tensors |= shard.has_main_model_tensors;
+        names.extend(shard.tensor_names.iter().cloned());
+        mtp_count = mtp_count.saturating_add(shard.mtp_tensor_count);
+        tensor_count = tensor_count.saturating_add(shard.tensor_count);
+        for (kind, count) in &shard.tensor_type_summary {
+            if let Some((_, total)) = type_counts.iter_mut().find(|(name, _)| name == kind) {
+                *total = total.saturating_add(*count);
+            } else {
+                type_counts.push((kind.clone(), *count));
+            }
+        }
+    }
+    metadata.tensor_names = names;
+    metadata.mtp_tensor_count = mtp_count;
+    if complete {
+        metadata.tensor_count = tensor_count;
+        type_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        metadata.tensor_type_summary = type_counts;
+    }
     refresh_mtp_classification(&mut metadata);
+    refresh_kv_metadata(&mut metadata, complete);
     Ok(metadata)
 }
 
@@ -887,6 +1565,9 @@ mod tests {
     enum TestValue<'a> {
         Bool(bool),
         U32(u32),
+        U64Array(&'a [u64]),
+        I32Array(&'a [i32]),
+        BoolArray(&'a [bool]),
         String(&'a str),
         StringArray(&'a [&'a str]),
     }
@@ -914,6 +1595,30 @@ mod tests {
                     data.extend_from_slice(&4u32.to_le_bytes());
                     data.extend_from_slice(&value.to_le_bytes());
                 }
+                TestValue::U64Array(values) => {
+                    data.extend_from_slice(&9u32.to_le_bytes());
+                    data.extend_from_slice(&10u32.to_le_bytes());
+                    data.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                    for value in *values {
+                        data.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                TestValue::I32Array(values) => {
+                    data.extend_from_slice(&9u32.to_le_bytes());
+                    data.extend_from_slice(&5u32.to_le_bytes());
+                    data.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                    for value in *values {
+                        data.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                TestValue::BoolArray(values) => {
+                    data.extend_from_slice(&9u32.to_le_bytes());
+                    data.extend_from_slice(&7u32.to_le_bytes());
+                    data.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                    for value in *values {
+                        data.push(u8::from(*value));
+                    }
+                }
                 TestValue::String(value) => {
                     data.extend_from_slice(&8u32.to_le_bytes());
                     push_string(&mut data, value);
@@ -929,12 +1634,16 @@ mod tests {
             }
         }
 
-        for tensor in tensors {
+        for (index, tensor) in tensors.iter().enumerate() {
             push_string(&mut data, tensor);
             data.extend_from_slice(&1u32.to_le_bytes());
             data.extend_from_slice(&1u64.to_le_bytes());
             data.extend_from_slice(&0u32.to_le_bytes());
-            data.extend_from_slice(&0u64.to_le_bytes());
+            data.extend_from_slice(&(index as u64 * 32).to_le_bytes());
+        }
+        if !tensors.is_empty() {
+            let start = (data.len() + 31) / 32 * 32;
+            data.resize(start + (tensors.len() - 1) * 32 + 4, 0);
         }
 
         data
@@ -962,6 +1671,604 @@ mod tests {
         let parsed = parse_gguf_header(&path).expect("parse synthetic GGUF");
         std::fs::remove_file(path).ok();
         parsed
+    }
+
+    /// 使用小型合成 payload 检查 offset/量化边界；生产解析只读取头部。
+    fn parse_layout_bytes(data: &[u8]) -> Result<GgufMetadata> {
+        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "agent-llm-layout-{}-{}.gguf",
+            std::process::id(),
+            id
+        ));
+        std::fs::write(&path, data).expect("写入合成 GGUF");
+        let parsed = parse_gguf_header(&path);
+        std::fs::remove_file(path).ok();
+        parsed
+    }
+
+    fn build_layout_gguf(
+        kv: &[(&str, TestValue<'_>)],
+        tensors: &[(&str, &[u64], u32, u64)],
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let mut data = build_test_gguf(kv, &[]);
+        data[8..16].copy_from_slice(&(tensors.len() as u64).to_le_bytes());
+        for (name, dims, tensor_type, offset) in tensors {
+            push_string(&mut data, name);
+            data.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for dim in *dims {
+                data.extend_from_slice(&dim.to_le_bytes());
+            }
+            data.extend_from_slice(&tensor_type.to_le_bytes());
+            data.extend_from_slice(&offset.to_le_bytes());
+        }
+        let data_start = (data.len() + 31) / 32 * 32;
+        data.resize(data_start + payload_len, 0);
+        data
+    }
+
+    #[test]
+    fn memory_layout_classifies_experts_shared_input_and_output() {
+        let kv = [
+            ("general.architecture", TestValue::String("qwen35moe")),
+            ("qwen35moe.block_count", TestValue::U32(2)),
+        ];
+        let tensors = [
+            ("token_embd.weight", &[1u64][..], 0, 0),
+            ("blk.0.attn_q.weight", &[1u64][..], 0, 32),
+            ("blk.0.ffn_gate_exps.weight", &[32u64][..], 2, 64),
+            ("blk.0.ffn_up_exps.weight", &[32u64][..], 2, 96),
+            ("blk.0.ffn_down_exps.weight", &[32u64][..], 2, 128),
+            ("blk.0.ffn_up_shexp.weight", &[1u64][..], 0, 160),
+            ("blk.0.ffn_gate_inp.weight", &[1u64][..], 0, 192),
+            ("blk.1.ffn_gate_up_exps.weight", &[32u64][..], 2, 224),
+            ("blk.1.ffn_down_shexp.weight", &[1u64][..], 0, 256),
+            ("output.weight", &[1u64][..], 0, 288),
+            ("output_norm.weight", &[1u64][..], 0, 320),
+            ("pos_embd.weight", &[32u64][..], 2, 352),
+        ];
+        let layout = parse_layout_bytes(&build_layout_gguf(&kv, &tensors, 400))
+            .unwrap()
+            .memory_layout
+            .unwrap();
+        assert_eq!(layout.version, 1);
+        assert_eq!(
+            layout.layers,
+            vec![
+                GgufLayerMemoryLayout {
+                    weight_bytes: 66,
+                    expert_bytes: 54
+                },
+                GgufLayerMemoryLayout {
+                    weight_bytes: 22,
+                    expert_bytes: 18
+                },
+            ]
+        );
+        assert_eq!(
+            (layout.input_bytes, layout.output_bytes, layout.other_bytes),
+            (4, 8, 18)
+        );
+        assert_eq!(layout.total_bytes, 118);
+        assert_eq!(layout.accuracy, GgufMemoryAccuracy::Exact);
+        assert!(!layout.tied_output);
+        assert_eq!(layout.signature.len(), 64);
+    }
+
+    #[test]
+    fn memory_layout_unknown_quant_uses_conservative_span() {
+        let kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(1)),
+        ];
+        let tensors = [("blk.0.custom.weight", &[256u64][..], 143, 0)];
+        let layout = parse_layout_bytes(&build_layout_gguf(&kv, &tensors, 79))
+            .unwrap()
+            .memory_layout
+            .unwrap();
+        assert_eq!(layout.layers[0].weight_bytes, 79);
+        assert_eq!(layout.total_bytes, 79);
+        assert_eq!(layout.accuracy, GgufMemoryAccuracy::UpperBound);
+        assert!(!layout.tied_output);
+        let mixed = [
+            ("blk.0.custom.weight", &[256u64][..], 143, 0),
+            ("output.weight", &[1u64][..], 0, 64),
+        ];
+        let mixed = parse_layout_bytes(&build_layout_gguf(&kv, &mixed, 96))
+            .unwrap()
+            .memory_layout
+            .unwrap();
+        assert_eq!(mixed.layers[0].weight_bytes, 64);
+        assert_eq!(mixed.output_bytes, 4);
+        assert_eq!(mixed.accuracy, GgufMemoryAccuracy::UpperBound);
+    }
+
+    #[test]
+    fn memory_layout_tied_output_and_optional_fields_are_compatible() {
+        let kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(1)),
+        ];
+        let tensors = [
+            ("token_embd.weight", &[1u64][..], 0, 0),
+            ("output_norm.weight", &[1u64][..], 0, 32),
+        ];
+        let layout = parse_layout_bytes(&build_layout_gguf(&kv, &tensors, 36))
+            .unwrap()
+            .memory_layout
+            .unwrap();
+        assert!(layout.tied_output);
+        let mut json = serde_json::to_value(layout).unwrap();
+        assert_eq!(json["accuracy"], "exact");
+        assert_eq!(json["tied_output"], true);
+        json.as_object_mut().unwrap().remove("accuracy");
+        json.as_object_mut().unwrap().remove("tied_output");
+        let old: GgufMemoryLayout = serde_json::from_value(json).unwrap();
+        assert_eq!(old.accuracy, GgufMemoryAccuracy::Exact);
+        assert!(!old.tied_output);
+    }
+
+    #[test]
+    fn memory_layout_rejects_malformed_offsets_dimensions_and_duplicates() {
+        let kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(1)),
+        ];
+        let cases = vec![
+            vec![("blk.0.a.weight", vec![1], 0, 32)], // 首 offset 非零
+            vec![
+                ("blk.0.a.weight", vec![1], 0, 0),
+                ("blk.0.b.weight", vec![1], 0, 0),
+            ],
+            vec![
+                ("blk.0.a.weight", vec![1], 0, 0),
+                ("blk.0.b.weight", vec![1], 0, 33),
+            ],
+            vec![
+                ("blk.0.a.weight", vec![1], 0, 0),
+                ("blk.0.b.weight", vec![1], 0, 64),
+            ],
+            vec![
+                ("blk.0.a.weight", vec![16], 0, 0),
+                ("blk.0.b.weight", vec![1], 0, 32),
+            ],
+            vec![
+                ("blk.0.a.weight", vec![1], 0, 0),
+                ("blk.0.a.weight", vec![1], 0, 32),
+            ],
+            vec![("blk.1.a.weight", vec![1], 0, 0)],
+            vec![("blk.invalid.a.weight", vec![1], 0, 0)],
+            vec![("blk.0.a.weight", vec![0], 0, 0)],
+            vec![("blk.0.a.weight", vec![31], 2, 0)],
+            vec![("blk.0.a.weight", vec![u64::MAX, 2], 143, 0)],
+            vec![
+                ("blk.0.a.weight", vec![1], 0, 0),
+                ("blk.0.b.weight", vec![1], 0, u64::MAX),
+            ],
+        ];
+        for tensors in cases {
+            let descriptions = tensors
+                .iter()
+                .map(|(name, dims, ty, offset)| (*name, dims.as_slice(), *ty, *offset))
+                .collect::<Vec<_>>();
+            let parsed = parse_layout_bytes(&build_layout_gguf(&kv, &descriptions, 64)).unwrap();
+            assert!(
+                parsed.memory_layout.is_none(),
+                "畸形描述不能生成布局：{:?}",
+                tensors
+            );
+        }
+        let valid = build_layout_gguf(&kv, &[("blk.0.a.weight", &[1], 0, 0)], 4);
+        assert!(parse_layout_bytes(&valid[..valid.len() - 1])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        let header_only = build_test_gguf(&kv, &["blk.0.a.weight"]);
+        assert!(parse_layout_bytes(&header_only[..header_only.len() - 40]).is_err());
+        let duplicate_kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(1)),
+            ("llama.block_count", TestValue::U32(2)),
+        ];
+        assert!(parse_layout_bytes(&build_layout_gguf(
+            &duplicate_kv,
+            &[("blk.0.a.weight", &[1], 0, 0)],
+            4
+        ))
+        .is_err());
+        let alignment_kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(1)),
+            ("general.alignment", TestValue::U32(0)),
+        ];
+        assert!(parse_layout_bytes(&build_layout_gguf(
+            &alignment_kv,
+            &[("blk.0.a.weight", &[1], 0, 0)],
+            4
+        ))
+        .unwrap()
+        .memory_layout
+        .is_none());
+    }
+
+    #[test]
+    fn memory_layout_folds_all_split_shards_and_rejects_partial_or_duplicate() {
+        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-layout-split-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = (1..=3)
+            .map(|part| dir.join(format!("model-{:05}-of-00003.gguf", part)))
+            .collect::<Vec<_>>();
+        let names = [
+            "token_embd.weight",
+            "blk.0.ffn_up_exps.weight",
+            "output.weight",
+        ];
+        let write_shard = |index: usize, name: &str, number: u32| {
+            let kv = [
+                ("general.architecture", TestValue::String("llama")),
+                ("llama.block_count", TestValue::U32(2)),
+                ("split.no", TestValue::U32(number)),
+                ("split.count", TestValue::U32(3)),
+                ("split.tensors.count", TestValue::U32(3)),
+            ];
+            std::fs::write(
+                &paths[index],
+                build_layout_gguf(&kv, &[(name, &[1], 0, 0)], 4),
+            )
+            .unwrap();
+        };
+        write_shard(0, names[0], 0);
+        assert!(parse_gguf_header(&paths[0])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        write_shard(1, names[1], 1);
+        assert!(parse_gguf_header(&paths[0])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        write_shard(2, names[2], 2);
+        let parsed = parse_gguf_header(&paths[0]).unwrap();
+        let layout = parsed.memory_layout.unwrap();
+        assert_eq!(parsed.tensor_count, 3);
+        assert_eq!(layout.layers.len(), 2);
+        assert_eq!(
+            (layout.layers[0].weight_bytes, layout.layers[0].expert_bytes),
+            (4, 4)
+        );
+        assert_eq!(
+            (layout.input_bytes, layout.output_bytes, layout.total_bytes),
+            (4, 4, 12)
+        );
+        assert!(!layout.tied_output);
+        assert_eq!(layout.accuracy, GgufMemoryAccuracy::Exact);
+        assert_eq!(
+            layout,
+            parse_gguf_header(&paths[2]).unwrap().memory_layout.unwrap()
+        );
+        // 标准后续片可仅含 split.*，继承首片架构和层数后仍完整折叠。
+        let split_only = [
+            ("split.no", TestValue::U32(2)),
+            ("split.count", TestValue::U32(3)),
+            ("split.tensors.count", TestValue::U32(3)),
+        ];
+        std::fs::write(
+            &paths[2],
+            build_layout_gguf(&split_only, &[(names[2], &[1], 0, 0)], 4),
+        )
+        .unwrap();
+        let inherited = parse_gguf_header(&paths[2]).unwrap().memory_layout.unwrap();
+        assert_eq!(inherited.total_bytes, 12);
+        assert!(!inherited.tied_output);
+        // 第二片未知量化须把整个合并布局标成 upper_bound。
+        let unknown_kv = [
+            ("general.architecture", TestValue::String("llama")),
+            ("llama.block_count", TestValue::U32(2)),
+            ("split.no", TestValue::U32(1)),
+            ("split.count", TestValue::U32(3)),
+            ("split.tensors.count", TestValue::U32(3)),
+        ];
+        std::fs::write(
+            &paths[1],
+            build_layout_gguf(&unknown_kv, &[(names[1], &[256], 143, 0)], 8),
+        )
+        .unwrap();
+        let upper = parse_gguf_header(&paths[0]).unwrap().memory_layout.unwrap();
+        assert_eq!(upper.total_bytes, 16);
+        assert_eq!(upper.accuracy, GgufMemoryAccuracy::UpperBound);
+        assert_ne!(upper.signature, layout.signature);
+        write_shard(1, names[1], 1);
+        write_shard(2, names[1], 2);
+        assert!(parse_gguf_header(&paths[0])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        write_shard(2, names[2], 1);
+        assert!(parse_gguf_header(&paths[0])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        write_shard(2, names[2], 2);
+        std::fs::write(&paths[2], b"GGUF").unwrap();
+        assert!(parse_gguf_header(&paths[0])
+            .unwrap()
+            .memory_layout
+            .is_none());
+        let renamed = dir.join("renamed.gguf");
+        std::fs::rename(&paths[0], &renamed).unwrap();
+        assert!(parse_gguf_header(&renamed).unwrap().memory_layout.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn memory_layout_signature_is_stable_and_tracks_descriptors_length_and_mtime() {
+        let tensors = [TensorDescriptor {
+            name: "blk.0.a.weight".to_string(),
+            dims: vec![1],
+            tensor_type: 0,
+            offset: 0,
+        }];
+        let build = |tensors: &[TensorDescriptor], file_len, nanos, hash| {
+            build_memory_layout(
+                tensors,
+                1,
+                64,
+                file_len,
+                32,
+                Some(std::time::Duration::new(10, nanos)),
+                hash,
+            )
+            .unwrap()
+            .signature
+        };
+        let signature = build(&tensors, 68, 1, [0; 32]);
+        assert_eq!(signature, build(&tensors, 68, 1, [0; 32]));
+        assert_ne!(signature, build(&tensors, 69, 1, [0; 32]));
+        assert_ne!(signature, build(&tensors, 68, 2, [0; 32]));
+        assert_ne!(signature, build(&tensors, 68, 1, [1; 32]));
+        let renamed = [TensorDescriptor {
+            name: "blk.0.b.weight".to_string(),
+            dims: vec![1],
+            tensor_type: 0,
+            offset: 0,
+        }];
+        assert_ne!(signature, build(&renamed, 68, 1, [0; 32]));
+    }
+
+    #[test]
+    fn keeps_complete_mixed_kv_and_swa_arrays_with_ssm_metadata() {
+        let heads = [0, 8, 0, 4, 0, 8, 0, 4, 0, 8, 0, 4];
+        let pattern = [
+            false, false, true, true, false, false, true, true, false, false, true, true,
+        ];
+        let parsed = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("nemotron_h_moe")),
+                ("nemotron_h_moe.block_count", TestValue::U32(12)),
+                (
+                    "nemotron_h_moe.attention.head_count_kv",
+                    TestValue::U64Array(&heads),
+                ),
+                (
+                    "nemotron_h_moe.attention.sliding_window_pattern",
+                    TestValue::BoolArray(&pattern),
+                ),
+                ("nemotron_h_moe.ssm.state_size", TestValue::U32(128)),
+                ("nemotron_h_moe.ssm.conv_kernel", TestValue::U32(4)),
+            ],
+            &["blk.0.attn_norm.weight"],
+        );
+        assert_eq!(parsed.kv_heads_by_layer, Some(heads.to_vec()));
+        assert_eq!(parsed.swa_layer_pattern, Some(pattern.to_vec()));
+        assert_eq!(parsed.kv_heads_sum, Some(36));
+        assert_eq!(parsed.kv_heads_sum_full, Some(24));
+        assert_eq!(parsed.kv_heads_sum_swa, Some(12));
+        assert!(parsed.metadata_entries.contains(&(
+            "nemotron_h_moe.ssm.state_size".to_string(),
+            "128".to_string()
+        )));
+        assert!(parsed.metadata_entries.contains(&(
+            "nemotron_h_moe.ssm.conv_kernel".to_string(),
+            "4".to_string()
+        )));
+    }
+
+    #[test]
+    fn rejects_misaligned_negative_and_overflowing_layer_vectors() {
+        for values in [
+            TestValue::U64Array(&[8, 0]),
+            TestValue::I32Array(&[8, -1, 4]),
+            TestValue::U64Array(&[u64::MAX, 1, 0]),
+        ] {
+            let parsed = parse_test_gguf(
+                &[
+                    ("general.architecture", TestValue::String("nemotron_h_moe")),
+                    ("nemotron_h_moe.block_count", TestValue::U32(3)),
+                    ("nemotron_h_moe.attention.head_count_kv", values),
+                    (
+                        "nemotron_h_moe.attention.sliding_window_pattern",
+                        TestValue::BoolArray(&[false, true]),
+                    ),
+                ],
+                &[],
+            );
+            assert!(parsed.kv_heads_by_layer.is_none());
+            assert!(parsed.swa_layer_pattern.is_none());
+            assert!(parsed.kv_heads_sum.is_none());
+            assert!(parsed.kv_heads_sum_full.is_none());
+            assert!(parsed.kv_heads_sum_swa.is_none());
+        }
+    }
+
+    #[test]
+    fn dense_scalar_kv_expands_with_complete_tensors_and_preserves_swa_array() {
+        let pattern = [true, true, true, false, true, true, true, false];
+        let kv = [
+            ("general.architecture", TestValue::String("spark2_5")),
+            ("spark2_5.block_count", TestValue::U32(8)),
+            ("spark2_5.attention.head_count_kv", TestValue::U32(4)),
+            ("spark2_5.attention.sliding_window", TestValue::U32(512)),
+            (
+                "spark2_5.attention.sliding_window_pattern",
+                TestValue::BoolArray(&pattern),
+            ),
+        ];
+        let names = (0..8)
+            .map(|index| format!("blk.{}.attn_qkv.weight", index))
+            .collect::<Vec<_>>();
+        let tensors = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let parsed = parse_test_gguf(&kv, &tensors);
+        assert_eq!(parsed.kv_heads_by_layer, Some(vec![4; 8]));
+        assert_eq!(parsed.swa_layer_pattern, Some(pattern.to_vec()));
+        assert_eq!(parsed.kv_heads_sum, Some(32));
+        assert_eq!(parsed.kv_heads_sum_full, Some(8));
+        assert_eq!(parsed.kv_heads_sum_swa, Some(24));
+        assert_eq!(parsed.sliding_window, Some(512));
+
+        let partial = parse_test_gguf(&kv, &tensors[..7]);
+        assert!(partial.kv_heads_by_layer.is_none());
+        assert!(partial.kv_heads_sum.is_none());
+        let mut recurrent_tensors = tensors.clone();
+        recurrent_tensors.push("blk.0.ssm_conv1d.weight");
+        let recurrent = parse_test_gguf(&kv, &recurrent_tensors);
+        assert!(recurrent.kv_heads_by_layer.is_none());
+
+        let unknown_pattern = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("spark2_5")),
+                ("spark2_5.block_count", TestValue::U32(8)),
+                ("spark2_5.attention.head_count_kv", TestValue::U32(4)),
+                (
+                    "spark2_5.attention.sliding_window_pattern",
+                    TestValue::U32(4),
+                ),
+            ],
+            &tensors,
+        );
+        assert_eq!(unknown_pattern.kv_heads_by_layer, Some(vec![4; 8]));
+        assert!(
+            unknown_pattern.swa_layer_pattern.is_none(),
+            "未知标量 SWA 模式不能伪造成向量"
+        );
+        assert!(unknown_pattern.kv_heads_sum_full.is_none());
+        assert!(unknown_pattern.kv_heads_sum_swa.is_none());
+
+        let invalid_array = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("spark2_5")),
+                ("spark2_5.block_count", TestValue::U32(8)),
+                (
+                    "spark2_5.attention.head_count_kv",
+                    TestValue::U64Array(&[4, 4]),
+                ),
+            ],
+            &tensors,
+        );
+        assert!(
+            invalid_array.kv_heads_by_layer.is_none(),
+            "无效显式数组不能回退到标量展开"
+        );
+    }
+
+    #[test]
+    fn qwen_forty_layer_interval_regression_keeps_ten_full_layers() {
+        let names = (0..40)
+            .map(|index| {
+                if (index + 1) % 4 == 0 {
+                    format!("blk.{}.attn_k.weight", index)
+                } else {
+                    format!("blk.{}.ssm_conv1d.weight", index)
+                }
+            })
+            .collect::<Vec<_>>();
+        let tensors = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let parsed = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("qwen35")),
+                ("qwen35.block_count", TestValue::U32(40)),
+                ("qwen35.attention.head_count_kv", TestValue::U32(2)),
+                ("qwen35.full_attention_interval", TestValue::U32(4)),
+            ],
+            &tensors,
+        );
+        let expected = (0..40)
+            .map(|index| if (index + 1) % 4 == 0 { 2 } else { 0 })
+            .collect::<Vec<_>>();
+        assert_eq!(parsed.kv_heads_by_layer, Some(expected));
+        assert_eq!(parsed.kv_heads_sum, Some(20));
+        assert_eq!(
+            parsed.memory_layout.unwrap().accuracy,
+            GgufMemoryAccuracy::Exact
+        );
+    }
+
+    #[test]
+    fn qwen_full_attention_interval_only_allocates_kv_to_full_layers() {
+        let tensors = [
+            "blk.0.ssm_in.weight",
+            "blk.1.attn_k.weight",
+            "blk.2.ssm_conv1d.weight",
+            "blk.3.attn_k.weight",
+        ];
+        for arch in ["qwen35", "qwen35moe", "qwen3next"] {
+            let parsed = parse_test_gguf(
+                &[
+                    ("general.architecture", TestValue::String(arch)),
+                    (&format!("{}.block_count", arch), TestValue::U32(4)),
+                    (
+                        &format!("{}.attention.head_count_kv", arch),
+                        TestValue::U32(2),
+                    ),
+                    (
+                        &format!("{}.full_attention_interval", arch),
+                        TestValue::U32(2),
+                    ),
+                ],
+                &tensors,
+            );
+            assert_eq!(parsed.full_attention_interval, Some(2));
+            assert_eq!(parsed.kv_heads_by_layer, Some(vec![0, 2, 0, 2]));
+            assert_eq!(parsed.kv_heads_sum, Some(4));
+        }
+        let unknown = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("unknown-hybrid")),
+                ("unknown-hybrid.block_count", TestValue::U32(4)),
+                ("unknown-hybrid.attention.head_count_kv", TestValue::U32(2)),
+                ("unknown-hybrid.full_attention_interval", TestValue::U32(2)),
+            ],
+            &tensors,
+        );
+        assert!(unknown.kv_heads_by_layer.is_none());
+        assert!(unknown.kv_heads_sum.is_none());
+        let conflict = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("qwen35")),
+                ("qwen35.block_count", TestValue::U32(4)),
+                ("qwen35.attention.head_count_kv", TestValue::U32(2)),
+                (
+                    "qwen35.attention.full_attention_interval",
+                    TestValue::U32(2),
+                ),
+            ],
+            &["blk.0.attn_k.weight", "blk.1.ssm_in.weight"],
+        );
+        assert!(conflict.kv_heads_by_layer.is_none());
+        let from_tensors = parse_test_gguf(
+            &[
+                ("general.architecture", TestValue::String("qwen35")),
+                ("qwen35.block_count", TestValue::U32(4)),
+                ("qwen35.attention.head_count_kv", TestValue::U32(2)),
+            ],
+            &tensors,
+        );
+        assert_eq!(from_tensors.kv_heads_by_layer, Some(vec![0, 2, 0, 2]));
     }
 
     /// 构造一个深度嵌套的数组值：连续 `depth` 层「元素类型=9（数组）、元素个数=1」，
@@ -1250,6 +2557,67 @@ mod tests {
         let dir = std::env::var("AGENT_LLM_TEST_MODEL_DIR").ok()?;
         let dir = std::path::PathBuf::from(dir.trim());
         dir.is_dir().then_some(dir)
+    }
+
+    #[test]
+    #[ignore]
+    fn test_local_vram_metadata() {
+        let Ok(model_path) = std::env::var("AGENT_LLM_TEST_MODEL_PATH") else {
+            eprintln!("skip: AGENT_LLM_TEST_MODEL_PATH 未设置");
+            return;
+        };
+        let parsed = parse_gguf_header(Path::new(&model_path)).expect("解析本地显存元数据");
+        // 先输出脱敏的显存相关原始键，再做断言；向量缺失时仍能核查根因。
+        let dump = serde_json::json!({
+            "architecture": parsed.architecture,
+            "block_count": parsed.block_count,
+            "embedding_length": parsed.embedding_length,
+            "head_count": parsed.head_count,
+            "head_count_kv": parsed.head_count_kv,
+            "kv_heads_by_layer": parsed.kv_heads_by_layer,
+            "swa_layer_pattern": parsed.swa_layer_pattern,
+            "full_attention_interval": parsed.full_attention_interval,
+            "sliding_window": parsed.sliding_window,
+            "key_length": parsed.key_length,
+            "value_length": parsed.value_length,
+            "key_length_swa": parsed.key_length_swa,
+            "value_length_swa": parsed.value_length_swa,
+            "metadata_entries": parsed.metadata_entries.iter().filter(|(key, _)| {
+                key.contains(".ssm.") || key.contains(".attention.")
+                    || key.ends_with(".full_attention_interval")
+            }).collect::<Vec<_>>(),
+            "memory_layout": parsed.memory_layout,
+        });
+        println!("{}", dump);
+        if let Ok(output) = std::env::var("AGENT_LLM_TEST_METADATA_OUTPUT") {
+            std::fs::write(output, serde_json::to_vec_pretty(&dump).unwrap()).unwrap();
+        }
+        let layout = parsed
+            .memory_layout
+            .as_ref()
+            .expect("本地模型应有完整张量布局");
+        assert_eq!(layout.layers.len() as u64, parsed.block_count);
+        assert!(layout.total_bytes > 0);
+        assert_eq!(
+            layout.total_bytes,
+            layout
+                .layers
+                .iter()
+                .map(|layer| layer.weight_bytes)
+                .sum::<u64>()
+                + layout.input_bytes
+                + layout.output_bytes
+                + layout.other_bytes
+        );
+        assert!(layout
+            .layers
+            .iter()
+            .all(|layer| layer.expert_bytes <= layer.weight_bytes));
+        let kv_heads = parsed
+            .kv_heads_by_layer
+            .as_ref()
+            .expect("本地模型应有逐层 KV 布局");
+        assert_eq!(kv_heads.len() as u64, parsed.block_count);
     }
 
     #[test]

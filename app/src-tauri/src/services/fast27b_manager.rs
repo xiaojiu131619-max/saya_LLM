@@ -1,9 +1,9 @@
 //! fast-27b 引擎（Ternary-Bonsai-2-27B-Heretic 离线包）旁路进程管理。
 //!
 //! 与 dsh_manager / embedding_manager 同一套进程管理规范：
-//! - 启动：`ninfer-serve-86.exe <model> --host --port --api-key ...`（argv 逐字对齐 3080 Ti
-//!   调优脚本 start-heretic-smart-lan-3080ti.bat，并补上它依赖的 5 个 NINFER_* KVMem
-//!   环境变量，见 Fast27bStartOptions → build_args 与 start_fast27b）；
+//! - 启动：`ninfer-serve-86.exe <model> --host --port --api-key ...`（推理参数对齐
+//!   start-heretic-best.bat 调用的 fastllm-ui.mjs，保留应用的鉴权与网络配置；
+//!   5 个 NINFER_* 环境变量继承非空宿主值，否则使用脚本默认值）；
 //! - 进程树：Job Object（KILL_ON_JOB_CLOSE）整树回收，应用退出时联动 stop_fast27b；
 //! - 健康：轮询 `GET /v1/models`（必须带 Bearer api-key，200 即就绪）；
 //! - 日志：stdout/stderr 双读线程 → 环形缓冲 + `fast27b:log` 事件。
@@ -11,8 +11,10 @@
 //! 安全边界：子进程路径来自应用配置（engine_path），启动前校验存在性与文件名；
 //! 参数为参数列表，无 shell 参与；api-key 在日志中脱敏，不写入日志缓冲。
 
-use crate::models::app_state::Fast27bModel;
+use crate::models::app_state::{validate_fast27b_thinking_budget, Fast27bModel};
+use crate::services::fast27b_metrics::{self, Fast27bRequestOutcome};
 
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
@@ -21,8 +23,9 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 // 参数列表式子进程封装（std::process::Command 的本文件内别名），
@@ -56,6 +59,8 @@ pub struct Fast27bStartOptions {
     /// 注意：对话页「最大输出 Token」默认 0（请求体不带 max_tokens），因此该值就是
     /// 默认对话实际能生成的最长长度，必须可配置，否则输出会被静默截断。
     pub default_max_tokens: u32,
+    /// 默认思考预算；0 = 不传预算参数，关闭预算限制，非 0 输出上限时必须严格小于输出上限。
+    pub default_thinking_budget: u32,
 }
 
 impl Fast27bStartOptions {
@@ -67,16 +72,12 @@ impl Fast27bStartOptions {
         }
     }
 
-    /// 组装命令行参数（逐字对齐 D:\Projects\fast-llm\launch\fastllm-ui.mjs）：
-    /// Swift 只启用 BAT 中的 MTP 草稿头；Heretic 不启用任何草稿参数。
-    /// `--kv-capacity auto` + `--kv-headroom-mib 128` 保留 BAT 的设备池策略；5 个
-    /// NINFER_* KVMem 环境变量在 start_fast27b 中另行下发。
+    /// 推理参数对齐 D:\Projects\fast-llm\launch\fastllm-ui.mjs 的 engineArgv：
+    /// Heretic 使用 DFlash2，Swift 使用 MTP；两者都显式关闭 ngram 草稿。
+    /// ctx、草稿长度与输出/思考额度原样来自配置，环境变量由启动函数独立组装。
     ///
-    /// 应用侧增补：
-    /// - `--api-key`：本地/局域网 OpenAI 兼容接口鉴权；
-    /// - `--cors` —— 应用内「自带对话」从 Tauri webview（origin http://tauri.localhost）
-    ///   直接 fetch 引擎 HTTP API，而引擎默认不返回 CORS 头且 OPTIONS 预检返回 404，
-    ///   浏览器会直接拦截（Failed to fetch）。该开关只影响 HTTP 响应头，不改变推理行为。
+    /// 应用侧保留 `--host` / `--port` / `--api-key` 与 `--cors`，供局域网、Tauri
+    /// 自带对话和同源桥继续使用当前网络拓扑。
     fn build_args(&self) -> Vec<String> {
         let mut args = vec![
             self.model_path.to_string_lossy().to_string(),
@@ -97,46 +98,80 @@ impl Fast27bStartOptions {
             "--host-kv-mib".to_string(),
             "16384".to_string(),
             "--prefill-chunk".to_string(),
-        ];
-        if self.model_variant == Fast27bModel::Swift {
-            args.extend([
-                "1024".to_string(),
-                "--spec".to_string(),
-                "mtp".to_string(),
-                "--draft-tokens".to_string(),
-                self.draft_tokens.to_string(),
-                "--lm-head-draft".to_string(),
-            ]);
-        } else {
-            args.push("1024".to_string());
-        }
-        args.extend([
+            "1024".to_string(),
+            "--spec".to_string(),
+            self.model_variant.spec().to_string(),
+            "--draft-tokens".to_string(),
+            self.draft_tokens.to_string(),
+            "--lm-head-draft".to_string(),
+            "--ngram-draft-tokens".to_string(),
+            "0".to_string(),
             "--vision".to_string(),
             "--vision-residency".to_string(),
             "resident".to_string(),
-            "--default-max-tokens".to_string(),
-            self.default_max_tokens.to_string(),
+        ];
+        // 兼容已保存的 0：输出上限交回引擎默认，不能迁移覆写用户的排障基线。
+        if self.default_max_tokens != 0 {
+            args.extend([
+                "--default-max-tokens".to_string(),
+                self.default_max_tokens.to_string(),
+            ]);
+        }
+        args.extend([
             "--default-reasoning-effort".to_string(),
             "high".to_string(),
             "--max-concurrency".to_string(),
             "1".to_string(),
             "--presence-penalty".to_string(),
             "0".to_string(),
+        ]);
+        // 当前引擎拒绝 --default-thinking-budget 0；省略该参数才表示关闭预算限制。
+        if self.default_thinking_budget != 0 {
+            args.extend([
+                "--default-thinking-budget".to_string(),
+                self.default_thinking_budget.to_string(),
+            ]);
+        }
+        args.extend([
             "--max-shared-prefixes".to_string(),
             "0".to_string(),
             "--gdn-state-fp16".to_string(),
+            "--api-key".to_string(),
+            self.api_key.clone(),
+            "--cors".to_string(),
         ]);
-        // default-max-tokens 与 BAT 一样显式下发，保证配置可复现；0 时保留旧行为并省略。
-        if self.default_max_tokens == 0 {
-            if let Some(index) = args.iter().position(|arg| arg == "--default-max-tokens") {
-                args.drain(index..=index + 1);
-            }
-        }
-        args.push("--api-key".to_string());
-        args.push(self.api_key.clone());
-        args.push("--cors".to_string());
         args
     }
+}
+
+/// 与 fastllm-ui.mjs 一致：非空宿主值原样继承（包括 "0"），仅缺失或空串取默认值。
+fn engine_kv_environment(
+    inherited: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    [
+        ("NINFER_KV_WINDOW", "16384"),
+        ("NINFER_KV_RETRIEVE", "8192"),
+        ("NINFER_KV_RING", "1"),
+        ("NINFER_HOST_PAGEABLE", "1"),
+        ("NINFER_KV_REUSE_HOSTBACKED", "1"),
+    ]
+    .into_iter()
+    .map(|(key, default)| {
+        let value = inherited(key)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| OsString::from(default));
+        (key, value)
+    })
+    .collect()
+}
+
+/// 脚本顺序为引擎目录、引擎目录/x64、宿主 PATH；使用系统分隔符并保留非 UTF-8 路径。
+fn engine_search_path(engine_dir: &Path, inherited: Option<OsString>) -> Result<OsString, String> {
+    let mut paths = vec![engine_dir.to_path_buf(), engine_dir.join("x64")];
+    if let Some(path) = inherited.filter(|value| !value.is_empty()) {
+        paths.extend(std::env::split_paths(&path));
+    }
+    std::env::join_paths(paths).map_err(|error| format!("无法组装引擎 PATH：{}", error))
 }
 
 /// 当前运行配置（探活与 dsh 绑定取 endpoint 用）。
@@ -197,6 +232,13 @@ struct FaultRecord {
 static FAST27B_FAULT: Mutex<Option<FaultRecord>> = Mutex::new(None);
 /// 设备池容量读数缓存（启动行只出现一次，需要跨状态轮询保留）。
 static FAST27B_CAPACITY: Mutex<Option<PagedKvCapacity>> = Mutex::new(None);
+/// 串行保护启动、停止与重载，保证旧管道排空前不会开始新一代指标采集。
+static FAST27B_OPERATION: Mutex<()> = Mutex::new(());
+struct EngineLogReaders {
+    generation: u32,
+    threads: Vec<JoinHandle<()>>,
+}
+static FAST27B_LOG_READERS: Mutex<Option<EngineLogReaders>> = Mutex::new(None);
 static FAST27B_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static FAST27B_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FAST27B_ACTIVE: Mutex<Option<ActiveConfig>> = Mutex::new(None);
@@ -747,12 +789,44 @@ fn apply_fault_event(record: &mut FaultRecord, event: LogEvent, clock: Option<St
     }
 }
 
-/// 供监视线程调用：只接受属于当前代数（本次启动）的日志行，避免过期启动的日志污染新状态。
+/// 指标的代数由采集器独立校验：停止时继续接收当前管道的真实终态，排空后才封口。
+/// 故障与容量仍只接受运行代数，停止后的旧日志不能写回运行状态。
 fn note_engine_log_line(line: &str, generation: u32) {
+    fast27b_metrics::ingest_engine_log_line(line, generation);
     if FAST27B_GENERATION.load(Ordering::SeqCst) != generation {
         return;
     }
     apply_engine_log_line(line);
+}
+
+fn read_engine_log_pipe(
+    pipe: impl std::io::Read,
+    mut ingest: impl FnMut(&str),
+    tx: Sender<String>,
+) {
+    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+        // 即使旧监视线程已退出，也要读完管道，先采集再尝试转发日志。
+        ingest(&line);
+        let _ = tx.send(line);
+    }
+}
+
+fn join_engine_log_readers(readers: Vec<JoinHandle<()>>) {
+    for reader in readers {
+        if reader.join().is_err() {
+            log::warn!("[fast27b] 引擎日志读取线程异常退出。");
+        }
+    }
+}
+
+fn drain_engine_log_readers() -> Option<u32> {
+    let readers = FAST27B_LOG_READERS
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())?;
+    let generation = readers.generation;
+    join_engine_log_readers(readers.threads);
+    Some(generation)
 }
 
 /// 回扫日志文件尾部：若历史日志「最后一台实例」死在 worker 崩溃上，且此后没有新的
@@ -847,10 +921,28 @@ pub fn probe_models_available(port: u16, api_key: &str) -> bool {
 // 启动 / 停止
 // ---------------------------------------------------------------------------
 
-/// 启动前校验：引擎与模型路径存在、引擎文件名正确。
-fn validate_options(options: &Fast27bStartOptions) -> Result<(), String> {
+/// 只拒绝 launcher 已明确不支持的 NInfer v2；其他格式仍交给用户配置的引擎解释。
+fn validate_model_header(header: &[u8]) -> Result<(), String> {
+    if header.len() >= 8 && &header[..7] == b"NINFER\0" && header[7] == 2 {
+        return Err("当前 v3 引擎不支持 NInfer v2 模型。请保留原模型，并显式选择已转换的 v3 .ninfer 文件；修改启动参数无法解决容器版本不兼容。".to_string());
+    }
+    Ok(())
+}
+
+fn validate_model_artifact(path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut header = Vec::with_capacity(8);
+    std::fs::File::open(path)
+        .and_then(|file| file.take(8).read_to_end(&mut header))
+        .map_err(|error| format!("无法读取模型文件（{}）：{}", path.display(), error))?;
+    validate_model_header(&header)
+}
+
+/// 启动/切换前校验：引擎与模型必须为实际文件、容器非已知 v2、引擎文件名正确、预算有效。
+pub(crate) fn validate_options(options: &Fast27bStartOptions) -> Result<(), String> {
+    validate_fast27b_thinking_budget(options.default_max_tokens, options.default_thinking_budget)?;
     let engine = &options.engine_path;
-    if !engine.exists() {
+    if !engine.is_file() {
         return Err(format!("未找到 fast27b 引擎：{}", engine.display()));
     }
     if engine
@@ -863,9 +955,10 @@ fn validate_options(options: &Fast27bStartOptions) -> Result<(), String> {
             engine.display()
         ));
     }
-    if !options.model_path.exists() {
+    if !options.model_path.is_file() {
         return Err(format!("未找到模型文件：{}", options.model_path.display()));
     }
+    validate_model_artifact(&options.model_path)?;
     if options.api_key.trim().is_empty() {
         return Err("API Key 不能为空。".to_string());
     }
@@ -880,10 +973,29 @@ pub fn start_fast27b(
     on_progress: impl Fn(String) + Send + Sync + 'static,
     on_event: impl Fn(Fast27bRuntimeEvent) + Send + Sync + 'static,
 ) -> Result<(), String> {
+    let _operation = FAST27B_OPERATION
+        .lock()
+        .map_err(|_| "fast27b 启停管理器 Mutex 已中毒".to_string())?;
+    start_fast27b_locked(options, on_log, on_progress, on_event)
+}
+
+fn start_fast27b_locked(
+    options: &Fast27bStartOptions,
+    on_log: impl Fn(String) + Send + Sync + 'static,
+    on_progress: impl Fn(String) + Send + Sync + 'static,
+    on_event: impl Fn(Fast27bRuntimeEvent) + Send + Sync + 'static,
+) -> Result<(), String> {
     if is_fast27b_running() {
         return Err("fast27b 引擎已在运行，请先停止后再启动。".to_string());
     }
     validate_options(options)?;
+    if let Some(previous) = drain_engine_log_readers() {
+        fast27b_metrics::finish_generation(
+            previous,
+            Fast27bRequestOutcome::Failed,
+            "旧引擎已退出，请求未完成。",
+        );
+    }
 
     // 本次要拉起新实例：清空失效状态（含应用启动时回扫到的历史事实）与容量读数。
     // 代数稍后在 spawn 后自增，清空必须在其之前，让旧监视线程的过期故障写不回来；
@@ -915,28 +1027,16 @@ pub fn start_fast27b(
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     command
         .args(&args)
-        // 与离线包 bat 对齐：CWD = 引擎目录，PATH 前置引擎目录
-        //（引擎运行库 DLL 与引擎同目录，双保险规避宿主环境差异）。
+        // CWD 与 DLL 搜索路径对齐脚本：引擎目录及其 x64 子目录置于宿主 PATH 之前。
         .current_dir(&engine_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    {
-        let path = std::env::var("PATH").unwrap_or_default();
-        command.env("PATH", format!("{};{}", engine_dir.to_string_lossy(), path));
-    }
-    // KVMem 环境变量（逐字对齐 start-heretic-smart-lan-3080ti.bat 的 5 行）：把 KV 环放在
-    // 主机可分页内存并复用 host-backed，避免 12 GiB 卡上「权重 + 运行时预留」撑爆显存。
-    // 缺这组变量时引擎会尝试全部驻留 GPU，表现为启动 FATAL（minimum Engine runtime
-    // reservation ... only ... bytes are available after weights）。
-    for (key, value) in [
-        ("NINFER_KV_WINDOW", "16384"),
-        ("NINFER_KV_RETRIEVE", "8192"),
-        ("NINFER_KV_RING", "1"),
-        ("NINFER_HOST_PAGEABLE", "1"),
-        ("NINFER_KV_REUSE_HOSTBACKED", "1"),
-    ] {
-        command.env(key, value);
-    }
+    command.env(
+        "PATH",
+        engine_search_path(&engine_dir, std::env::var_os("PATH"))?,
+    );
+    // 主机 KV 策略继承非空宿主环境；没有值时才补脚本默认值，不覆盖用户的排障基线。
+    command.envs(engine_kv_environment(|key| std::env::var_os(key)));
 
     let mut child = command
         .spawn()
@@ -965,6 +1065,7 @@ pub fn start_fast27b(
         *guard = Some(active);
     }
     let generation = FAST27B_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    fast27b_metrics::begin_generation(generation, options.model_variant);
 
     // 附加 Job Object：父进程崩溃/退出时 OS 回收整棵进程树。
     #[cfg(windows)]
@@ -975,29 +1076,24 @@ pub fn start_fast27b(
     }
 
     let (tx, rx) = channel::<String>();
+    let mut readers = Vec::new();
     if let Some(out) = stdout {
         let tx_out = tx.clone();
-        let log_generation = generation;
-        std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                // 失效识别在**入队之前**完成：引擎打崩溃行后可能再无任何输出，
-                // 排在 logger 后面的消费者逻辑会晚一拍才看到它。
-                note_engine_log_line(&line, log_generation);
-                if tx_out.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        readers.push(std::thread::spawn(move || {
+            read_engine_log_pipe(out, |line| note_engine_log_line(line, generation), tx_out);
+        }));
     }
     if let Some(err) = stderr {
-        let log_generation = generation;
-        std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                note_engine_log_line(&line, log_generation);
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
+        let tx_err = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            read_engine_log_pipe(err, |line| note_engine_log_line(line, generation), tx_err);
+        }));
+    }
+    drop(tx);
+    if let Ok(mut guard) = FAST27B_LOG_READERS.lock() {
+        *guard = Some(EngineLogReaders {
+            generation,
+            threads: readers,
         });
     }
 
@@ -1058,6 +1154,14 @@ pub fn start_fast27b(
             }
 
             if pipes_closed && FAST27B_GENERATION.load(Ordering::SeqCst) == generation {
+                // 停止期间不能等待操作锁，否则 stop 在 join 读线程时会与本监视线程互等。
+                let Ok(_operation) = FAST27B_OPERATION.try_lock() else {
+                    continue;
+                };
+                if FAST27B_GENERATION.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                drain_engine_log_readers();
                 let exit_info = FAST27B_CHILD
                     .lock()
                     .ok()
@@ -1077,6 +1181,11 @@ pub fn start_fast27b(
                 if let Ok(mut guard) = FAST27B_ACTIVE.lock() {
                     *guard = None;
                 }
+                fast27b_metrics::finish_generation(
+                    generation,
+                    Fast27bRequestOutcome::Failed,
+                    &format!("引擎进程意外退出（{}），请求未完成。", exit_info),
+                );
                 on_event(Fast27bRuntimeEvent::Stopped(format!(
                     "fast27b 进程已退出（{}）。",
                     exit_info
@@ -1089,14 +1198,33 @@ pub fn start_fast27b(
     Ok(())
 }
 
-/// 停止 fast27b：Job Object 整树终止 + 句柄回收。代数自增使监视线程静默退出。
+/// 停止 fast27b：立即失效运行事件，整树终止并排空日志后，再终结剩余活跃指标。
 pub fn stop_fast27b() -> Result<(), String> {
-    // 先清失效状态、再自增代数：仍在抽日志的旧监视线程会因代数不匹配而无法写回过期故障。
+    let _operation = FAST27B_OPERATION
+        .lock()
+        .map_err(|_| "fast27b 启停管理器 Mutex 已中毒".to_string())?;
+    stop_fast27b_locked()
+}
+
+fn stop_fast27b_locked() -> Result<(), String> {
+    let fault = fault_status();
+    let generation = FAST27B_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let (outcome, reason) = if fault.requires_restart {
+        (
+            Fast27bRequestOutcome::Failed,
+            "引擎已失效并被停止，请求未完成。",
+        )
+    } else {
+        (
+            Fast27bRequestOutcome::Cancelled,
+            "引擎已按用户请求停止或重启。",
+        )
+    };
+    // 先失效旧运行事件，再清状态；指标仍由原代数采集器接收管道中的真实终态。
     reset_engine_fault();
     if let Ok(mut guard) = FAST27B_CAPACITY.lock() {
         *guard = None;
     }
-    FAST27B_GENERATION.fetch_add(1, Ordering::SeqCst);
     let mut had_process = false;
     {
         let mut guard = FAST27B_CHILD
@@ -1111,6 +1239,9 @@ pub fn stop_fast27b() -> Result<(), String> {
     }
     #[cfg(windows)]
     job_guard::terminate();
+    // 旧监视线程可以已退出，但读线程必须继续读到 EOF；完成/传输失败日志优先于兜底取消。
+    drain_engine_log_readers();
+    fast27b_metrics::finish_generation(generation, outcome, reason);
     if had_process {
         add_fast27b_log("[fast27b] 已停止（用户请求）。");
     }
@@ -1125,6 +1256,7 @@ pub fn stop_fast27b_on_exit() {
     if let Err(error) = stop_fast27b() {
         eprintln!("[fast27b] 退出清理失败: {}", error);
     }
+    fast27b_metrics::flush_on_exit();
 }
 
 /// 清扫上次会话遗留的 fast27b 孤儿进程（应用被强杀/崩溃时 Job Object 可能未生效，
@@ -1177,8 +1309,13 @@ pub fn restart_fast27b(
     on_progress: impl Fn(String) + Send + Sync + 'static,
     on_event: impl Fn(Fast27bRuntimeEvent) + Send + Sync + 'static,
 ) -> Result<(), String> {
+    let _operation = FAST27B_OPERATION
+        .lock()
+        .map_err(|_| "fast27b 启停管理器 Mutex 已中毒".to_string())?;
+    // 在停止旧模型之前完成资源与预算校验，切换失败时保留当前可用进程。
+    validate_options(options)?;
     // 1. 停掉本次会话托管的进程（Job Object 整树回收）。
-    stop_fast27b()?;
+    stop_fast27b_locked()?;
     // 2. 回收同引擎路径的遗留实例：worker 崩溃的进程可能不是当前托管句柄
     //    （例如外部 bat 启动、或应用会话切换后的孤儿），它仍占着端口。
     stop_stale_fast27b_processes(&options.engine_path);
@@ -1187,7 +1324,7 @@ pub fn restart_fast27b(
         "引擎已停止，正在用同一套参数重新启动...".to_string(),
     ));
     // 4. 重新拉起（内部会校验端口可用、清空失效状态、重新等待就绪）。
-    start_fast27b(options, on_log, on_progress, on_event)
+    start_fast27b_locked(options, on_log, on_progress, on_event)
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1690,7 @@ mod tests {
             context_window: 262144,
             draft_tokens: 4,
             default_max_tokens: 32768,
+            default_thinking_budget: 8192,
         };
         let args = options.build_args();
         let joined = args.join(" ");
@@ -1566,9 +1704,11 @@ mod tests {
         assert!(joined.contains("--kv-dtype k8v4"));
         assert!(joined.contains("--host-kv-mib 16384"));
         assert!(joined.contains("--prefill-chunk 1024"));
-        assert!(!joined.contains("--spec"));
-        assert!(!joined.contains("--draft-tokens"));
-        assert!(!joined.contains("--lm-head-draft"));
+        assert!(joined.contains("--spec dflash2"));
+        assert!(joined.contains("--draft-tokens 4"));
+        assert!(joined.contains("--lm-head-draft"));
+        assert!(joined.contains("--ngram-draft-tokens 0"));
+        assert!(joined.contains("--default-thinking-budget 8192"));
         assert!(joined.contains("--vision"));
         assert!(joined.contains("--vision-residency resident"));
         assert!(joined.contains("--presence-penalty 0"));
@@ -1602,10 +1742,18 @@ mod tests {
             .contains("--host 0.0.0.0"));
     }
 
-    /// Swift 容器使用 BAT 中的 MTP 草稿头；Heretic 不带草稿参数，公共参数保持一致。
+    /// 两模型仅草稿方案不同，ctx/draft/output/budget 及网络参数均来自保存配置。
     #[test]
     fn swift_uses_mtp_without_changing_user_parameters() {
-        let config = crate::models::app_state::Fast27bConfig::default();
+        let config = crate::models::app_state::Fast27bConfig {
+            context_window: 65536,
+            draft_tokens: 2,
+            default_max_tokens: 12000,
+            default_thinking_budget: 4096,
+            port: 9104,
+            lan: true,
+            ..crate::models::app_state::Fast27bConfig::default()
+        };
         let heretic = Fast27bStartOptions {
             engine_path: PathBuf::from(&config.engine_path),
             model_path: PathBuf::from(&config.model_path),
@@ -1616,6 +1764,7 @@ mod tests {
             context_window: config.context_window,
             draft_tokens: config.draft_tokens,
             default_max_tokens: config.default_max_tokens,
+            default_thinking_budget: config.default_thinking_budget,
         };
         let swift = Fast27bStartOptions {
             model_variant: Fast27bModel::Swift,
@@ -1623,15 +1772,97 @@ mod tests {
         };
         let original = heretic.build_args();
         let switched = swift.build_args();
-        assert!(!original.iter().any(|arg| arg == "--spec"));
+        let spec_index = original.iter().position(|arg| arg == "--spec").unwrap();
+        assert_eq!(
+            original.get(spec_index + 1).map(String::as_str),
+            Some("dflash2")
+        );
         let spec_index = switched.iter().position(|arg| arg == "--spec").unwrap();
-        assert_eq!(switched.get(spec_index + 1).map(String::as_str), Some("mtp"));
+        assert_eq!(
+            switched.get(spec_index + 1).map(String::as_str),
+            Some("mtp")
+        );
         assert!(switched.iter().any(|arg| arg == "--draft-tokens"));
         assert!(switched.iter().any(|arg| arg == "--lm-head-draft"));
-        assert_eq!(original.iter().filter(|arg| arg.as_str() == "--vision-residency").count(), 1);
-        assert_eq!(switched.iter().filter(|arg| arg.as_str() == "--vision-residency").count(), 1);
+        assert_eq!(
+            original
+                .iter()
+                .filter(|arg| arg.as_str() == "--vision-residency")
+                .count(),
+            1
+        );
+        assert_eq!(
+            switched
+                .iter()
+                .filter(|arg| arg.as_str() == "--vision-residency")
+                .count(),
+            1
+        );
         assert!(original.join(" ").contains("--vision-residency resident"));
         assert!(switched.join(" ").contains("--vision-residency resident"));
+        let mut common = switched.clone();
+        let spec = common.iter().position(|arg| arg == "--spec").unwrap();
+        common[spec + 1] = "dflash2".to_string();
+        assert_eq!(common, original);
+        for args in [original, switched] {
+            let joined = args.join(" ");
+            for expected in [
+                "--max-context 65536",
+                "--draft-tokens 2",
+                "--default-max-tokens 12000",
+                "--default-thinking-budget 4096",
+                "--ngram-draft-tokens 0",
+                "--host 0.0.0.0",
+                "--port 9104",
+                "--api-key",
+                "--cors",
+            ] {
+                assert!(joined.contains(expected), "缺少已保存参数 {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn kv_environment_inherits_nonempty_values_without_mutating_host() {
+        let defaults = engine_kv_environment(|_| None);
+        assert_eq!(defaults.len(), 5);
+        assert_eq!(defaults[0].1, OsString::from("16384"));
+        assert_eq!(defaults[1].1, OsString::from("8192"));
+        assert!(defaults[2..].iter().all(|(_, value)| value == "1"));
+        let inherited = engine_kv_environment(|key| match key {
+            "NINFER_KV_WINDOW" => Some(OsString::from("4096")),
+            "NINFER_KV_RETRIEVE" => Some(OsString::new()),
+            "NINFER_KV_RING" => Some(OsString::from("0")),
+            "NINFER_HOST_PAGEABLE" => Some(OsString::from(" ")),
+            _ => None,
+        });
+        assert_eq!(inherited[0].1, OsString::from("4096"));
+        assert_eq!(inherited[1].1, OsString::from("8192"));
+        assert_eq!(inherited[2].1, OsString::from("0"));
+        assert_eq!(inherited[3].1, OsString::from(" "));
+        assert_eq!(inherited[4].1, OsString::from("1"));
+    }
+
+    #[test]
+    fn engine_path_includes_x64_before_inherited_path() {
+        let root = PathBuf::from("engine");
+        let inherited =
+            std::env::join_paths([PathBuf::from("host-one"), PathBuf::from("host-two")]).unwrap();
+        let path = engine_search_path(&root, Some(inherited)).unwrap();
+        let paths: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                root.clone(),
+                root.join("x64"),
+                PathBuf::from("host-one"),
+                PathBuf::from("host-two")
+            ]
+        );
+        assert_eq!(
+            std::env::split_paths(&engine_search_path(&root, None).unwrap()).count(),
+            2
+        );
     }
 
     /// 默认输出上限必须是「配置驱动」的：改了配置，命令行跟着变。
@@ -1647,7 +1878,21 @@ mod tests {
             context_window: 262144,
             draft_tokens: 4,
             default_max_tokens: 0,
+            default_thinking_budget: 0,
         };
+
+        let without_budget = base.build_args();
+        assert!(!without_budget
+            .iter()
+            .any(|arg| arg == "--default-thinking-budget"));
+        let with_budget = Fast27bStartOptions {
+            default_thinking_budget: 8192,
+            ..base.clone()
+        }
+        .build_args();
+        assert!(with_budget
+            .join(" ")
+            .contains("--default-thinking-budget 8192"));
 
         // 0 = 不传该参数，交回引擎自身默认。
         let args = Fast27bStartOptions {
@@ -1688,6 +1933,72 @@ mod tests {
         assert_eq!(args.get(index + 1).map(String::as_str), Some("1"));
     }
 
+    #[test]
+    fn model_header_preflight_matches_launcher_without_rejecting_other_inputs() {
+        assert!(validate_model_header(b"NINFER\0\x02payload").is_err());
+        for header in [
+            b"NINFER\0\x03".as_slice(),
+            b"NINFER\0\x01".as_slice(),
+            b"NINFER\0".as_slice(),
+            b"other model format".as_slice(),
+            b"".as_slice(),
+        ] {
+            assert!(
+                validate_model_header(header).is_ok(),
+                "误拒绝模型头 {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_artifact_preflight_reads_only_header_and_rejects_v2() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fast27b-artifact-{}-{unique}.ninfer",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"NINFER\0\x02payload").unwrap();
+        let rejected = validate_model_artifact(&path);
+        std::fs::write(&path, b"NINFER\0\x03payload").unwrap();
+        let accepted = validate_model_artifact(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(rejected.is_err());
+        assert!(accepted.is_ok());
+    }
+
+    #[test]
+    fn log_readers_drain_both_pipes_after_runtime_receiver_disconnects() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        drop(rx);
+        let readers = [
+            "req#1 done | openai-chat | stop token\nreq#2 done | openai-chat | output limit\n",
+            "req#3 response failed during transport | HTTP 499\nreq#4 failed during generation | HTTP 500",
+        ].into_iter().map(|text| {
+            let collected = collected.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                read_engine_log_pipe(Cursor::new(text), |line| {
+                    collected.lock().unwrap().push(line.to_string());
+                }, tx);
+            })
+        }).collect();
+        drop(tx);
+        join_engine_log_readers(readers);
+        let lines = collected.lock().unwrap();
+        assert_eq!(lines.len(), 4, "停止日志转发后仍须采集双管道全部终态");
+        for request_id in 1..=4 {
+            assert!(lines
+                .iter()
+                .any(|line| line.starts_with(&format!("req#{request_id} "))));
+        }
+    }
+
     /// 端到端：真实拉起引擎 → 探活 → 停止（需要 GPU、模型文件与本机空闲；默认忽略）。
     /// 运行：cargo test --lib fast27b_e2e -- --ignored
     #[test]
@@ -1704,6 +2015,7 @@ mod tests {
             context_window: config.context_window,
             draft_tokens: config.draft_tokens,
             default_max_tokens: config.default_max_tokens,
+            default_thinking_budget: config.default_thinking_budget,
         };
         start_fast27b(
             &options,

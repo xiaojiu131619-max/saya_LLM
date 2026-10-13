@@ -196,6 +196,18 @@ export interface ModelUsageStats {
   dailyTokens: Record<string, number>;
 }
 
+export interface ModelMemoryLayout {
+  version: number;
+  layers: Array<{ weight_bytes: number; expert_bytes: number }>;
+  input_bytes: number;
+  output_bytes: number;
+  other_bytes: number;
+  total_bytes: number;
+  signature: string;
+  accuracy?: 'exact' | 'upper_bound';
+  tied_output?: boolean;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -230,6 +242,10 @@ export interface ModelInfo {
   headCountKv?: number;
   /** 混合架构逐层 head_count_kv 数组的求和（0 层 = 无 KV 的 Mamba 层）；标量形式时缺省。 */
   kvHeadsSum?: number;
+  kvHeadsByLayer?: number[];
+  swaLayerPattern?: boolean[];
+  fullAttentionInterval?: number;
+  memoryLayout?: ModelMemoryLayout;
   /** gemma 系 SWA 分列求和：全注意力层（pattern=0）/ SWA 层（pattern≠0）。 */
   kvHeadsSumFull?: number;
   kvHeadsSumSwa?: number;

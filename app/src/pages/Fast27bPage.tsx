@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   Check,
   ChevronDown,
+  Code2,
   Copy,
   Cpu,
   Download,
@@ -20,6 +22,12 @@ import {
 import PageHeader from "@/components/PageHeader";
 import ToggleSwitch from "@/components/ToggleSwitch";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import Fast27bPerformance from "@/features/fast27b/Fast27bPerformance";
+import Fast27bConnection from "@/features/fast27b/Fast27bConnection";
+import Fast27bModelSwitch from "@/features/fast27b/Fast27bModelSwitch";
+import { useFast27bMetrics } from "@/hooks/useFast27bMetrics";
+import { refreshEngineStatus, useEngineStatuses } from "@/hooks/useEngineStatuses";
+import "@/features/fast27b/fast27b.css";
 import { useApp } from "@/context/AppContext";
 import {
   isDesktopRuntime,
@@ -33,6 +41,7 @@ import {
   fast27bClearLogs,
   fast27bGetLogs,
   fast27bGetStatus,
+  fast27bSelectModel,
   fast27bRestart,
   fast27bSaveConfig,
   fast27bSetEnabled,
@@ -98,13 +107,17 @@ export default function Fast27bPage() {
   const busyRef = useRef(false);
   const editorsInitializedRef = useRef(false);
   const logViewportRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<Fast27bStatus | null>(null);
+  const engineStatuses = useEngineStatuses();
+  const status = engineStatuses.fast27b;
+  const metrics = useFast27bMetrics();
+  const [activeTab, setActiveTab] = useState<"overview" | "performance" | "api">("overview");
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [switchingModel, setSwitchingModel] = useState(false);
   const [binding, setBinding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [fast27bLogs, setFast27bLogs] = useState<string[]>([]);
@@ -119,14 +132,13 @@ export default function Fast27bPage() {
     Record<Fast27bModelVariant, string>
   >({ heretic: "", swift: "" });
   const modelPath = modelPaths[selectedModel];
-  const setModelPath = (path: string) =>
-    setModelPaths((previous) => ({ ...previous, [selectedModel]: path }));
   const [port, setPort] = useState("8094");
   const [lan, setLan] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [contextWindow, setContextWindow] = useState("262144");
   const [draftTokens, setDraftTokens] = useState("4");
   const [defaultMaxTokens, setDefaultMaxTokens] = useState("32768");
+  const [thinkingBudget, setThinkingBudget] = useState("8192");
   const [bridgePort, setBridgePort] = useState("8095");
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
@@ -146,7 +158,7 @@ export default function Fast27bPage() {
   const apiReady = status?.api_ready ?? false;
   // 引擎失效：进程还在、/v1/models 也可能还是 200，但引擎日志已判 worker 崩溃 / 连续 503。
   const degraded = status?.degraded ?? false;
-  const needsRestart = (status?.requires_restart ?? false) || degraded;
+  const needsRestart = status?.requires_restart ?? false;
   const devicePoolTokens = status?.device_pool_tokens ?? null;
   const boundModel = status?.dsh_bound_model ?? null;
   const engineEnabled = status?.enabled ?? true;
@@ -168,43 +180,25 @@ export default function Fast27bPage() {
     setContextWindow(String(next.context_window));
     setDraftTokens(String(next.draft_tokens));
     setDefaultMaxTokens(String(next.default_max_tokens ?? 0));
+    setThinkingBudget(String(next.default_thinking_budget ?? 8192));
     setBridgePort(String(next.bridge_port ?? 8095));
     setSettingsDirty(false);
   }, []);
 
-  const refreshStatusOnly = useCallback(async () => {
-    if (!isDesktopRuntime()) return;
-    try {
-      const next = await fast27bGetStatus();
-      if (next) {
-        // 状态轮询不能覆盖用户正在编辑的模型或参数。
-        if (!editorsInitializedRef.current) {
-          editorsInitializedRef.current = true;
-          applyStatusToEditors(next);
-        }
-        setStatus(next);
-      }
-    } catch {
-      // 静默：轮询失败不打扰用户，下个周期重试。
-    }
-  }, [applyStatusToEditors]);
+  const refreshStatusOnly = refreshEngineStatus;
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void refreshStatusOnly(), 0);
+    if (!status || editorsInitializedRef.current) return;
+    const timer = window.setTimeout(() => {
+      editorsInitializedRef.current = true;
+      applyStatusToEditors(status);
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [refreshStatusOnly]);
-
-  // 运行状态轮询：反映引擎真实存活与 API 探活结果。
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refreshStatusOnly();
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [refreshStatusOnly]);
+  }, [status, applyStatusToEditors]);
 
   // 日志：1 秒轮询（与 dsh/llama 日志同范式），可暂停。
   useEffect(() => {
-    if (!isDesktopRuntime()) return;
+    if (!isDesktopRuntime() || !logsOpen) return;
     let disposed = false;
     const refresh = async () => {
       try {
@@ -222,7 +216,7 @@ export default function Fast27bPage() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [logsLive]);
+  }, [logsLive, logsOpen]);
 
   // fast27b 生命周期事件：即时反馈并刷新状态。
   useEffect(() => {
@@ -289,6 +283,38 @@ export default function Fast27bPage() {
       );
     }
     return ready.webUrl;
+  };
+
+  const handleSelectModel = async (model: Fast27bModelVariant) => {
+    if (busyRef.current || model === selectedModel || settingsDirty) return;
+    const previousModel = selectedModel;
+    busyRef.current = true;
+    setSwitchingModel(true);
+    setSelectedModel(model);
+    setActionMessage(null);
+    if (running) setProgressMessage(`正在切换到 ${model === "heretic" ? "Heretic" : "Swift"} 27B，重新加载引擎…`);
+    try {
+      await fast27bSelectModel(model);
+      setActionMessage(`已切换到 ${model === "heretic" ? "Heretic" : "Swift"} 27B${running ? "，正在加载引擎，API 就绪后即可使用。" : "，点击启动即可运行。"}`);
+    } catch (error) {
+      setSelectedModel(previousModel);
+      setActionMessage(`模型切换失败：${String(error)}`);
+    } finally {
+      try {
+        const next = await fast27bGetStatus();
+        if (next) {
+          applyStatusToEditors(next);
+          setStarting(next.running && !next.api_ready && !next.requires_restart);
+        }
+      } catch {
+        // 状态暂时不可读时由共享轮询继续检测，操作按钮仍需解除忙碌。
+      } finally {
+        setProgressMessage(null);
+        setSwitchingModel(false);
+        busyRef.current = false;
+        await refreshStatusOnly();
+      }
+    }
   };
 
   const handleStart = async () => {
@@ -443,6 +469,7 @@ export default function Fast27bPage() {
     const draftNumber = Number(draftTokens);
     const maxTokensNumber =
       defaultMaxTokens.trim() === "" ? 0 : Number(defaultMaxTokens);
+    const thinkingBudgetNumber = Number(thinkingBudget);
     const bridgePortNumber = Number(bridgePort);
     if (
       !Number.isInteger(portNumber) ||
@@ -472,6 +499,14 @@ export default function Fast27bPage() {
       setActionMessage(
         `保存失败：默认输出上限不能超过上下文窗口（${ctxNumber}）。`,
       );
+      return;
+    }
+    if (!Number.isInteger(thinkingBudgetNumber) || thinkingBudgetNumber < 0) {
+      setActionMessage("保存失败：思考预算必须是 0 或正整数，0 表示不限制。");
+      return;
+    }
+    if (maxTokensNumber > 0 && thinkingBudgetNumber >= maxTokensNumber) {
+      setActionMessage("保存失败：思考预算必须小于默认输出上限，为正文预留空间。");
       return;
     }
     if (
@@ -507,6 +542,7 @@ export default function Fast27bPage() {
         context_window: ctxNumber,
         draft_tokens: draftNumber,
         default_max_tokens: maxTokensNumber,
+        default_thinking_budget: thinkingBudgetNumber,
         bridge_port: bridgePortNumber,
         auto_open_dsh_web: status?.auto_open_dsh_web ?? true,
       });
@@ -524,6 +560,16 @@ export default function Fast27bPage() {
   };
 
   const markDirty = () => setSettingsDirty(true);
+
+  const applyBatPreset = () => {
+    setSelectedModel("heretic");
+    setContextWindow("262144");
+    setDraftTokens("4");
+    setDefaultMaxTokens("32768");
+    setThinkingBudget("8192");
+    markDirty();
+    setActionMessage("已套用 start-heretic-best.bat 的推理参数，保存后于下次启动生效。");
+  };
 
   /** 启用/停用 fast27b 引擎：只翻转开关（专用命令，不触碰其他配置项）。 */
   const applyEnabled = async (next: boolean) => {
@@ -618,7 +664,7 @@ export default function Fast27bPage() {
         />
       </span>
       {degraded
-        ? "已失效 · 需重启引擎"
+        ? needsRestart ? "已失效 · 需重启引擎" : "运行受限 · 题面超池"
         : running
           ? apiReady
             ? "运行中 · API 就绪"
@@ -687,7 +733,7 @@ export default function Fast27bPage() {
   const primaryButton =
     "inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
   const busy =
-    starting || stopping || restarting || binding || saving || openingDsh;
+    starting || stopping || restarting || switchingModel || binding || saving || openingDsh;
   const desktop = isDesktopRuntime();
   const selectedPreset = status?.model_presets.find(
     (preset) => preset.id === selectedModel,
@@ -723,6 +769,12 @@ export default function Fast27bPage() {
       update: setDefaultMaxTokens,
       min: 0,
     },
+    {
+      label: "思考预算（token）",
+      value: thinkingBudget,
+      update: setThinkingBudget,
+      min: 0,
+    },
   ];
 
   const openWebui = () => {
@@ -731,19 +783,63 @@ export default function Fast27bPage() {
     dispatch({ type: "SET_VIEW", payload: "agent" });
   };
 
+  const openChat = () => {
+    dispatch({ type: "SET_CHAT_ENGINE", payload: "fast27b" });
+    dispatch({ type: "SET_VIEW", payload: "chat" });
+  };
+
+  const tabs = [
+    { id: "overview", label: "概览", icon: Info },
+    { id: "performance", label: "性能", icon: Activity },
+    { id: "api", label: "API", icon: Code2 },
+  ] as const;
+
   return (
-    <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
-      <div className="mx-auto max-w-4xl space-y-3 pb-6">
+    <div className="fast27b-workspace h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-5xl space-y-4 pb-6">
         <PageHeader
           icon={Cpu}
           title="fast-27b"
-          description="选择本地模型，启动后接入 DSH 或使用 WebUI。"
+          description="Heretic · DFlash2 / Swift · MTP，启动、监测与接入集中管理。"
           className="mb-4"
         />
 
+        <Fast27bModelSwitch
+          selected={selectedModel}
+          onChange={(model) => void handleSelectModel(model)}
+          disabled={busy || settingsDirty || !status || !desktop}
+          switching={switchingModel}
+          available={status ? Object.fromEntries(status.model_presets.map((preset) => [preset.id, preset.exists])) : undefined}
+        />
+        <div className="fast27b-tabs" role="tablist" aria-label="fast-27b 工作台视图">
+          {tabs.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              id={`fast27b-tab-${id}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === id}
+              aria-controls={`fast27b-panel-${id}`}
+              tabIndex={activeTab === id ? 0 : -1}
+              onClick={() => setActiveTab(id)}
+              onKeyDown={(event) => {
+                const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+                if (!direction && event.key !== "Home" && event.key !== "End") return;
+                event.preventDefault();
+                const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (tabs.findIndex((tab) => tab.id === id) + direction + tabs.length) % tabs.length;
+                setActiveTab(tabs[index].id);
+                document.getElementById(`fast27b-tab-${tabs[index].id}`)?.focus();
+              }}
+            >
+              <Icon className="h-4 w-4" />{label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "overview" && <div id="fast27b-panel-overview" role="tabpanel" aria-labelledby="fast27b-tab-overview" className="space-y-4">
         <section
           aria-label="模型与运行状态"
-          className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4"
+          className="fast27b-launch-panel rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] p-5"
         >
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             {runningBadge}
@@ -759,41 +855,8 @@ export default function Fast27bPage() {
               />
             </fieldset>
           </div>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <label className="min-w-0 flex-1">
-              <span className="mb-1.5 block text-xs font-medium text-secondary-custom">
-                选择模型
-              </span>
-              <select
-                value={selectedModel}
-                onChange={(event) => {
-                  setSelectedModel(event.target.value as Fast27bModelVariant);
-                  markDirty();
-                  setActionMessage(null);
-                }}
-                disabled={running || busy || !status || !desktop}
-                className={`${editorField} text-sm`}
-                aria-describedby="fast27b-model-hint"
-              >
-                <option value="heretic">
-                  Heretic 27B
-                  {status &&
-                  !status.model_presets.find(
-                    (preset) => preset.id === "heretic",
-                  )?.exists
-                    ? " · 文件缺失"
-                    : ""}
-                </option>
-                <option value="swift">
-                  Swift 27B
-                  {status &&
-                  !status.model_presets.find((preset) => preset.id === "swift")
-                    ?.exists
-                    ? " · 文件缺失"
-                    : ""}
-                </option>
-              </select>
-            </label>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-[length:var(--font-subtitle)] font-semibold text-primary-custom">{selectedModel === "heretic" ? "Heretic" : "Swift"} 27B</div>
             <div className="flex flex-wrap gap-2">
               {settingsDirty && (
                 <button
@@ -861,15 +924,21 @@ export default function Fast27bPage() {
           </div>
           <p
             id="fast27b-model-hint"
-            className="mt-2 text-[11px] text-secondary-custom"
+            className="mt-2 text-[length:var(--font-eyebrow)] text-secondary-custom"
           >
             {running
-              ? "切换模型前请先停止引擎。"
+              ? "点击顶部切换按钮可重载到另一个模型，当前进行中的请求会中断。"
               : settingsDirty
                 ? "有未保存修改，保存后即可启动。"
-                : "Swift 使用 MTP 草稿头，Heretic 不启用草稿头；其余参数与 fast-llm BAT 保持一致。"}
+                : "Heretic 使用 DFlash2，Swift 使用 MTP；默认草稿 4 token，视觉常驻，推理参数参照 start-heretic-best.bat。"}
           </p>
-          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-[var(--border)] pt-3 text-[11px] text-secondary-custom">
+          <div className="fast27b-profile-tags" aria-label="当前推理配置">
+            <span>{selectedModel === "heretic" ? "DFlash2" : "MTP"} · 草稿 {draftTokens} token</span>
+            <span>k8v4 · 主机 KV 16 GiB</span>
+            <span>视觉常驻 · 单并发</span>
+            <span>思考 high · 预算 {Number(thinkingBudget).toLocaleString()}</span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-[var(--border)] pt-3 text-[length:var(--font-eyebrow)] text-secondary-custom">
             <span className="mono-font">
               API · {status?.lan ? "0.0.0.0" : "127.0.0.1"}:
               {status?.port ?? port}
@@ -908,7 +977,7 @@ export default function Fast27bPage() {
             <div className="min-w-0">
               <h2 className="text-xs font-semibold text-primary-custom">DSH</h2>
               <p
-                className="mt-1 truncate text-[11px] text-secondary-custom"
+                className="mt-1 truncate text-[length:var(--font-eyebrow)] text-secondary-custom"
                 title={boundModel ?? "接入后设为默认模型"}
               >
                 {boundModel ? `已接入 · ${boundModel}` : "智能体默认模型"}
@@ -952,7 +1021,7 @@ export default function Fast27bPage() {
               <h2 className="text-xs font-semibold text-primary-custom">
                 WebUI
               </h2>
-              <p className="mt-1 text-[11px] text-secondary-custom">
+              <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
                 直接与当前模型对话
               </p>
             </div>
@@ -969,6 +1038,16 @@ export default function Fast27bPage() {
             </button>
           </div>
         </section>
+
+        <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} compact />
+        </div>}
+
+        {activeTab === "performance" && <div id="fast27b-panel-performance" role="tabpanel" aria-labelledby="fast27b-tab-performance">
+          <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} />
+        </div>}
+        {activeTab === "api" && <div id="fast27b-panel-api" role="tabpanel" aria-labelledby="fast27b-tab-api">
+          <Fast27bConnection status={status} desktop={desktop} onOpenChat={openChat} />
+        </div>}
 
         {(progressMessage || runtimeMessage || actionMessage) && (
           <div
@@ -1004,7 +1083,7 @@ export default function Fast27bPage() {
               className={`h-3.5 w-3.5 transition-transform ${configOpen ? "rotate-180" : ""}`}
             />
             <span className="font-medium text-primary-custom">高级配置</span>
-            <span className="ml-auto text-[11px]">
+            <span className="ml-auto text-[length:var(--font-eyebrow)]">
               {settingsDirty ? "有未保存修改" : "路径、参数与 API key"}
             </span>
           </button>
@@ -1029,22 +1108,23 @@ export default function Fast27bPage() {
                     className={`${editorField} mono-font`}
                   />
                 </label>
-                <label className="block text-xs">
-                  <span className="mb-1 block text-secondary-custom">
-                    {selectedModel === "swift" ? "Swift" : "Heretic"}{" "}
-                    模型文件（.ninfer）
-                  </span>
-                  <input
-                    value={modelPath}
-                    onChange={(event) => {
-                      setModelPath(event.target.value);
-                      markDirty();
-                    }}
-                    spellCheck={false}
-                    disabled={running || busy}
-                    className={`${editorField} mono-font`}
-                  />
-                </label>
+                {(["heretic", "swift"] as const).map((model) => (
+                  <label key={model} className="block text-xs">
+                    <span className="mb-1 block text-secondary-custom">
+                      {model === "heretic" ? "Heretic" : "Swift"} 模型文件（.ninfer）
+                    </span>
+                    <input
+                      value={modelPaths[model]}
+                      onChange={(event) => {
+                        setModelPaths((previous) => ({ ...previous, [model]: event.target.value }));
+                        markDirty();
+                      }}
+                      spellCheck={false}
+                      disabled={running || busy}
+                      className={`${editorField} mono-font`}
+                    />
+                  </label>
+                ))}
               </div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {fields.map((field) => (
@@ -1068,9 +1148,16 @@ export default function Fast27bPage() {
                   </label>
                 ))}
               </div>
-              <p className="text-[11px] text-secondary-custom">
-                默认输出上限为 0 时由引擎自定；所有参数保存后于下次启动生效。
-              </p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[length:var(--font-eyebrow)] text-secondary-custom">默认输出上限为 0 时由引擎自定；思考预算为 0 时不限制。保存后于下次启动生效。</p>
+                  <button type="button" onClick={applyBatPreset} disabled={busy || running || !desktop} className={secondaryButton}>应用 bat 参数</button>
+                </div>
+                <details className="rounded-[var(--radius-lg)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-eyebrow)] text-secondary-custom">
+                  <summary className="cursor-pointer font-medium text-primary-custom">查看固定参数与 KV 环境变量</summary>
+                  <p className="mono-font mt-2 break-words leading-relaxed">--kv-capacity auto · --kv-headroom-mib 128 · --kv-dtype k8v4 · --host-kv-mib 16384 · --prefill-chunk 1024 · --lm-head-draft · --ngram-draft-tokens 0 · --vision --vision-residency resident · --default-reasoning-effort high · --max-concurrency 1 · --presence-penalty 0 · --max-shared-prefixes 0 · --gdn-state-fp16</p>
+                  <p className="mono-font mt-2 break-words leading-relaxed">NINFER_KV_WINDOW=16384 · NINFER_KV_RETRIEVE=8192 · NINFER_KV_RING=1 · NINFER_HOST_PAGEABLE=1 · NINFER_KV_REUSE_HOSTBACKED=1</p>
+                  <p className="mt-2">已有非空 NINFER_* 环境值优先；API 监听与鉴权使用本页保存的配置。</p>
+                </details>
               <label className="block text-xs">
                 <span className="mb-1 block text-secondary-custom">
                   API key（本地明文鉴权）
@@ -1126,7 +1213,7 @@ export default function Fast27bPage() {
               className={`h-3.5 w-3.5 transition-transform ${logsOpen ? "rotate-180" : ""}`}
             />
             <span className="font-medium text-primary-custom">运行日志</span>
-            <span className="ml-auto text-[11px]">{fast27bLogs.length} 行</span>
+            <span className="ml-auto text-[length:var(--font-eyebrow)]">{fast27bLogs.length} 行</span>
           </button>
           {logsOpen && (
             <div
@@ -1176,7 +1263,7 @@ export default function Fast27bPage() {
               </div>
               <div
                 ref={logViewportRef}
-                className="mono-font h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[11px] leading-[1.7]"
+                className="mono-font h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-[1.7]"
               >
                 {!renderedLogs.length ? (
                   <div className="flex h-full items-center justify-center gap-2 text-secondary-custom">

@@ -65,6 +65,8 @@ export interface Fast27bStatus {
   draft_tokens: number;
   /** 引擎默认输出上限（--default-max-tokens）；0 = 未设，由引擎自身默认决定。 */
   default_max_tokens: number;
+  /** 思考预算（--default-thinking-budget）；0 = 不限制。 */
+  default_thinking_budget: number;
   /** 官方 webui 同源桥端口（配置）。 */
   bridge_port: number;
   auto_open_dsh_web: boolean;
@@ -90,6 +92,8 @@ export interface Fast27bConfig {
   draft_tokens: number;
   /** 引擎默认输出上限（--default-max-tokens）；0 = 不传该参数，交回引擎自身默认。 */
   default_max_tokens: number;
+  /** 思考预算（--default-thinking-budget）；0 = 不限制。 */
+  default_thinking_budget: number;
   /** 官方 llama.cpp webui 同源桥端口（浏览器打开 fast27b 网页界面用；占用时自动顺延）。 */
   bridge_port: number;
   auto_open_dsh_web: boolean;
@@ -131,6 +135,11 @@ export async function fast27bGetStatus() {
   return invoke<Fast27bStatus>('fast27b_get_status');
 }
 
+export async function fast27bSelectModel(model: Fast27bModelVariant) {
+  if (!isDesktopRuntime()) return;
+  await invoke('fast27b_select_model', { model });
+}
+
 export async function fast27bStart() {
   if (!isDesktopRuntime()) return;
   await invoke('fast27b_start');
@@ -148,6 +157,37 @@ export async function fast27bRestart() {
 export async function fast27bStop() {
   if (!isDesktopRuntime()) return;
   await invoke('fast27b_stop');
+}
+
+/** 后台从引擎请求日志收集的终态读数，时间戳单位为毫秒。 */
+export interface Fast27bRequestMetric {
+  id: string;
+  request_id: number;
+  model: Fast27bModelVariant;
+  started_at: number;
+  finished_at: number;
+  outcome: 'success' | 'failed' | 'cancelled';
+  prompt_tokens: number | null;
+  output_tokens: number | null;
+  ttft_ms: number | null;
+  total_ms: number | null;
+  decode_tps: number | null;
+  prefill_tps: number | null;
+  cache_tokens: number | null;
+  draft_accepted: number | null;
+  draft_proposed: number | null;
+  error: string | null;
+}
+
+export interface Fast27bMetricsSnapshot {
+  collected_at: number;
+  active_requests: number;
+  requests: Fast27bRequestMetric[];
+}
+
+export async function fast27bGetMetrics() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<Fast27bMetricsSnapshot>('fast27b_get_metrics');
 }
 
 export async function fast27bGetLogs() {

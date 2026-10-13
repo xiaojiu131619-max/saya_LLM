@@ -407,19 +407,23 @@ export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: numbe
 // `prompt eval time` / `eval time = … tokens per second` 正则对它无效。引擎自己的行：
 //   req#25 started | openai-chat stream | 36 messages | max output 32,768 | thinking xhigh
 //   req#30 done | openai-chat | stop token | prompt 19 | output 11 | cache 0 (0.0%) | TTFT 258 ms | total 288 ms
+//   req#1 done | prompt 3,360 | output 74 | cache 0 (0.0%) | TTFT 1.6s | total 1.9s | prefill 2.14k tok/s | decode 215.2 tok/s
 //   req#26 failed during prepare | openai-chat stream | HTTP 503 | service unavailable
 //   req#7 response failed during transport | HTTP 499 | client disconnected
+//   req#8 cancelled | openai-chat stream | client disconnected
 // 引擎把所有来源的请求（本应用对话、外部客户端、dsh）都写进这份日志，因此
-// 「有 started 但还没 done/failed」是真实的在途请求判定——比只看本应用对话更准。
+// 「有 started 但还没 done/failed/cancelled」是真实的在途请求判定——比只看本应用对话更准。
 // ---------------------------------------------------------------------------
 
 const ENGINE_REQ_STARTED = /req#(\d+)\s+started\s*\|/;
 const ENGINE_REQ_DONE = /req#(\d+)\s+done\s*\|/;
-const ENGINE_REQ_FAILED = /req#(\d+)[^|]*\bfailed\b/;
+const ENGINE_REQ_TERMINAL = /req#(\d+)[^|]*\b(?:failed|cancelled|canceled)\b/;
+const ENGINE_RESTART = /\[fast27b\]\s*启动[：:]|\bengine ready\s*\|/i;
 const ENGINE_PROMPT_TOKENS = /\bprompt\s+([\d,]+)\b/;
 const ENGINE_OUTPUT_TOKENS = /\boutput\s+([\d,]+)\b/;
-const ENGINE_TTFT_MS = /\bTTFT\s+([\d.]+)\s*ms/i;
-const ENGINE_TOTAL_MS = /\btotal\s+([\d.]+)\s*ms/i;
+const ENGINE_TTFT = /\bTTFT\s*(?:([\d.]+)\s*m\s*)?([\d.]+)\s*(ms|s)\b/i;
+const ENGINE_TOTAL = /\btotal\s*(?:([\d.]+)\s*m\s*)?([\d.]+)\s*(ms|s)\b/i;
+const ENGINE_DECODE = /\bdecode\s+([\d.]+)\s*(k)?\s*tok\/s\b/i;
 
 export interface EngineLogSnapshot {
   /** 是否有请求已开始但尚未结束（引擎固定单并发，实际取值只有 true / false）。 */
@@ -428,9 +432,9 @@ export interface EngineLogSnapshot {
   lastDone: {
     promptTokens: number;
     outputTokens: number;
-    /** 秒（日志给的是毫秒）。 */
+    /** 秒（日志支持毫秒、秒及分秒复合单位）。 */
     firstTokenDelay: number;
-    /** 秒（日志的 total，含首字前的等待）。 */
+    /** 秒（日志的 total，含首字前的等待；单位同 TTFT）。 */
     genTime: number;
     /** 0 = 样本不足，不展示（小样本除出来的速度没有意义）。 */
     tokensPerSec: number;
@@ -443,26 +447,33 @@ function readLogInt(line: string, pattern: RegExp): number {
   return Math.max(0, Math.round(Number(match[1].replace(/,/g, '')) || 0));
 }
 
-function readLogFloat(line: string, pattern: RegExp): number {
+function readLogDurationMs(line: string, pattern: RegExp): number {
   const match = line.match(pattern);
   if (!match) return 0;
-  return Math.max(0, Number(match[1]) || 0);
+  const minutes = Math.max(0, Number(match[1]) || 0);
+  const value = Math.max(0, Number(match[2]) || 0);
+  return minutes * 60_000 + value * (match[3].toLowerCase() === 'ms' ? 1 : 1000);
 }
 
 function engineDoneReadout(line: string): NonNullable<EngineLogSnapshot['lastDone']> {
   const promptTokens = readLogInt(line, ENGINE_PROMPT_TOKENS);
   const outputTokens = readLogInt(line, ENGINE_OUTPUT_TOKENS);
-  const ttftMs = readLogFloat(line, ENGINE_TTFT_MS);
-  const totalMs = readLogFloat(line, ENGINE_TOTAL_MS);
+  const ttftMs = readLogDurationMs(line, ENGINE_TTFT);
+  const totalMs = readLogDurationMs(line, ENGINE_TOTAL);
   const decodeMs = Math.max(0, totalMs - ttftMs);
-  // 生成阶段不足 100ms 或输出不足 16 token 时，除出来的速度是噪声：给 0，界面显示占位。
+  const decodeMatch = line.match(ENGINE_DECODE);
+  // 显式 decode 优先（k 表示千 token/s），缺失时才由输出与生成阶段时长推算。
+  // 生成阶段不足 100ms 或输出不足 16 token 时，保留旧抑噪规则：给 0，界面显示占位。
   const sampleEnough = outputTokens >= 16 && decodeMs >= 100;
+  const tokensPerSec = !sampleEnough ? 0 : decodeMatch
+    ? Math.max(0, (Number(decodeMatch[1]) || 0) * (decodeMatch[2] ? 1000 : 1))
+    : outputTokens / (decodeMs / 1000);
   return {
     promptTokens,
     outputTokens,
     firstTokenDelay: ttftMs / 1000,
     genTime: totalMs / 1000,
-    tokensPerSec: sampleEnough ? outputTokens / (decodeMs / 1000) : 0,
+    tokensPerSec,
   };
 }
 
@@ -473,14 +484,20 @@ export function parseEngineLog(logs: string[]): EngineLogSnapshot {
 
   for (let index = 0; index < logs.length; index += 1) {
     const line = logs[index];
+    // 新实例启动或就绪后，旧实例的 started 不再是在途请求；保留最近一次成功读数。
+    if (ENGINE_RESTART.test(line)) {
+      lastStarted = -1;
+      lastTerminal = index;
+      continue;
+    }
     if (!line.includes('req#')) continue;
-    // 顺序要紧：done 行里不会再出现 failed；failed 判定用 `[^|]*`，也吃不下 `done |`。
+    // 终态只匹配请求头（第一段），避免把后续错误说明或参数误当成请求状态。
     if (ENGINE_REQ_DONE.test(line)) {
       lastTerminal = index;
       lastDone = engineDoneReadout(line);
       continue;
     }
-    if (ENGINE_REQ_FAILED.test(line)) {
+    if (ENGINE_REQ_TERMINAL.test(line)) {
       lastTerminal = index;
       continue;
     }

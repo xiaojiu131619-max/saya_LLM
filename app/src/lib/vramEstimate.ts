@@ -1,8 +1,4 @@
-// 显存预估模型：从 ModelLoadPage.tsx 提出，供推荐参数、显存校准与 UI 展示复用。
-// 公式与旧实现保持一致，仅把固定 6% 安全余量改为可校准系数。
-
 import type { ModelInfo, ModelLoadConfig } from '@/types';
-import { RECOMMENDED_CTX_LENGTH } from '@/lib/modelDefaults';
 
 export interface VramPrediction {
   totalGb: number;
@@ -15,196 +11,239 @@ export interface VramPrediction {
   offloadRatio: number;
   expertGpuRatio: number;
   missing: string[];
-  /** 解析项小计：权重 + KV。来自表头的解析式，本身可信，校准不改动它。 */
   analyticalGb: number;
-  /** 经验项小计：计算暂存 + 运行时。来自启发式系数，是校准的修正对象（未乘系数的原值）。 */
   empiricalGb: number;
+  rawWeightsGpuGb: number;
+  rawKvGb: number | null;
+  rawComputeGb: number;
+  rawRuntimeGb: number;
+  weightSource: 'tensor' | 'tensor_upper_bound' | 'file';
 }
 
-/**
- * 校准输入，两种模式二选一生效（优先分项）：
- * - scratchRatio：分项校准，只修正经验项（计算暂存 + 运行时）。解析项（权重+KV）可信时使用。
- * - overallRatio：整体兜底校准，按实测/预测总比值缩放全部小计。用于解析项本身
- *   偏差过大（如 MoE 权重公式与实际结构不符）导致分项还原出负值的模型。
- */
+export interface VramEstimateOptions {
+  kernelVersion?: string | null;
+  effectiveParallel?: number | null;
+}
+
 export interface VramCalibrationInput {
+  weightsRatio?: number;
+  kvRatio?: number;
+  computeRatio?: number;
+  runtimeOffsetGb?: number;
+  uncertaintyGb?: number;
   scratchRatio?: number;
   overallRatio?: number;
 }
 
-/** 经验项校准比率的合理区间：暂存项误差可能很大，但仍要防野值把预测带飞。 */
 export const SCRATCH_RATIO_MIN = 0.4;
 export const SCRATCH_RATIO_MAX = 2.5;
-/** 整体兜底比率的合理区间：只用来缩放 GPU 权重（MoE 公式偏差 / -fit 压顶），
- *  不缩放 KV。下限 0.5 保证宁多勿少，上限仍防坏样本把预测带飞。 */
 export const OVERALL_RATIO_MIN = 0.5;
 export const OVERALL_RATIO_MAX = 1.3;
-
-export function clampScratchRatio(ratio: number) {
-  return Math.min(SCRATCH_RATIO_MAX, Math.max(SCRATCH_RATIO_MIN, ratio));
-}
-
-export function clampOverallRatio(ratio: number) {
-  return Math.min(OVERALL_RATIO_MAX, Math.max(OVERALL_RATIO_MIN, ratio));
-}
+export const clampScratchRatio = (ratio: number) => clamp(ratio, SCRATCH_RATIO_MIN, SCRATCH_RATIO_MAX);
+export const clampOverallRatio = (ratio: number) => clamp(ratio, OVERALL_RATIO_MIN, OVERALL_RATIO_MAX);
 
 export function cacheBytesPerValue(cacheType: string) {
-  const normalized = cacheType.toLowerCase();
-  if (normalized === 'f32') return 4;
-  if (normalized === 'f16' || normalized === 'bf16') return 2;
-  if (normalized === 'q8_0') return 1.0625;
-  if (normalized === 'q5_0' || normalized === 'q5_1') return 0.75;
-  if (normalized === 'q4_0' || normalized === 'q4_1' || normalized === 'iq4_nl') return 0.5625;
-  return 2;
+  switch (cacheType.toLowerCase()) {
+    case 'f32': return 4;
+    case 'q8_0': return 34 / 32;
+    case 'q5_0': return 22 / 32;
+    case 'q5_1': return 24 / 32;
+    case 'q4_0': case 'iq4_nl': return 18 / 32;
+    case 'q4_1': return 20 / 32;
+    default: return 2;
+  }
 }
 
 function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+function metadataNumber(model: ModelInfo, suffix: string) {
+  const value = model.ggufMetadata?.find((entry) => entry.key === `${model.architecture}.${suffix}`)?.value;
+  const number = Number(value);
+  return value != null && Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function validVector(values: number[] | undefined, count: number) {
+  return values?.length === count && values.every((value) => Number.isFinite(value) && value >= 0);
+}
+
+function kvHeadsByLayer(model: ModelInfo, count: number): number[] | null {
+  if (validVector(model.kvHeadsByLayer, count)) return model.kvHeadsByLayer!;
+  const heads = model.headCountKv ?? model.headCount;
+  if (model.kvHeadsSum != null) {
+    // 旧缓存只保留数组求和，部分卸载时只能按层比例近似，刷新后使用完整向量。
+    return Array(count).fill(model.kvHeadsSum / Math.max(1, count));
+  }
+  if (heads == null || heads < 0) return null;
+  const interval = model.fullAttentionInterval ?? metadataNumber(model, 'attention.full_attention_interval') ?? metadataNumber(model, 'full_attention_interval');
+  if (['qwen35', 'qwen35moe', 'qwen3next'].includes(model.architecture ?? '') && interval && interval >= 1) {
+    return Array.from({ length: count }, (_, index) => index >= count - (model.nextnPredictLayers ?? 0)
+      || (index + 1) % interval === 0 ? heads : 0);
+  }
+  return Array(count).fill(heads);
+}
+
+function rowBytes(width: number, cacheType: string) {
+  const quantized = !['f16', 'bf16', 'f32'].includes(cacheType.toLowerCase());
+  const paddedWidth = quantized ? Math.ceil(width / 32) * 32 : width;
+  return paddedWidth * cacheBytesPerValue(cacheType);
 }
 
 export function predictVramUsage(
   model: ModelInfo,
   config: ModelLoadConfig,
   calibration?: VramCalibrationInput | null,
+  options?: VramEstimateOptions,
 ): VramPrediction {
   const gib = 1024 ** 3;
-  const modelBytes = Math.max(0, model.fileSizeBytes);
-  const modelGb = modelBytes / gib;
-  const layerCount = Math.max(0, model.blockCount ?? 0);
-  const offloadedLayers = layerCount > 0 ? clamp(config.gpuLayers, 0, layerCount) : Math.max(0, config.gpuLayers);
-  const offloadRatio = layerCount > 0 ? clamp(offloadedLayers / layerCount, 0, 1) : offloadedLayers > 0 ? 1 : 0;
-  const moeCpuLayers = model.modelType === 'moe' && layerCount > 0
-    ? clamp(config.moeCpuLayers, 0, offloadedLayers)
-    : 0;
-  const expertGpuRatio = layerCount > 0 ? clamp((offloadedLayers - moeCpuLayers) / layerCount, 0, 1) : offloadRatio;
+  const modelGb = Math.max(0, model.fileSizeBytes) / gib;
+  const layerCount = Math.max(0, Math.round(model.blockCount ?? 0));
+  const ngl = config.gpuLayers < 0 ? layerCount + 1 : Math.max(0, Math.round(config.gpuLayers));
+  const versionMatch = options?.kernelVersion?.match(/\bb(\d+)\b/i);
+  const buildNumber = versionMatch ? Number(versionMatch[1]) : null;
+  const outputFirst = buildNumber != null && buildNumber >= 11405;
+  const offloadedLayers = Math.min(layerCount, outputFirst ? Math.max(0, ngl - 1) : ngl);
+  const outputOffloaded = outputFirst ? ngl > 0 : ngl > layerCount;
+  const gpuStart = layerCount - offloadedLayers;
+  const offloadRatio = layerCount > 0 ? offloadedLayers / layerCount : ngl > 0 ? 1 : 0;
+  const cpuExpertLayers = model.modelType === 'moe' ? clamp(Math.round(config.moeCpuLayers), 0, layerCount) : 0;
+  const cpuExpertsOnGpuLayers = Math.max(0, cpuExpertLayers - gpuStart);
+  const expertGpuRatio = layerCount > 0 ? (offloadedLayers - cpuExpertsOnGpuLayers) / layerCount : offloadRatio;
   const missing: string[] = [];
-  if (model.fileSizeBytes <= 0) missing.push('file_size');
-
-  const repeatingWeightShare = layerCount > 0 ? (model.modelType === 'moe' ? 0.96 : 0.92) : 0.9;
-  const fixedWeightShare = 1 - repeatingWeightShare;
-  const expertWeightShare = model.modelType === 'moe' && (model.expertCount ?? 0) > 1 ? 0.55 : 0;
-  const denseWeightShare = 1 - expertWeightShare;
-  const fixedGpuRatio = offloadedLayers >= layerCount && layerCount > 0
-    ? 1
-    : offloadedLayers > 0
-      ? 0.35
-      : 0;
-  const repeatingGpuRatio = (denseWeightShare * offloadRatio) + (expertWeightShare * expertGpuRatio);
-  const weightsGpuGb = Math.min(
-    modelGb,
-    modelGb * ((repeatingWeightShare * repeatingGpuRatio) + (fixedWeightShare * fixedGpuRatio))
-  );
-  const weightsCpuGb = Math.max(0, modelGb - weightsGpuGb);
+  if (buildNumber == null && ngl > 0 && ngl <= layerCount) missing.push('kernel_layer_order');
+  if (!(model.fileSizeBytes > 0)) missing.push('file_size');
+  const layout = model.memoryLayout;
+  const tensorReady = layout?.version === 1 && layout.layers.length === layerCount && layerCount > 0
+    && [layout.total_bytes, layout.input_bytes, layout.output_bytes, layout.other_bytes].every((value) => Number.isFinite(value) && value >= 0)
+    && layout.total_bytes > 0 && layout.total_bytes <= Math.max(1, model.fileSizeBytes) * 1.05
+    && layout.layers.every((layer) => Number.isFinite(layer.weight_bytes) && Number.isFinite(layer.expert_bytes)
+      && layer.weight_bytes >= layer.expert_bytes && layer.expert_bytes >= 0)
+    && Math.abs(layout.layers.reduce((sum, layer) => sum + layer.weight_bytes, 0)
+      + layout.input_bytes + layout.output_bytes + layout.other_bytes - layout.total_bytes) <= 1;
+  let rawWeightsGpuGb: number;
+  let weightTotalGb = modelGb;
+  if (tensorReady) {
+    let gpuBytes = 0;
+    for (let index = gpuStart; index < layerCount; index += 1) {
+      const layer = layout!.layers[index];
+      gpuBytes += layer.weight_bytes - (index < cpuExpertLayers ? layer.expert_bytes : 0);
+    }
+    const outputGpu = outputOffloaded || (buildNumber == null && ngl > 0);
+    const tiedCopy = outputGpu && layout!.tied_output ? layout!.input_bytes : 0;
+    if (outputGpu) gpuBytes += layout!.output_bytes + tiedCopy;
+    if (ngl > 0) gpuBytes += layout!.other_bytes;
+    rawWeightsGpuGb = gpuBytes / gib;
+    weightTotalGb = (layout!.total_bytes + tiedCopy) / gib;
+    if (layout!.accuracy === 'upper_bound') missing.push('tensor_upper_bound');
+    if (ngl > 0 && layout!.other_bytes > 0) missing.push('other_tensor_placement');
+  } else {
+    missing.push('tensor_memory_layout');
+    const repeatingShare = layerCount > 0 ? model.modelType === 'moe' ? 0.96 : 0.92 : 0.9;
+    const expertShare = model.modelType === 'moe' && (model.expertCount ?? 0) > 1 ? 0.55 : 0;
+    const repeatingRatio = (1 - expertShare) * offloadRatio + expertShare * expertGpuRatio;
+    const outputRatio = outputOffloaded || (buildNumber == null && ngl > 0) ? 1 : 0;
+    rawWeightsGpuGb = Math.min(modelGb, modelGb * (repeatingShare * repeatingRatio + (1 - repeatingShare) * outputRatio));
+  }
 
   const embedding = model.embeddingLength && model.embeddingLength > 0 ? model.embeddingLength : 4096;
-  if (!model.embeddingLength) missing.push('embedding_length');
+  if (!model.embeddingLength && ngl > 0) missing.push('embedding_length');
   const headCount = Math.max(1, model.headCount ?? model.headCountKv ?? 32);
-
-  let kvGb: number | null = null;
-  if (config.kvCache) {
-    // KV 头总数。混合架构（nemotron_h_moe / lfm2 / gemma4 等）的 head_count_kv 是
-    // 逐层数组：非 0 = 该层 KV 头数，0 = Mamba 等无 KV 层，解析器已聚合为
-    // kvHeadsSum（勿再乘层数）；标量形式按层展开；都缺才退回 headCount 整层近似。
-    const kvHeadsTotal = model.kvHeadsSum != null
-      ? model.kvHeadsSum
-      : (model.headCountKv ?? model.headCount) != null
-        ? (model.headCountKv ?? model.headCount)! * layerCount
-        : null;
-    // per-head 维度缺省时按 llama.cpp 口径退回 embedding/headCount。
-    const keyLength = model.keyLength
-      ?? (model.headCount ? Math.floor(embedding / model.headCount) : null);
-    const valueLength = model.valueLength ?? keyLength;
-    // gemma 系 SWA 分层：SWA 层的 KV 只按滑动窗口分配（且用独立的
-    // key_length_swa），全注意力层才按全 ctx 计——两类的头数由解析器分列。
-    const swaSplitReady = model.kvHeadsSumFull != null && model.kvHeadsSumSwa != null
-      && model.slidingWindow != null && model.slidingWindow > 0
-      && model.keyLengthSwa != null;
-    if (layerCount > 0 && keyLength && valueLength && (swaSplitReady || kvHeadsTotal)) {
-      const parallelSlots = config.parallel > 0 ? clamp(Math.round(config.parallel), 1, 128) : 1;
-      const contextTokens = Math.max(1, config.ctxLength) * parallelSlots;
-      const keyBytes = cacheBytesPerValue(config.cacheTypeKEnabled ? config.cacheTypeK : 'f16');
-      const valueBytes = cacheBytesPerValue(config.cacheTypeVEnabled ? config.cacheTypeV : 'f16');
-      const kvBytes = swaSplitReady
-        ? contextTokens * model.kvHeadsSumFull! * ((keyLength * keyBytes) + (valueLength * valueBytes))
-          + model.slidingWindow! * model.kvHeadsSumSwa! * ((model.keyLengthSwa! * keyBytes) + (model.valueLengthSwa ?? model.keyLengthSwa)! * valueBytes)
-        : contextTokens
-          * kvHeadsTotal!
-          * ((keyLength * keyBytes) + (valueLength * valueBytes));
-      kvGb = kvBytes / gib;
-    } else {
+  const heads = kvHeadsByLayer(model, layerCount);
+  const keyLength = model.keyLength ?? (model.headCount ? Math.floor(embedding / model.headCount) : null);
+  const valueLength = model.valueLength ?? keyLength;
+  const ctx = Math.max(1, Math.round(config.ctxLength));
+  const effectiveParallel = config.parallel > 0 ? config.parallel : options?.effectiveParallel;
+  const parallel = effectiveParallel != null && effectiveParallel > 0 ? clamp(Math.round(effectiveParallel), 1, 128) : 1;
+  const paddedContext = Math.ceil(ctx / 256) * 256;
+  const contextPerStream = config.kvUnified ? paddedContext : Math.ceil(Math.floor(paddedContext / parallel) / 256) * 256;
+  const contextCapacity = contextPerStream * (config.kvUnified ? 1 : parallel);
+  if (!(effectiveParallel != null && effectiveParallel > 0) && ngl > 0 && (!config.kvUnified || model.slidingWindow || heads?.some((head) => head === 0))) missing.push('parallel_auto');
+  if (ngl > 0 && ['qwen35', 'qwen35moe', 'qwen3next'].includes(model.architecture ?? '')
+    && !validVector(model.kvHeadsByLayer, layerCount)) missing.push('hybrid_layer_layout');
+  const batch = clamp(config.batchSize || 1, 1, Math.min(8192, ctx));
+  const ubatch = clamp(config.physicalBatchSize || batch, 1, batch);
+  const keyType = config.cacheTypeKEnabled ? config.cacheTypeK : 'f16';
+  const valueType = config.cacheTypeVEnabled ? config.cacheTypeV : 'f16';
+  let rawKvGb: number | null = 0;
+  if (config.kvCache && ngl > 0 && offloadedLayers > 0) {
+    if (layerCount <= 0 || !heads || !keyLength || !valueLength) {
+      rawKvGb = null;
       if (layerCount <= 0) missing.push('block_count');
-      if (!kvHeadsTotal && !swaSplitReady) missing.push('head_count_kv');
+      if (!heads) missing.push('head_count_kv');
       if (!keyLength) missing.push('key_length');
       if (!valueLength) missing.push('value_length');
+    } else {
+      let kvBytes = 0;
+      const swaPatternReady = model.swaLayerPattern?.length === layerCount;
+      const aggregateSwa = !swaPatternReady && model.kvHeadsSumFull != null && model.kvHeadsSumSwa != null;
+      for (let index = gpuStart; index < layerCount; index += 1) {
+        if (heads[index] === 0) continue;
+        const isSwa = swaPatternReady && model.swaLayerPattern![index];
+        // -c 是全服务上下文，-np 将它分给槽位，不能再按并发数放大 KV。
+        const tokens = contextCapacity;
+        const swaTokens = model.slidingWindow
+          ? Math.ceil(Math.min(contextPerStream, model.slidingWindow * (config.kvUnified ? parallel : 1) + ubatch) / 256) * 256 * (config.kvUnified ? 1 : parallel)
+          : tokens;
+        const swaKey = model.keyLengthSwa ?? keyLength;
+        const swaValue = model.valueLengthSwa ?? model.keyLengthSwa ?? valueLength;
+        if (aggregateSwa && model.slidingWindow) {
+          const totalHeads = model.kvHeadsSumFull! + model.kvHeadsSumSwa!;
+          const fullShare = totalHeads > 0 ? model.kvHeadsSumFull! / totalHeads : 1;
+          kvBytes += heads[index] * (fullShare * tokens * (rowBytes(keyLength, keyType) + rowBytes(valueLength, valueType))
+            + (1 - fullShare) * swaTokens * (rowBytes(swaKey, keyType) + rowBytes(swaValue, valueType)));
+        } else {
+          kvBytes += heads[index] * (isSwa ? swaTokens : tokens)
+            * (rowBytes(isSwa ? swaKey : keyLength, keyType) + rowBytes(isSwa ? swaValue : valueLength, valueType));
+        }
+      }
+      rawKvGb = kvBytes / gib;
+      if (model.slidingWindow && !swaPatternReady && !aggregateSwa) missing.push('sliding_window_pattern');
+      if (model.kvHeadsSum != null && !validVector(model.kvHeadsByLayer, layerCount) && offloadedLayers < layerCount) missing.push('kv_heads_by_layer');
     }
-  } else {
-    kvGb = 0;
   }
 
-  const batch = clamp(config.batchSize || 1, 1, 8192);
-  const ubatch = clamp(config.physicalBatchSize || batch, 1, batch);
-  const effectiveBatch = Math.max(1, Math.min(batch, ubatch));
-  const ctxWindow = clamp(config.ctxLength || RECOMMENDED_CTX_LENGTH, 512, 262144);
-  const parallelSlots = config.parallel > 0 ? clamp(Math.round(config.parallel), 1, 128) : 1;
-  const activationBytes = 2;
-  const graphLayerFactor = clamp((layerCount || 32) / 32, 0.75, 3.5);
-  const graphMultiplier = config.fastAttention ? 18 : 28;
-  const graphScratchGb = (effectiveBatch * embedding * activationBytes * graphMultiplier * graphLayerFactor) / gib;
-  const attentionScratchGb = config.fastAttention
-    ? 0
-    : (effectiveBatch * Math.min(ctxWindow, 8192) * headCount * activationBytes) / gib;
-  const parallelScratchGb = Math.max(0, parallelSlots - 1) * Math.min(0.18, graphScratchGb * 0.25);
-  const computeGb = weightsGpuGb > 0
-    ? Math.max(0.12, graphScratchGb + attentionScratchGb + parallelScratchGb)
-    : 0;
-  const runtimeGb = weightsGpuGb > 0
-    ? 0.3 + Math.min(0.85, (layerCount || 32) * 0.006) + (parallelSlots > 1 ? 0.04 * (parallelSlots - 1) : 0)
-    : 0.05;
-  const analyticalGb = weightsGpuGb + (kvGb ?? 0);
-  const empiricalGb = computeGb + runtimeGb;
-  const subtotalGb = analyticalGb + empiricalGb;
-  // 校准语义分三种：
-  // - 分项校准（scratchRatio）：只对经验项乘实测得出的修正比，解析项原样保留。
-  //   改 ctx / ngl 时 KV 与权重按解析式走，不被旧样本的暂存误差按比例放大。
-  // - 整体兜底（overallRatio）：分项还原不可靠（解析项虚高，典型 MoE 权重公式）时，
-  //   只缩放 GPU 权重。KV 与计算暂存按解析式保留——否则 ctx 变大时会被旧样本
-  //   的权重误差按比例压小，预测越校越小。
-  // - 未传校准（默认）：整体 6% 安全余量。校准后也保留 6%，避免「实测/含余量预测」
-  //   再叠 2% 余量导致系统性略低于实测。
-  let totalGb: number;
-  let safetyGb: number;
-  const scratchRatio = calibration?.scratchRatio;
-  const overallRatio = calibration?.overallRatio;
-  if (subtotalGb <= 0) {
-    totalGb = 0;
-    safetyGb = 0;
-  } else if (scratchRatio != null && Number.isFinite(scratchRatio) && scratchRatio > 0) {
-    const empiricalCalibrated = empiricalGb * clampScratchRatio(scratchRatio);
-    const calibratedSubtotal = analyticalGb + empiricalCalibrated;
-    safetyGb = Math.max(0.15, calibratedSubtotal * 0.06);
-    totalGb = calibratedSubtotal + safetyGb;
-  } else if (overallRatio != null && Number.isFinite(overallRatio) && overallRatio > 0) {
-    const weightsCalibrated = weightsGpuGb * clampOverallRatio(overallRatio);
-    const calibratedSubtotal = weightsCalibrated + (kvGb ?? 0) + empiricalGb;
-    safetyGb = Math.max(0.15, calibratedSubtotal * 0.06);
-    totalGb = calibratedSubtotal + safetyGb;
-  } else {
-    safetyGb = Math.max(0.15, subtotalGb * 0.06);
-    totalGb = subtotalGb + safetyGb;
+  const graphFactor = clamp((layerCount || 32) / 32, 0.75, 3.5);
+  const graphScratch = ubatch * embedding * 2 * (config.fastAttention ? 18 : 28) * graphFactor / gib;
+  const attentionScratch = config.fastAttention ? 0 : ubatch * Math.min(ctx, 8192) * headCount * 2 / gib;
+  const rawComputeGb = ngl > 0 ? Math.max(0.12, graphScratch + attentionScratch + Math.max(0, parallel - 1) * Math.min(0.18, graphScratch * 0.25)) : 0;
+  const rawRuntimeGb = ngl > 0 ? 0.3 + Math.min(0.85, (layerCount || 32) * 0.006) + 0.04 * (parallel - 1) : 0;
+  if (config.kvCache && ngl > 0 && heads?.some((head) => head === 0) && ['qwen35', 'qwen35moe', 'qwen3next'].includes(model.architecture ?? '')) {
+    const stateSize = metadataNumber(model, 'ssm.state_size');
+    const innerSize = metadataNumber(model, 'ssm.inner_size');
+    const convolution = metadataNumber(model, 'ssm.conv_kernel');
+    const groups = metadataNumber(model, 'ssm.group_count');
+    if (stateSize && innerSize && convolution && groups) {
+      const recurrentLayers = heads.slice(gpuStart).filter((head) => head === 0).length;
+      const recurrentGb = recurrentLayers * parallel * 4 * (stateSize * innerSize + Math.max(0, convolution - 1) * (innerSize + 2 * groups * stateSize)) / gib;
+      if (rawKvGb != null) rawKvGb += recurrentGb;
+      if (config.speculativeDecoding !== 'off') missing.push('recurrent_rollback');
+    } else {
+      missing.push('recurrent_state');
+    }
   }
+  if (ngl > 0 && model.mmprojPath && (model.supportsVision || model.supportsAudio)) missing.push('projector_memory');
+  if (ngl > 0 && config.speculativeDecoding !== 'off') missing.push('draft_memory');
 
+  const ratio = (value: number | undefined, fallback: number, min: number, max: number) => value != null && Number.isFinite(value) && value > 0 ? clamp(value, min, max) : fallback;
+  const weightsRatio = ratio(calibration?.weightsRatio ?? calibration?.overallRatio, 1, 0.5, 1.3);
+  const kvRatio = ratio(calibration?.kvRatio, 1, 0.5, 1.5);
+  const computeRatio = ratio(calibration?.computeRatio ?? calibration?.scratchRatio, 1, 0.25, 4);
+  const weightsGpuGb = rawWeightsGpuGb * weightsRatio;
+  const kvGb = rawKvGb == null ? null : rawKvGb * kvRatio;
+  const computeGb = rawComputeGb * computeRatio;
+  const runtimeOffset = calibration?.runtimeOffsetGb;
+  const runtimeGb = ngl > 0 ? Math.max(0, rawRuntimeGb + (runtimeOffset != null && Number.isFinite(runtimeOffset) ? clamp(runtimeOffset, -rawRuntimeGb, 2) : 0)) : 0;
+  const analyticalGb = rawWeightsGpuGb + (rawKvGb ?? 0);
+  const empiricalGb = rawComputeGb + rawRuntimeGb;
+  const subtotal = weightsGpuGb + (kvGb ?? 0) + computeGb + runtimeGb;
+  const uncertainty = calibration?.uncertaintyGb;
+  const safetyGb = subtotal > 0 ? Math.max(0.15, subtotal * 0.06, uncertainty != null && Number.isFinite(uncertainty) ? clamp(uncertainty, 0, 4) : 0) : 0;
   return {
-    totalGb,
-    weightsGpuGb,
-    weightsCpuGb,
-    kvGb,
-    computeGb,
-    runtimeGb,
-    safetyGb,
-    offloadRatio,
-    expertGpuRatio,
-    missing,
-    analyticalGb,
-    empiricalGb,
+    totalGb: subtotal + safetyGb,
+    weightsGpuGb, weightsCpuGb: Math.max(0, weightTotalGb - weightsGpuGb), kvGb, computeGb, runtimeGb, safetyGb,
+    offloadRatio, expertGpuRatio, missing: [...new Set(missing)], analyticalGb, empiricalGb,
+    rawWeightsGpuGb, rawKvGb, rawComputeGb, rawRuntimeGb,
+    weightSource: tensorReady ? layout!.accuracy === 'upper_bound' ? 'tensor_upper_bound' : 'tensor' : 'file',
   };
 }

@@ -40,6 +40,55 @@ pub struct TuneHistoryEntry {
     pub timestamp: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelVramConfig {
+    pub gpu_layers: u32,
+    pub ctx_length: u32,
+    pub batch_size: u32,
+    pub ubatch_size: u32,
+    pub parallel: i32,
+    pub flash_attn: bool,
+    pub kv_offload: bool,
+    pub kv_unified: bool,
+    pub cache_type_k: String,
+    pub cache_type_v: String,
+    pub moe_cpu_layers: u32,
+    pub speculative: String,
+    #[serde(default)]
+    pub no_warmup: bool,
+    #[serde(default)]
+    pub draft_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelVramBuffers {
+    pub weights_gb: Option<f64>,
+    pub kv_gb: Option<f64>,
+    pub compute_gb: Option<f64>,
+    pub context: Option<u32>,
+    pub gpu_layers: Option<u32>,
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub parallel: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelVramMeasurement {
+    pub version: u32,
+    pub model_signature: String,
+    pub gpu_name: String,
+    pub gpu_total_gb: f64,
+    #[serde(default)]
+    pub kernel_version: Option<String>,
+    pub config: ModelVramConfig,
+    pub baseline_gb: Option<f64>,
+    pub loaded_gb: Option<f64>,
+    pub baseline_spread_gb: Option<f64>,
+    pub loaded_spread_gb: Option<f64>,
+    pub quality: String,
+    pub buffers: ModelVramBuffers,
+}
+
 /// 单条模型运行记录：启动参数 + 本次运行的实测表现。
 /// 单独存放在 model_records.json（与 config.json 同目录），
 /// 供显存预测校准、推荐启动参数和自动调参做数据支持。
@@ -64,7 +113,39 @@ pub struct ModelRunRecord {
     pub vram_gb: Option<f64>,
     /// 当时的显存预测值（GB），与 vram_gb 对比即可得到该模型的真实偏差。
     pub vram_predicted_gb: Option<f64>,
+    #[serde(default)]
+    pub vram_measurement: Option<ModelVramMeasurement>,
     pub note: Option<String>,
+}
+
+#[cfg(test)]
+mod vram_record_tests {
+    use super::*;
+
+    #[test]
+    fn old_launch_record_without_measurement_remains_readable() {
+        let record: ModelRunRecord = serde_json::from_str(
+            r#"{"model_id":"test-model","model_name":"测试模型","kind":"launch","timestamp":1,"ngl":41,"ctx":32768,"kv":"f16","vram_gb":8.5}"#,
+        ).unwrap();
+        assert_eq!(record.vram_gb, Some(8.5));
+        assert!(record.vram_measurement.is_none());
+        assert!(record.ncmoe.is_none());
+    }
+
+    #[test]
+    fn measurement_preserves_independent_cache_types_and_sampling_source() {
+        let measurement: ModelVramMeasurement = serde_json::from_str(
+            r#"{"version":1,"model_signature":"test-signature","gpu_name":"测试 GPU","gpu_total_gb":12.0,"kernel_version":"b11405","config":{"gpu_layers":41,"ctx_length":32768,"batch_size":512,"ubatch_size":128,"parallel":-1,"flash_attn":true,"kv_offload":true,"kv_unified":true,"cache_type_k":"q8_0","cache_type_v":"q4_1","moe_cpu_layers":20,"speculative":"off","no_warmup":false,"draft_tokens":null},"baseline_gb":1.0,"loaded_gb":9.0,"baseline_spread_gb":0.02,"loaded_spread_gb":0.03,"quality":"stable","buffers":{"weights_gb":6.0,"kv_gb":1.2,"compute_gb":0.3,"context":32768,"gpu_layers":41,"backend":"CUDA","parallel":4}}"#,
+        ).unwrap();
+        let restored: ModelVramMeasurement = serde_json::from_str(&serde_json::to_string(&measurement).unwrap()).unwrap();
+        assert_eq!(restored.config.cache_type_k, "q8_0");
+        assert_eq!(restored.config.cache_type_v, "q4_1");
+        assert_eq!(restored.config.ubatch_size, 128);
+        assert_eq!(restored.buffers.parallel, Some(4));
+        assert_eq!(restored.kernel_version.as_deref(), Some("b11405"));
+        assert_eq!(restored.baseline_gb, Some(1.0));
+        assert_eq!(restored.loaded_gb, Some(9.0));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,10 +240,10 @@ impl Fast27bModel {
         }
     }
 
-    /// BAT 启动器中的草稿方案。Heretic 不启用草稿头，Swift 使用 MTP。
+    /// BAT 启动器中的草稿方案：Heretic 使用 DFlash2，Swift 使用 MTP。
     pub fn spec(self) -> &'static str {
         match self {
-            Self::Heretic => "none",
+            Self::Heretic => "dflash2",
             Self::Swift => "mtp",
         }
     }
@@ -206,6 +287,9 @@ pub struct Fast27bConfig {
     pub draft_tokens: u32,
     /// 引擎默认输出上限（--default-max-tokens）；0 = 不传，交回引擎自身默认值。
     pub default_max_tokens: u32,
+    /// 默认思考预算（--default-thinking-budget）；0 = 省略预算参数，关闭预算限制。
+    /// 思考与正文共用输出额度，非 0 输出上限时预算必须严格小于输出上限。
+    pub default_thinking_budget: u32,
     /// 官方 llama.cpp webui 同源桥端口（引擎没有网页界面，桥负责提供页面并抹平协议差异）。
     pub bridge_port: u16,
     /// 引擎就绪后自动打开 dsh Web UI。
@@ -231,13 +315,32 @@ impl Default for Fast27bConfig {
             context_window: 262144,
             draft_tokens: 4,
             default_max_tokens: 32768,
+            default_thinking_budget: 8192,
             bridge_port: 8095,
             auto_open_dsh_web: true,
         }
     }
 }
 
+/// 校验思考预算与默认输出额度（不修改用户已保存的参数）。
+pub(crate) fn validate_fast27b_thinking_budget(
+    default_max_tokens: u32,
+    default_thinking_budget: u32,
+) -> Result<(), String> {
+    if default_max_tokens != 0 && default_thinking_budget >= default_max_tokens {
+        return Err(format!(
+            "默认思考预算（{}）必须小于默认输出上限（{}），为正文保留输出额度；设为 0 可关闭思考预算限制。",
+            default_thinking_budget, default_max_tokens
+        ));
+    }
+    Ok(())
+}
+
 impl Fast27bConfig {
+    pub fn validate_thinking_budget(&self) -> Result<(), String> {
+        validate_fast27b_thinking_budget(self.default_max_tokens, self.default_thinking_budget)
+    }
+
     pub fn selected_model(&self) -> Fast27bModel {
         self.selected_model.unwrap_or_else(|| {
             if self.model_path.to_ascii_lowercase().contains("swift") {
@@ -246,6 +349,23 @@ impl Fast27bConfig {
                 Fast27bModel::Heretic
             }
         })
+    }
+
+    /// 一键切换的纯配置变换：保存离开的模型路径，复用目标路径，其他参数保持原值。
+    pub fn with_selected_model(&self, model: Fast27bModel) -> Self {
+        let target_path = self.model_path_for(model);
+        let mut config = self.clone();
+        match self.selected_model() {
+            Fast27bModel::Heretic => config.heretic_model_path = self.model_path.clone(),
+            Fast27bModel::Swift => config.swift_model_path = self.model_path.clone(),
+        }
+        config.selected_model = Some(model);
+        config.model_path = target_path.clone();
+        match model {
+            Fast27bModel::Heretic => config.heretic_model_path = target_path,
+            Fast27bModel::Swift => config.swift_model_path = target_path,
+        }
+        config
     }
 
     /// 当前路径及显式保存的路径优先；未配置的模型仅探测本地文件，不下载、不改参数。
@@ -312,6 +432,38 @@ mod fast27b_config_tests {
             (65536, 2, 4096)
         );
         assert_eq!(config.port, 8094);
+        assert_eq!(config.default_thinking_budget, 8192);
+        // 新字段默认补齐，旧 ctx/draft/output 不迁移、不覆写；启动前会给出预算冲突提示。
+        assert!(config.validate_thinking_budget().is_err());
+    }
+
+    #[test]
+    fn thinking_budget_defaults_roundtrip_and_validation() {
+        let config = Fast27bConfig::default();
+        assert_eq!(config.default_thinking_budget, 8192);
+        assert!(config.validate_thinking_budget().is_ok());
+        assert_eq!(Fast27bModel::Heretic.spec(), "dflash2");
+        assert_eq!(Fast27bModel::Swift.spec(), "mtp");
+        for (output, budget, valid) in [
+            (32768, 8192, true),
+            (8192, 8192, false),
+            (4096, 8192, false),
+            (1, 0, true),
+            (0, 8192, true),
+            (0, 0, true),
+        ] {
+            assert_eq!(
+                validate_fast27b_thinking_budget(output, budget).is_ok(),
+                valid
+            );
+        }
+        let config: Fast27bConfig = serde_json::from_str(
+            r#"{"context_window":65536,"draft_tokens":2,"default_max_tokens":4096,"default_thinking_budget":0}"#,
+        ).unwrap();
+        let roundtrip: Fast27bConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.default_thinking_budget, 0);
+        assert!(roundtrip.validate_thinking_budget().is_ok());
     }
 
     #[test]
@@ -335,6 +487,43 @@ mod fast27b_config_tests {
         let roundtrip: Fast27bConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(roundtrip.selected_model(), Fast27bModel::Swift);
+    }
+
+    #[test]
+    fn selecting_model_only_changes_model_selection_and_remembers_both_paths() {
+        let original = Fast27bConfig {
+            model_path: "custom/heretic.ninfer".into(),
+            swift_model_path: "custom/swift-renamed.ninfer".into(),
+            context_window: 65536,
+            draft_tokens: 2,
+            default_max_tokens: 12000,
+            default_thinking_budget: 4096,
+            port: 9104,
+            lan: true,
+            bridge_port: 9105,
+            auto_open_dsh_web: false,
+            ..Fast27bConfig::default()
+        };
+        let switched = original.with_selected_model(Fast27bModel::Swift);
+        assert_eq!(switched.selected_model(), Fast27bModel::Swift);
+        assert_eq!(switched.model_path, "custom/swift-renamed.ninfer");
+        assert_eq!(switched.heretic_model_path, original.model_path);
+        assert_eq!(switched.swift_model_path, switched.model_path);
+        let mut restored = switched.with_selected_model(Fast27bModel::Heretic);
+        assert_eq!(restored.model_path, original.model_path);
+        assert_eq!(restored.swift_model_path, "custom/swift-renamed.ninfer");
+        // 将预期的选择/路径字段归回原值，所有其余保存参数必须逐字段完全相同。
+        restored.selected_model = original.selected_model;
+        restored.heretic_model_path = original.heretic_model_path.clone();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        let unchanged = switched.with_selected_model(Fast27bModel::Swift);
+        assert_eq!(
+            serde_json::to_value(&unchanged).unwrap(),
+            serde_json::to_value(&switched).unwrap()
+        );
     }
 
     #[test]

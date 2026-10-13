@@ -59,7 +59,10 @@ fn cache_path(file_path: &Path) -> PathBuf {
 // 不含这两个字段，必须递增版本触发重扫。
 // v24：修正多模态嵌入模型的能力判定——embedding 任务同样保留 mmproj（供图片/视频
 // 向量），只剥离推测解码侧车；旧缓存的 embedding 模型 mmproj 被错误置空，需重扫。
-const SCANNER_VERSION: u32 = 25;
+// v26：新增 tensor memory_layout、逐层 KV/SWA 及全注意力间隔，完整合并分片，
+// 以纳秒 mtime 失效旧扫描缓存，避免模型替换后沿用显存校准签名。
+// v27：有完整 dense attention 张量证据时展开标量 KV 头数，补齐 Spark 等模型逐层向量。
+const SCANNER_VERSION: u32 = 27;
 
 fn infer_video_support(
     name: &str,
@@ -203,7 +206,11 @@ fn collect_gguf_paths(dirs: &[PathBuf]) -> Vec<PathBuf> {
         }
         for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path().to_path_buf();
-            if path.extension().map(|ext| ext.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            if path
+                .extension()
+                .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+            {
                 if let Some((part, _count)) = split_gguf_info(&path) {
                     if part != 1 {
                         continue;
@@ -225,14 +232,14 @@ fn collect_gguf_paths(dirs: &[PathBuf]) -> Vec<PathBuf> {
     gguf_paths
 }
 
-/// Return (mtime_secs, size) for a file, or None on error.
+/// 文件缓存使用纳秒 mtime，覆盖同一秒内替换同尺寸 GGUF 的情况。
 fn file_meta(path: &Path) -> Option<(u64, u64)> {
     let meta = path.metadata().ok()?;
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
         .unwrap_or(0);
     Some((mtime, meta.len()))
 }
@@ -262,7 +269,12 @@ fn companion_signature(model_path: &Path) -> u64 {
         })
         .collect::<Vec<_>>();
     for subdir in ["MTP", "dspark", "dflash"] {
-        for entry in std::fs::read_dir(parent).ok().into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(parent)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let name = entry.file_name();
             if name.to_string_lossy().eq_ignore_ascii_case(subdir) {
                 let dir = entry.path();
@@ -271,9 +283,9 @@ fn companion_signature(model_path: &Path) -> u64 {
                         companions.extend(children.flatten().map(|child| child.path()).filter(
                             |path| {
                                 path.is_file()
-                                    && path.extension().is_some_and(|ext| {
-                                        ext.eq_ignore_ascii_case("gguf")
-                                    })
+                                    && path
+                                        .extension()
+                                        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
                             },
                         ));
                     }
@@ -424,9 +436,9 @@ pub fn detect_model_task(
     let pooling = gguf.and_then(|metadata| metadata.pooling_type.as_deref());
     let causal = gguf.and_then(|metadata| metadata.attention_causal);
 
-    let name_has_rerank = tokens.iter().any(|token| {
-        *token == "rerank" || *token == "reranker" || *token == "ranker"
-    });
+    let name_has_rerank = tokens
+        .iter()
+        .any(|token| *token == "rerank" || *token == "reranker" || *token == "ranker");
     if pooling == Some("rank") || name_has_rerank {
         return "rerank";
     }
@@ -441,9 +453,10 @@ pub fn detect_model_task(
         return "embedding";
     }
 
-    let name_has_embed = tokens.iter().any(|token| {
-        *token == "embed" || *token == "embedding" || *token == "embeddings"
-    }) || name_lower.contains("text-embedding")
+    let name_has_embed = tokens
+        .iter()
+        .any(|token| *token == "embed" || *token == "embedding" || *token == "embeddings")
+        || name_lower.contains("text-embedding")
         || name_lower.contains("nomic-embed")
         || name_lower.contains("bge-m3")
         || name_lower.contains("bge-large")
@@ -672,14 +685,10 @@ fn companion_stem_matches(stem: &str, kind: &str, target: Option<&GgufMetadata>)
         // DSpark / DFlash 侧车按 unsloth 发布命名识别：前缀 `dspark-<模型名>`
         // 或后缀 `<模型名>-dspark`（dflash 同理），其余兄弟文件不参与。
         "dspark" => {
-            stem.starts_with("dspark-")
-                || stem.starts_with("dspark_")
-                || stem.ends_with("-dspark")
+            stem.starts_with("dspark-") || stem.starts_with("dspark_") || stem.ends_with("-dspark")
         }
         "dflash" => {
-            stem.starts_with("dflash-")
-                || stem.starts_with("dflash_")
-                || stem.ends_with("-dflash")
+            stem.starts_with("dflash-") || stem.starts_with("dflash_") || stem.ends_with("-dflash")
         }
         _ => false,
     }
@@ -697,7 +706,12 @@ fn find_companion_gguf(
 
     for search_dir in companion_search_dirs(dir, kind) {
         // 某个子目录不可读只跳过该目录，不中断其余目录的侧车发现。
-        for entry in std::fs::read_dir(&search_dir).ok().into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&search_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let candidate = entry.path();
             if !candidate
                 .extension()
@@ -1007,6 +1021,9 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         embedding_length,
         head_count: gguf.as_ref().and_then(|g| g.head_count),
         head_count_kv: gguf.as_ref().and_then(|g| g.head_count_kv),
+        kv_heads_by_layer: gguf.as_ref().and_then(|g| g.kv_heads_by_layer.clone()),
+        swa_layer_pattern: gguf.as_ref().and_then(|g| g.swa_layer_pattern.clone()),
+        full_attention_interval: gguf.as_ref().and_then(|g| g.full_attention_interval),
         kv_heads_sum: gguf.as_ref().and_then(|g| g.kv_heads_sum),
         kv_heads_sum_full: gguf.as_ref().and_then(|g| g.kv_heads_sum_full),
         kv_heads_sum_swa: gguf.as_ref().and_then(|g| g.kv_heads_sum_swa),
@@ -1057,6 +1074,7 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         has_tool_template,
         model_task: model_task.to_string(),
         pooling_type: gguf.as_ref().and_then(|g| g.pooling_type.clone()),
+        memory_layout: gguf.as_ref().and_then(|g| g.memory_layout.clone()),
         gguf_metadata: enriched_metadata_entries(gguf.as_ref()),
     })
 }
@@ -1143,6 +1161,8 @@ mod tests {
         data.extend_from_slice(&1u64.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes());
+        let data_start = (data.len() + 31) / 32 * 32;
+        data.resize(data_start + 4, 0);
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -1175,6 +1195,8 @@ mod tests {
         data.extend_from_slice(&1u64.to_le_bytes());
         data.extend_from_slice(&tensor_type.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes());
+        let data_start = (data.len() + 31) / 32 * 32;
+        data.resize(data_start + 4, 0);
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -1183,7 +1205,8 @@ mod tests {
     }
 
     fn scanner_test_dir(label: &str) -> PathBuf {
-        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);        let dir = std::env::temp_dir().join(format!(
+        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
             "agent-llm-scanner-{}-{}-{}",
             std::process::id(),
             id,
@@ -1202,6 +1225,121 @@ mod tests {
     }
 
     #[test]
+    fn memory_metadata_serializes_and_old_cache_fields_default_to_none() {
+        let dir = scanner_test_dir("memory-metadata");
+        let path = dir.join("Qwen3.5-memory-test.gguf");
+        write_scanner_gguf_extra(
+            &path,
+            "qwen35",
+            4,
+            &[
+                ("qwen35.attention.head_count_kv", 2),
+                ("qwen35.full_attention_interval", 2),
+                ("qwen35.ssm.state_size", 128),
+            ],
+            &[],
+        );
+        let info = parse_model_info_from_path(&path).unwrap();
+        assert_eq!(info.kv_heads_by_layer, Some(vec![0, 2, 0, 2]));
+        assert_eq!(info.full_attention_interval, Some(2));
+        let layout = info.memory_layout.as_ref().unwrap();
+        assert_eq!(layout.version, 1);
+        assert_eq!(layout.layers.len(), 4);
+        assert_eq!(layout.layers[0].weight_bytes, 4);
+        assert_eq!(layout.total_bytes, 4);
+        assert!(info
+            .gguf_metadata
+            .contains(&("qwen35.ssm.state_size".to_string(), "128".to_string())));
+        let mut json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["memory_layout"]["layers"][0]["expert_bytes"], 0);
+        assert_eq!(json["kv_heads_by_layer"], serde_json::json!([0, 2, 0, 2]));
+        assert!(json.as_object().unwrap().contains_key("swa_layer_pattern"));
+        for key in [
+            "memory_layout",
+            "kv_heads_by_layer",
+            "swa_layer_pattern",
+            "full_attention_interval",
+        ] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let old: ModelInfo = serde_json::from_value(json.clone()).unwrap();
+        assert!(old.memory_layout.is_none());
+        assert!(old.kv_heads_by_layer.is_none());
+        assert!(old.swa_layer_pattern.is_none());
+        assert!(old.full_attention_interval.is_none());
+        let cache = dir.join("cache.json");
+        std::fs::write(
+            &cache,
+            serde_json::to_vec(&serde_json::json!({
+                "ver": SCANNER_VERSION - 1, "mtime": 1, "size": 4, "companions": 0, "info": json,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(load_cache(&cache, 1, 4, 0).is_none());
+        save_cache(&cache, 1, 4, 0, &info);
+        assert_eq!(
+            load_cache(&cache, 1, 4, 0).unwrap().memory_layout,
+            info.memory_layout
+        );
+        assert!(load_cache(&cache, 2, 4, 0).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scanner_folds_complete_split_layout_and_tracks_sibling_changes() {
+        let dir = scanner_test_dir("memory-split");
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_scanner_gguf(&first, "llama", 2);
+        assert!(parse_model_info_from_path(&first)
+            .unwrap()
+            .memory_layout
+            .is_none());
+        let before = companion_signature(&first);
+        write_scanner_gguf(&second, "llama", 2);
+        // 第二片是另一层，跨片同名 tensor 必须被拒绝。
+        assert!(parse_model_info_from_path(&first)
+            .unwrap()
+            .memory_layout
+            .is_none());
+        let mut bytes = std::fs::read(&second).unwrap();
+        let position = bytes
+            .windows(b"blk.0.attn_norm.weight".len())
+            .position(|value| value == b"blk.0.attn_norm.weight")
+            .unwrap();
+        bytes[position + 4] = b'1';
+        std::fs::write(&second, bytes).unwrap();
+        let info = parse_model_info_from_path(&first).unwrap();
+        let layout = info.memory_layout.unwrap();
+        assert_eq!(
+            layout
+                .layers
+                .iter()
+                .map(|layer| layer.weight_bytes)
+                .collect::<Vec<_>>(),
+            vec![4, 4]
+        );
+        assert_eq!(layout.total_bytes, 8);
+        assert_eq!(info.tensor_count, 2);
+        assert_ne!(before, companion_signature(&first));
+        let modified = second
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(file_meta(&second).unwrap().0, modified.as_nanos() as u64);
+        std::fs::remove_file(&second).unwrap();
+        assert!(parse_model_info_from_path(&first)
+            .unwrap()
+            .memory_layout
+            .is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn discovers_dspark_dflash_sidecars_in_root_and_subdir() {
         let dir = scanner_test_dir("dspark");
         let main = dir.join("Qwen3.5-30B-A3B-Q4_K_M.gguf");
@@ -1217,7 +1355,10 @@ mod tests {
 
         let info = parse_model_info_from_path(&main).expect("parse main model");
         assert!(info.dspark_draft_path.is_some(), "应发现根目录 DSpark 侧车");
-        assert!(info.dflash_draft_path.is_some(), "应发现 dflash/ 子目录侧车");
+        assert!(
+            info.dflash_draft_path.is_some(),
+            "应发现 dflash/ 子目录侧车"
+        );
         assert!(!info.is_dynamic_quant);
         assert!(info.mtp_draft_path.is_none());
     }
@@ -1261,7 +1402,9 @@ mod tests {
         let info = parse_model_info_from_path(&main).expect("parse PTQ1_0 model");
         assert_eq!(info.quantization.as_deref(), Some("PTQ1_0"));
         assert_eq!(
-            info.tensor_type_summary.first().map(|(kind, _)| kind.as_str()),
+            info.tensor_type_summary
+                .first()
+                .map(|(kind, _)| kind.as_str()),
             Some("PTQ1_0"),
             "未知类型不能停留在 UNKNOWN"
         );
@@ -1353,7 +1496,10 @@ mod tests {
             &main,
             "qwen35",
             24,
-            &[("qwen35.embedding_length", 2048), ("qwen35.pooling_type", 3)],
+            &[
+                ("qwen35.embedding_length", 2048),
+                ("qwen35.pooling_type", 3),
+            ],
             &[],
         );
         // 维度匹配的视觉投影
@@ -1365,7 +1511,13 @@ mod tests {
             &[("clip.has_vision_encoder", true)],
         );
         // 同目录放一个 MTP 草稿：对嵌入模型没有意义
-        write_scanner_gguf_extra(&dir.join("mtp-WeMM-Embedding-2B.gguf"), "qwen35", 1, &[], &[]);
+        write_scanner_gguf_extra(
+            &dir.join("mtp-WeMM-Embedding-2B.gguf"),
+            "qwen35",
+            1,
+            &[],
+            &[],
+        );
 
         let info = parse_model_info_from_path(&main).expect("parse embedding model");
         assert_eq!(info.model_task, "embedding");
@@ -1374,10 +1526,7 @@ mod tests {
             "多模态嵌入模型必须保留 mmproj（图片/视频向量依赖它）"
         );
         assert!(info.mmproj_supports_vision);
-        assert!(
-            info.mtp_draft_path.is_none(),
-            "嵌入模型不应挂推测解码侧车"
-        );
+        assert!(info.mtp_draft_path.is_none(), "嵌入模型不应挂推测解码侧车");
         assert!(!info.mtp_support, "嵌入模型不应报告 MTP 能力");
     }
 
@@ -1388,25 +1537,22 @@ mod tests {
             embedding_length: 2560,
             ..GgufMetadata::default()
         };
-        assert!(mmproj_is_compatible(Some(&main), &vision_projector("llava")));
+        assert!(mmproj_is_compatible(
+            Some(&main),
+            &vision_projector("llava")
+        ));
         assert!(mmproj_is_compatible(None, &vision_projector("llava")));
 
         let audio_matched = GgufMetadata {
             mmproj_supports_audio: true,
-            metadata_entries: vec![(
-                "clip.audio.projection_dim".to_string(),
-                "2560".to_string(),
-            )],
+            metadata_entries: vec![("clip.audio.projection_dim".to_string(), "2560".to_string())],
             ..GgufMetadata::default()
         };
         assert!(mmproj_is_compatible(Some(&main), &audio_matched));
 
         let audio_mismatched = GgufMetadata {
             mmproj_supports_audio: true,
-            metadata_entries: vec![(
-                "clip.audio.projection_dim".to_string(),
-                "4096".to_string(),
-            )],
+            metadata_entries: vec![("clip.audio.projection_dim".to_string(), "4096".to_string())],
             ..GgufMetadata::default()
         };
         assert!(!mmproj_is_compatible(Some(&main), &audio_mismatched));

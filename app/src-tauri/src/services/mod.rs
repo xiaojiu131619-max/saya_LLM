@@ -5,6 +5,7 @@ pub mod dsh_installer;
 pub mod dsh_manager;
 pub mod embedding_manager;
 pub mod fast27b_manager;
+pub mod fast27b_metrics;
 pub mod ffmpeg_installer;
 pub mod gguf_parser;
 pub mod gpu_monitor;

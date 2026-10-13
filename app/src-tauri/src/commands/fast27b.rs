@@ -3,6 +3,7 @@
 //! - `fast27b_start`        启动引擎（spawn 旁路进程，事件：fast27b:ready / fast27b:stopped / fast27b:error / fast27b:log）
 //! - `fast27b_stop`         停止引擎（Job Object 整树回收）
 //! - `fast27b_get_status`   运行状态汇总（含 /v1/models 探活结果）
+//! - `fast27b_get_metrics`  最近 24 小时、最多 5000 条真实请求性能历史（纯内存快照）
 //! - `fast27b_get_logs`     读取 fast27b 日志环形缓冲
 //! - `fast27b_clear_logs`   清空 fast27b 日志
 //! - `fast27b_get_config` / `fast27b_save_config`  读取/保存 fast27b 配置段
@@ -18,7 +19,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::models::app_state::{AppState, Fast27bConfig, Fast27bModel};
 use crate::services::dsh_config as dsh_config_service;
-use crate::services::{dsh_manager, fast27b_manager, webui_bridge};
+use crate::services::{dsh_manager, fast27b_manager, fast27b_metrics, webui_bridge};
 
 /// 从应用配置读取 fast27b 配置段。
 fn fast27b_config_from_state(state: &State<'_, AppState>) -> Fast27bConfig {
@@ -40,6 +41,7 @@ fn options_from_config(config: &Fast27bConfig) -> fast27b_manager::Fast27bStartO
         context_window: config.context_window,
         draft_tokens: config.draft_tokens,
         default_max_tokens: config.default_max_tokens,
+        default_thinking_budget: config.default_thinking_budget,
     }
 }
 
@@ -48,6 +50,7 @@ fn options_from_config(config: &Fast27bConfig) -> fast27b_manager::Fast27bStartO
 pub fn fast27b_start(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let config = fast27b_config_from_state(&state);
     let options = options_from_config(&config);
+    config.validate_thinking_budget()?;
     // 引擎一起来就把官方 webui 的同源桥拉起来：用户随后点「打开 WebUI」直接可用。
     if let Err(err) = webui_bridge::ensure(
         config.bridge_port,
@@ -108,6 +111,7 @@ pub fn fast27b_start(state: State<'_, AppState>, app: AppHandle) -> Result<(), S
 pub async fn fast27b_restart(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let config = fast27b_config_from_state(&state);
     let options = options_from_config(&config);
+    config.validate_thinking_budget()?;
     // 引擎重启后桥的上游端口不变，但桥进程可能已随旧引擎退出：先确保桥在。
     if let Err(err) = webui_bridge::ensure(
         config.bridge_port,
@@ -160,6 +164,35 @@ pub async fn fast27b_restart(state: State<'_, AppState>, app: AppHandle) -> Resu
     .map_err(|e| format!("fast27b 重启任务异常：{e}"))?
 }
 
+/// 一键选择 Heretic / Swift；先校验目标资源再保存，运行中通过现有重启/就绪事件重载。
+#[tauri::command]
+pub async fn fast27b_select_model(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    model: Fast27bModel,
+) -> Result<(), String> {
+    let was_running = {
+        let mut guard = state.config.lock().map_err(|error| error.to_string())?;
+        let previous = guard.fast27b.clone();
+        let selected = previous.with_selected_model(model);
+        // 缺文件/无效预算不能先停旧引擎，未运行时同样拒绝保存不可启动的模型选择。
+        fast27b_manager::validate_options(&options_from_config(&selected))?;
+        let switched =
+            previous.selected_model() != model || previous.model_path != selected.model_path;
+        let running = switched && fast27b_manager::is_fast27b_running();
+        let mut next = (*guard).clone();
+        next.fast27b = selected;
+        crate::commands::config::persist_config_public(&next)?;
+        *guard = next;
+        running
+    };
+    if was_running {
+        // 锁已释放；复用 fast27b:progress/ready/stopped/error 流程，等待期间 UI 能继续刷新。
+        fast27b_restart(state, app).await?;
+    }
+    Ok(())
+}
+
 /// 停止 fast27b 引擎（Job Object 整树回收），并广播 fast27b:stopped。
 #[tauri::command]
 pub fn fast27b_stop(app: AppHandle) -> Result<(), String> {
@@ -205,10 +238,12 @@ pub struct Fast27bStatus {
     pub api_key: String,
     /// 配置的上下文窗口。
     pub context_window: u32,
-    /// 配置的 MTP 草稿长度。
+    /// 配置的 DFlash2 / MTP 草稿长度。
     pub draft_tokens: u32,
     /// 配置的引擎默认输出上限（`--default-max-tokens`）；0 = 未设，由引擎自身默认决定。
     pub default_max_tokens: u32,
+    /// 默认思考预算（`--default-thinking-budget`）；0 = 省略预算参数，关闭预算限制。
+    pub default_thinking_budget: u32,
     /// 官方 webui 同源桥端口（配置）。
     pub bridge_port: u16,
     /// 就绪后自动打开 dsh Web。
@@ -267,11 +302,18 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
         context_window: config.context_window,
         draft_tokens: config.draft_tokens,
         default_max_tokens: config.default_max_tokens,
+        default_thinking_budget: config.default_thinking_budget,
         bridge_port: config.bridge_port,
         auto_open_dsh_web: config.auto_open_dsh_web,
         dsh_bound_model: if bound_is_fast27b { bound_model } else { None },
         dsh_web_url: format!("http://127.0.0.1:{}", dsh_port),
     }
+}
+
+/// 最近 24 小时、最多 5000 条真实请求性能历史；独立于网络探活与状态/配置锁。
+#[tauri::command]
+pub fn fast27b_get_metrics() -> fast27b_metrics::Fast27bMetricsSnapshot {
+    fast27b_metrics::snapshot()
 }
 
 /// 读取 fast27b 日志（环形缓冲全量）。
@@ -292,6 +334,7 @@ pub fn fast27b_save_config(
     state: State<'_, AppState>,
     config: Fast27bConfig,
 ) -> Result<(), String> {
+    config.validate_thinking_budget()?;
     let mut guard = state.config.lock().map_err(|e| e.to_string())?;
     let mut new_config = (*guard).clone();
     if fast27b_manager::is_fast27b_running()

@@ -21,6 +21,7 @@ import {
 } from '@/lib/desktopState';
 import { getDesktopVideoRuntimeInfo, getExternalApiKeyForSession, logDesktopEvent } from '@/lib/ipc';
 import type { DesktopModelInfo, PingResult } from '@/lib/ipc';
+import type { VramSnapshot } from '@/lib/vramMeasurement';
 
 // ---------------------------------------------------------------------------
 // 传输层再导出
@@ -515,6 +516,10 @@ export function toFrontendModel(raw: DesktopModelInfo): ModelInfo {
     headCount: raw.head_count ?? undefined,
     headCountKv: raw.head_count_kv ?? undefined,
     kvHeadsSum: raw.kv_heads_sum ?? undefined,
+    kvHeadsByLayer: raw.kv_heads_by_layer ?? undefined,
+    swaLayerPattern: raw.swa_layer_pattern ?? undefined,
+    fullAttentionInterval: raw.full_attention_interval ?? undefined,
+    memoryLayout: raw.memory_layout ?? undefined,
     kvHeadsSumFull: raw.kv_heads_sum_full ?? undefined,
     kvHeadsSumSwa: raw.kv_heads_sum_swa ?? undefined,
     slidingWindow: raw.sliding_window ?? undefined,
@@ -845,6 +850,18 @@ export async function startDesktopServer(
     ? { ...apiConfig, apiKey: storedApiKey ?? undefined }
     : undefined;
   await invoke('start_server', { config: buildServerConfig(model, port, executablePath, runtimeApiConfig, tools) });
+}
+
+export async function getDesktopVramSnapshot(): Promise<VramSnapshot | null> {
+  if (!isDesktopRuntime()) return null;
+  const [hardware, devices] = await Promise.all([
+    invoke<DesktopHardwareInfo>('get_hardware_info').catch(() => null),
+    invoke<string[]>('list_gpus').catch(() => []),
+  ]);
+  if (!hardware || devices.length !== 1 || devices[0] !== hardware.gpu_name
+    || !Number.isFinite(hardware.used_vram) || !Number.isFinite(hardware.total_vram)
+    || hardware.used_vram < 0 || hardware.total_vram <= 0 || !hardware.gpu_name) return null;
+  return { gpu_name: hardware.gpu_name, gpu_total_gb: hardware.total_vram, used_gb: hardware.used_vram };
 }
 
 export async function getDesktopSystemStats(previous: SystemStats): Promise<SystemStats | null> {

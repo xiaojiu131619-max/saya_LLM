@@ -129,7 +129,9 @@ pub fn run() {
             commands::fast27b::fast27b_start,
             commands::fast27b::fast27b_stop,
             commands::fast27b::fast27b_restart,
+            commands::fast27b::fast27b_select_model,
             commands::fast27b::fast27b_get_status,
+            commands::fast27b::fast27b_get_metrics,
             commands::fast27b::fast27b_get_logs,
             commands::fast27b::fast27b_clear_logs,
             commands::fast27b::fast27b_save_config,
@@ -169,6 +171,7 @@ pub fn run() {
             // 回扫 fast-27b 的 engine.log 尾部：应用重启后若上一台引擎实例死在 worker 崩溃上
             // 且其后没有新的 engine ready，仍要在状态面板显示失效（拉起新实例时才清空）。
             services::fast27b_manager::seed_fault_from_log_file();
+            services::fast27b_metrics::initialize();
 
             // 系统托盘：关窗后常驻后台，左键单击恢复窗口，右键菜单提供"显示/退出"。
             let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;

@@ -1,3 +1,6 @@
+import { fast27bGetMetrics, type Fast27bMetricsSnapshot } from './ipc/fast27b';
+import { isDesktopRuntime } from './desktopRuntime';
+
 /**
  * 跨模块共享的模块级单例状态。
  *
@@ -29,4 +32,48 @@ export function getLastPingReachable(): boolean | null {
 
 export function setLastPingReachable(value: boolean | null): void {
   lastPingReachable = value;
+}
+
+let fast27bMetrics: Fast27bMetricsSnapshot | null = null;
+const fast27bMetricsListeners = new Set<() => void>();
+let fast27bMetricsTimer: number | null = null;
+let fast27bMetricsRefresh: Promise<void> | null = null;
+
+export function getFast27bMetricsSnapshot(): Fast27bMetricsSnapshot | null {
+  return fast27bMetrics;
+}
+
+export function refreshFast27bMetrics(): Promise<void> {
+  if (!isDesktopRuntime()) return Promise.resolve();
+  if (fast27bMetricsRefresh) return fast27bMetricsRefresh;
+  fast27bMetricsRefresh = (async () => {
+    try {
+      const next = await fast27bGetMetrics();
+      if (next) {
+        fast27bMetrics = next;
+        fast27bMetricsListeners.forEach((notify) => notify());
+      }
+    } catch {
+      // 瞬时读取失败时保留最近一次有效快照，不把图表清成零。
+    } finally {
+      fast27bMetricsRefresh = null;
+    }
+  })();
+  return fast27bMetricsRefresh;
+}
+
+export function subscribeFast27bMetrics(notify: () => void): () => void {
+  if (!isDesktopRuntime()) return () => {};
+  fast27bMetricsListeners.add(notify);
+  if (fast27bMetricsTimer === null) {
+    void refreshFast27bMetrics();
+    fast27bMetricsTimer = window.setInterval(() => void refreshFast27bMetrics(), 1000);
+  }
+  return () => {
+    fast27bMetricsListeners.delete(notify);
+    if (fast27bMetricsListeners.size === 0 && fast27bMetricsTimer !== null) {
+      window.clearInterval(fast27bMetricsTimer);
+      fast27bMetricsTimer = null;
+    }
+  };
 }

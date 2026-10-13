@@ -480,6 +480,151 @@
     .model-toolbar-view-controls { display: flex; flex-wrap: wrap; }
   }
 
+  /* 模型加载页按侧栏后的内容宽度切换，保持原有紧凑参数分栏。 */
+  .model-load-page {
+    container: model-load / inline-size;
+    width: 100%;
+    max-width: 1520px;
+  }
+
+  .model-load-compact-head {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    margin-bottom: 0.375rem;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--app-bg);
+    padding: 0.375rem 0 0.625rem;
+  }
+
+  .model-load-compact-identity {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .model-load-compact-memory {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-top: 0.625rem;
+  }
+
+  .model-load-memory-chart {
+    flex: 1;
+    min-width: min(360px, 100%);
+  }
+
+  .model-load-memory-bar {
+    display: flex;
+    height: 5px;
+    min-width: 0;
+    overflow: hidden;
+    gap: 1px;
+    border-radius: 999px;
+    background: var(--surface-muted);
+  }
+
+  .model-load-compact-toolbar {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.625rem;
+  }
+
+  .model-load-compact-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  .model-load-param-grid,
+  .model-load-advanced-grid {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-load-param-section,
+  .model-load-param-column {
+    container: model-param / inline-size;
+  }
+
+  .model-load-param-row {
+    display: grid;
+    min-width: 0;
+    gap: 0.625rem;
+    padding: 0.625rem 0.75rem;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-load-param-control {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .model-load-param-row--toggle {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .model-load-param-control select {
+    min-width: 0;
+  }
+
+  .model-load-param-row--text,
+  .model-load-param-row--idle {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  @container model-load (min-width: 560px) {
+    .model-load-compact-identity {
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+    }
+  }
+
+  @container model-load (min-width: 680px) {
+    .model-load-param-grid,
+    .model-load-advanced-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .model-load-param-section + .model-load-param-section,
+    .model-load-param-column + .model-load-param-column {
+      border-left: 1px solid var(--border-subtle);
+    }
+  }
+
+  @container model-load (min-width: 1180px) {
+    .model-load-compact-identity {
+      grid-template-columns: minmax(0, 1fr) 240px;
+    }
+  }
+
+  @container model-param (min-width: 350px) {
+    .model-load-param-row:not(.model-load-param-row--text):not(.model-load-param-row--idle) {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+  }
+
+  @container model-param (min-width: 560px) {
+    .model-load-param-row.model-load-param-row--text {
+      grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr);
+      align-items: center;
+    }
+  }
+
   .model-dotted-surface { background: var(--app-bg); }
 
   .model-glass-card {
