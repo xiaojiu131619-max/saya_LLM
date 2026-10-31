@@ -22,6 +22,16 @@
 | [DYNAMIC_GGUF_DRAFTER_PLAN.md](plans/DYNAMIC_GGUF_DRAFTER_PLAN.md) | 动态 GGUF Drafter 计划 |
 | [WIN7_REPLICA_PLAN.md](plans/WIN7_REPLICA_PLAN.md) | Windows 7 复刻落地计划书 |
 
+## reports/ —— 专题报告与验证记录
+
+| 文档 | 内容 |
+| --- | --- |
+| [GITHUB_UPLOAD_2026-11-01.md](reports/GITHUB_UPLOAD_2026-11-01.md) | 2026-11-01 上传报道：提交范围、审查修复清单与验证结果 |
+| [AUTOTUNE_OPTIMIZATION_2026-10-15.md](reports/AUTOTUNE_OPTIMIZATION_2026-10-15.md) | 自动调参优化记录 |
+| [CHAT_ATTACHMENT_INPUT_2026-10-15.md](reports/CHAT_ATTACHMENT_INPUT_2026-10-15.md) | 对话附件输入实现记录 |
+| [FAST27B_ATTACHMENTS_2026-10-15.md](reports/FAST27B_ATTACHMENTS_2026-10-15.md) | fast-27b 附件支持记录 |
+| [ui-layout-review-2026-10-13/](reports/ui-layout-review-2026-10-13/) | 界面布局评审与前后对比截图 |
+
 ## archive/ —— 已完成/过时文档（仅作历史参考）
 
 | 文档 | 内容 |
