@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Agent LLM",
+        "title": "拾壹",
         "width": 1200,
         "height": 780,
         "minWidth": 800,
@@ -22,7 +22,7 @@
         "center": true,
         "decorations": false,
         "shadow": true,
-        "dragDropEnabled": true,
+        "dragDropEnabled": false,
         "backgroundColor": "#00000000",
         "transparent": true,
         "windowEffects": {

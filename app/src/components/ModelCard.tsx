@@ -34,12 +34,20 @@ function formatRecentUsedAt(usedAt: number) {
 
 export default function ModelCard({ model, index, isSingleColumn = false, recentUsedAt }: ModelCardProps) {
   const { state, dispatch } = useApp();
-  const [hovered, setHovered] = useState(false);
   const [quickStarting, setQuickStarting] = useState(false);
   const themeGroup = getModelThemeGroup(model);
   const launchMemory = state.modelLaunchMemories[model.id];
-  const isHighlighted = hovered || state.selectedModelId === model.id;
+  const isHighlighted = state.selectedModelId === model.id;
   const recentTitle = recentUsedAt ? `最近使用：${formatRecentUsedAt(recentUsedAt)}` : undefined;
+  const isBusy = quickStarting || model.status === 'loading' || model.status === 'downloading';
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      handleClick();
+    }
+  };
 
   const handleClick = () => {
     dispatch({ type: 'SET_SELECTED_MODEL', payload: model.id });
@@ -49,7 +57,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
   const handleQuickChat = (e: React.MouseEvent) => {
     e.stopPropagation();
     dispatch({ type: 'MARK_MODEL_RECENTLY_USED', payload: { modelId: model.id } });
-    dispatch({ type: 'SET_ACTIVE_MODEL', payload: model.id });
+    dispatch({ type: 'ACTIVATE_MODEL', payload: model.id });
     dispatch({ type: 'SET_VIEW', payload: 'chat' });
   };
 
@@ -59,12 +67,12 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
 
     if (model.status === 'loaded') {
       dispatch({ type: 'MARK_MODEL_RECENTLY_USED', payload: { modelId: model.id } });
-      dispatch({ type: 'SET_ACTIVE_MODEL', payload: model.id });
+      dispatch({ type: 'ACTIVATE_MODEL', payload: model.id });
       dispatch({ type: 'SET_VIEW', payload: 'chat' });
       return;
     }
 
-    if (!isDesktopRuntime() || !model.filePath || quickStarting) return;
+    if (!isDesktopRuntime() || !model.filePath || isBusy) return;
 
     const rememberedModel = { ...model, loadConfig: launchMemory.config };
     const unlisteners: Array<() => void> = [];
@@ -74,21 +82,26 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
     dispatch({ type: 'SET_APP_STATUS', payload: `正在使用记忆参数快速启动 ${model.name}...` });
 
     try {
+      let resolveReady: () => void = () => {};
+      let rejectReady: (error: Error) => void = () => {};
       const ready = new Promise<void>((resolve, reject) => {
-        void listenDesktopEvent<{ message?: string }>('server:ready', () => resolve())
-          .then((unlisten) => unlisteners.push(unlisten));
-        void listenDesktopEvent<{ title?: string; details?: string }>('server:error', (error) => {
-          reject(new Error(error.title || error.details || 'llama-server 启动失败'));
-        }).then((unlisten) => unlisteners.push(unlisten));
+        resolveReady = resolve;
+        rejectReady = reject;
       });
+      await Promise.all([
+        listenDesktopEvent<{ message?: string }>('server:ready', () => resolveReady())
+          .then((unlisten) => unlisteners.push(unlisten)),
+        listenDesktopEvent<{ title?: string; details?: string }>('server:error', (error) => {
+          rejectReady(new Error(error.title || error.details || 'llama-server 启动失败'));
+        }).then((unlisten) => unlisteners.push(unlisten)),
+      ]);
 
       await startDesktopServer(rememberedModel, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools);
       await ready;
 
       dispatch({ type: 'REMEMBER_MODEL_LAUNCH_CONFIG', payload: { modelId: model.id, config: launchMemory.config } });
       dispatch({ type: 'MARK_MODEL_RECENTLY_USED', payload: { modelId: model.id } });
-      dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: model.id, status: 'loaded' } });
-      dispatch({ type: 'SET_ACTIVE_MODEL', payload: model.id });
+      dispatch({ type: 'ACTIVATE_MODEL', payload: model.id });
       dispatch({ type: 'SET_SERVER_RUNNING', payload: true });
       dispatch({ type: 'SET_APP_STATUS', payload: `已使用记忆参数启动 ${model.name}。` });
       dispatch({ type: 'SET_VIEW', payload: 'chat' });
@@ -129,17 +142,10 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
     return (
       <article
         style={{ animationDelay: `${Math.min(index * 10, 80)}ms` }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
         role="button"
         tabIndex={0}
         onClick={handleClick}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            handleClick();
-          }
-        }}
+        onKeyDown={handleKeyDown}
         aria-label={`打开 ${model.name} 的加载参数`}
         className={`anim-card-rise model-glass-card group flex min-h-[52px] w-full cursor-pointer items-center gap-2 px-3 py-1.5 ${
           isHighlighted ? 'model-glass-card--active' : ''
@@ -201,10 +207,10 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         )}
 
         <span className="ml-auto flex flex-shrink-0 items-center gap-1">
-          {launchMemory && (
+          {launchMemory && model.status !== 'loaded' && (
             <button
               onClick={(event) => void handleQuickLaunch(event)}
-              disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
+              disabled={!model.filePath || !isDesktopRuntime() || isBusy}
               className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
               title={formatLaunchMemoryTitle(launchMemory.config)}
             >
@@ -239,29 +245,42 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
     );
   }
 
-  // 多列模式：Win10 磁贴风格。整块卡片可点进入参数页，信息按行紧凑排布。
+  // 多列模式保留磁贴密度，规格、能力与操作分别对齐。
   return (
     <article
       style={{ animationDelay: `${Math.min(index * 15, 80)}ms` }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       role="button"
       tabIndex={0}
       onClick={handleClick}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          handleClick();
-        }
-      }}
+      onKeyDown={handleKeyDown}
       aria-label={`打开 ${model.name} 的加载参数`}
-      className={`anim-card-rise model-tile flex w-full cursor-pointer flex-col ${
-        isHighlighted ? 'model-glass-card--active' : ''
-      } ${model.status === 'loading' ? 'model-glass-card--loading' : ''}`}
+      className={`anim-card-rise model-tile flex min-w-0 w-full cursor-pointer flex-col ${
+        state.selectedModelId === model.id ? 'model-tile--selected' : ''
+      } ${model.status === 'loaded' ? 'model-tile--loaded' : ''}`}
     >
-      <div className="flex min-w-0 items-start gap-2.5 p-3 pb-2">
+      <div className="flex items-center justify-between gap-2 px-3 pt-3">
         <span
-          className="relative flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-lg"
+          className={`model-tile-status model-tile-status--${model.status} inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-xs`}
+          role="status"
+        >
+          {model.status === 'loading' ? (
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusClass}`} aria-hidden="true" />
+          )}
+          {statusLabel}
+        </span>
+        {recentUsedAt && (
+          <span title={recentTitle} className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs text-[var(--text-secondary)]">
+            <History className="h-3 w-3 text-[var(--accent)]" />
+            最近使用
+          </span>
+        )}
+      </div>
+
+      <div className="flex min-w-0 items-start gap-2.5 px-3 pb-2 pt-2">
+        <span
+          className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg"
           style={{ background: `${model.themeColorSolid}1f` }}
         >
           <ModelFamilyLogo
@@ -274,80 +293,98 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
             className="relative"
             fallback={<span className="relative text-base font-semibold" style={{ color: model.themeColorSolid }}>{themeGroup.icon}</span>}
           />
-          <span
-            className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-[var(--surface)] ${statusClass}`}
-            title={statusLabel}
-          />
         </span>
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[13px] font-semibold leading-tight text-[var(--text-primary)] [overflow-wrap:anywhere] dark:text-[var(--text-primary)]">{model.name}</h3>
-          <div
-            className="mono-font mt-0.5 truncate text-[10px] text-[var(--text-tertiary)]"
-            title={`${model.params} · ${model.quant} · ${model.fileSize}`}
+          <h3
+            className="line-clamp-2 min-h-[2.5em] text-sm font-semibold leading-tight text-[var(--text-primary)] [overflow-wrap:anywhere]"
+            title={model.name}
           >
-            {model.params} · {model.quant} · {model.fileSize}
+            {model.name}
+          </h3>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-secondary)]">
+            <span className="mono-font truncate font-semibold text-[var(--text-primary)]" title={`${model.params} · ${model.modelType === 'moe' ? 'MoE' : '稠密'}`}>{model.params}</span>
+            <span className="text-[var(--text-tertiary)]" aria-hidden="true">·</span>
+            <span className="shrink-0">{model.modelType === 'moe' ? 'MoE' : '稠密'}</span>
           </div>
         </div>
-        {recentUsedAt && (
-          <span title={recentTitle} className="flex-shrink-0">
-            <History className="h-3.5 w-3.5 text-[var(--accent)]" />
-          </span>
-        )}
       </div>
 
-      {model.modelTask && model.modelTask !== 'chat' && (
-        <div className="px-3">
-          <ModelTaskPill model={model} />
+      <dl className="model-tile-specs mx-3 grid grid-cols-2 gap-x-2 gap-y-1.5 rounded-lg border border-[var(--border-subtle)] px-2.5 py-2">
+        <div className="flex min-w-0 flex-col gap-1">
+          <dt className="text-xs text-[var(--text-secondary)]">量化</dt>
+          <dd className="mono-font truncate text-xs font-semibold text-[var(--text-primary)]" title={model.quant}>{model.quant}</dd>
         </div>
-      )}
+        <div className="flex min-w-0 flex-col gap-1">
+          <dt className="text-xs text-[var(--text-secondary)]">文件大小</dt>
+          <dd className="mono-font whitespace-nowrap text-xs font-semibold text-[var(--text-primary)]">{model.fileSize}</dd>
+        </div>
+      </dl>
 
-      <div className="px-3">
-        <CapabilityBadges model={model} dense twoLine />
+      <div className="model-tile-capabilities flex min-h-9 flex-wrap content-start items-center gap-1.5 px-3 py-2">
+        <ModelTaskPill model={model} />
+        <CapabilityBadges model={model} twoLine />
       </div>
 
-      <div className="mt-auto flex items-center justify-between gap-2 px-3 pb-2.5 pt-2.5">
-        <span
-          className="mono-font min-w-0 truncate text-[10px] text-[var(--text-secondary)]"
-          title={`上下文 ${formatCtx(model.ctxLength)}${model.avgTokensPerSec ? ` · 历史 ${model.avgTokensPerSec.toFixed(1)} tok/s` : ''}`}
-        >
-          {formatCtx(model.ctxLength)}
-          {model.avgTokensPerSec ? ` · ${model.avgTokensPerSec.toFixed(1)} tok/s` : ''}
+      <div className="mt-auto flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2 text-xs text-[var(--text-secondary)]">
+        <span className="mono-font whitespace-nowrap" title={`模型声明上下文：${model.ctxLength ? model.ctxLength.toLocaleString() : '暂无'}`}>
+          {model.ctxLength ? `上下文 ${formatCtx(model.ctxLength).replace(' ctx', '')}` : '上下文暂无'}
         </span>
-        <div className="flex flex-shrink-0 items-center gap-1">
-          {model.status === 'loaded' && (
-            <button
-              onClick={handleQuickChat}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] transition-colors hover:bg-[var(--state-danger-border)]"
-              title="开始对话"
-            >
-              <Play className="ml-0.5 h-3 w-3 text-[var(--accent)]" />
-            </button>
-          )}
-          {launchMemory && (
-            <button
-              onClick={(event) => void handleQuickLaunch(event)}
-              disabled={!model.filePath || !isDesktopRuntime() || quickStarting}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)] disabled:opacity-40"
-              title={formatLaunchMemoryTitle(launchMemory.config)}
-            >
-              {quickStarting ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Zap className="h-3 w-3 fill-current" />
-              )}
-            </button>
-          )}
-          {model.filePath && (
-            <button
-              onClick={handleReveal}
-              disabled={!isDesktopRuntime()}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] transition-colors hover:bg-[var(--border)] disabled:opacity-40"
-              title="在资源管理器中显示"
-            >
-              <FolderSearch className="h-3 w-3 text-[var(--text-secondary)]" />
-            </button>
-          )}
-        </div>
+        {model.avgTokensPerSec ? (
+          <span className="mono-font whitespace-nowrap" title="历史平均生成速度，实际速度随加载参数和输入变化">
+            历史 {model.avgTokensPerSec.toFixed(1)} tok/s
+          </span>
+        ) : launchMemory ? (
+          <span className="inline-flex items-center gap-1 whitespace-nowrap" title={formatLaunchMemoryTitle(launchMemory.config)}>
+            <Zap className="h-3 w-3 text-[var(--state-warning)]" />已记忆
+          </span>
+        ) : null}
+      </div>
+
+      <div className="model-tile-actions mx-3 flex items-center gap-2 border-t border-[var(--border-subtle)] py-2.5">
+        {isBusy ? (
+          <button disabled className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--surface-muted)] px-2 text-xs font-medium text-[var(--text-secondary)]">
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            {quickStarting ? '启动中' : statusLabel}
+          </button>
+        ) : model.status === 'loaded' ? (
+          <button
+            onClick={handleQuickChat}
+            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
+            title="开始对话"
+          >
+            <Play className="h-3.5 w-3.5" />
+            开始对话
+          </button>
+        ) : launchMemory ? (
+          <button
+            onClick={(event) => void handleQuickLaunch(event)}
+            disabled={!model.filePath || !isDesktopRuntime()}
+            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 text-xs font-medium text-[var(--state-warning)] transition-colors hover:brightness-95 disabled:opacity-40"
+            title={formatLaunchMemoryTitle(launchMemory.config)}
+          >
+            <Zap className="h-3.5 w-3.5" />
+            记忆启动
+          </button>
+        ) : (
+          <button
+            onClick={(event) => { event.stopPropagation(); handleClick(); }}
+            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+          >
+            <Play className="h-3.5 w-3.5" />
+            加载模型
+          </button>
+        )}
+        {model.filePath && (
+          <button
+            onClick={handleReveal}
+            disabled={!isDesktopRuntime()}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--border)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-40"
+            title="在资源管理器中显示"
+            aria-label="在资源管理器中显示"
+          >
+            <FolderSearch className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
     </article>
   );
@@ -435,8 +472,8 @@ function CapabilityBadges({ model, dense = false, onlyActive = false, twoLine = 
   // 信息量，全量 9 个格子还会把标签文字挤压成竖排折行。
   const visibleDefs = onlyActive || twoLine ? activeDefs : CAPABILITY_DEFS;
 
-  // 超出上限时折叠为 "+N"：单列窄行最多 3 个，两行布局（磁贴/单列第二行）最多 6 个。
-  const MAX_SHOWN = dense && !twoLine ? 3 : twoLine ? 6 : 4;
+  // 磁贴最多显示 5 个标签，给较长的“视频候选”和折叠计数留出空间。
+  const MAX_SHOWN = dense && !twoLine ? 3 : twoLine ? 5 : 4;
   const shouldFold = visibleDefs.length > MAX_SHOWN;
   const displayedDefs = shouldFold ? visibleDefs.slice(0, MAX_SHOWN - 1) : visibleDefs;
   const hiddenCount = shouldFold ? visibleDefs.length - (MAX_SHOWN - 1) : 0;
@@ -460,7 +497,7 @@ function CapabilityBadges({ model, dense = false, onlyActive = false, twoLine = 
           <span
             key={def.key}
             title={title}
-            className={`inline-flex items-center rounded-md border transition-colors ${sizeClasses} ${
+            className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-md border transition-colors ${sizeClasses} ${
               state === 'on'
                 ? `${def.activeBorder} ${def.active} ${def.activeText} font-semibold dark:bg-white/[0.06]`
                 : state === 'partial'

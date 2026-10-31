@@ -1,4 +1,4 @@
-﻿import { memo, useMemo, useState } from 'react';
+﻿import { createContext, memo, useContext, useMemo, useState } from 'react';
 import { Brain, Check, ChevronDown, Copy } from 'lucide-react';
 import hljs from 'highlight.js/lib/core';
 import bash from 'highlight.js/lib/languages/bash';
@@ -38,6 +38,46 @@ hljs.registerLanguage('xml', xml);
 
 interface MarkdownRendererProps {
   content: string;
+  /** 会话内搜索词：在所有文本节点里高亮命中片段（Markdown 结构保持不变）。 */
+  searchQuery?: string;
+}
+
+/**
+ * 搜索高亮上下文。
+ *
+ * 高亮必须发生在**最终的文本节点**上，而不是先对 Markdown 原文做字符串替换——
+ * 否则命中词一旦跨越 `**加粗**`、`` `代码` `` 或表格分隔符，就会把语法拆坏。
+ * 因此这里用 context 往下传查询词，由 `renderInline` 在渲染纯文本时切分着色。
+ */
+const SearchHighlightContext = createContext<string>('');
+const useSearchQuery = () => useContext(SearchHighlightContext);
+
+/** 把一段纯文本按搜索词切开，命中片段包一层 mark 背景色。 */
+function HighlightedPlainText({ text }: { text: string }) {
+  const query = useSearchQuery();
+  if (!query) return <>{text}</>;
+  const lower = text.toLowerCase();
+  const needle = query.toLowerCase();
+  if (!lower.includes(needle)) return <>{text}</>;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let index = lower.indexOf(needle, cursor);
+  let key = 0;
+  while (index >= 0) {
+    if (index > cursor) parts.push(text.slice(cursor, index));
+    parts.push(
+      <mark
+        key={`hl-${key++}`}
+        className="rounded-[2px] bg-[var(--state-warning-bg)] px-0.5 text-[var(--state-warning)] dark:bg-[var(--accent)]/25 dark:text-[var(--accent)]"
+      >
+        {text.slice(index, index + needle.length)}
+      </mark>,
+    );
+    cursor = index + needle.length;
+    index = lower.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
 }
 
 function SegmentContentRenderer({ content }: { content: string }) {
@@ -54,18 +94,20 @@ function SegmentContentRenderer({ content }: { content: string }) {
   );
 }
 
-export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export default function MarkdownRenderer({ content, searchQuery = '' }: MarkdownRendererProps) {
   const reasoningSegments = useMemo(() => parseReasoningContent(content), [content]);
 
   return (
-    <div className="markdown-body prose-body min-w-0 max-w-full text-primary-custom">
-      {reasoningSegments.map((segment, segmentIndex) => {
-        if (segment.type === 'thought') {
-          return <ThoughtBlock key={`thought-${segmentIndex}`} content={segment.content} />;
-        }
-        return <SegmentContentRenderer key={`seg-${segmentIndex}`} content={segment.content} />;
-      })}
-    </div>
+    <SearchHighlightContext.Provider value={searchQuery.trim()}>
+      <div className="markdown-body prose-body min-w-0 max-w-full text-primary-custom">
+        {reasoningSegments.map((segment, segmentIndex) => {
+          if (segment.type === 'thought') {
+            return <ThoughtBlock key={`thought-${segmentIndex}`} content={segment.content} />;
+          }
+          return <SegmentContentRenderer key={`seg-${segmentIndex}`} content={segment.content} />;
+        })}
+      </div>
+    </SearchHighlightContext.Provider>
   );
 }
 
@@ -468,33 +510,33 @@ function renderInline(text: string): React.ReactNode {
 
   while ((match = regex.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(<span key={lastIndex}>{text.slice(lastIndex, match.index)}</span>);
+      parts.push(<span key={`t${lastIndex}`}><HighlightedPlainText text={text.slice(lastIndex, match.index)} /></span>);
     }
 
     if (match[2]) {
-      parts.push(<strong key={match.index} className="italic font-bold">{match[2]}</strong>);
+      parts.push(<strong key={`m${match.index}`} className="italic font-bold"><HighlightedPlainText text={match[2]} /></strong>);
     } else if (match[3]) {
-      parts.push(<strong key={match.index} className="font-bold text-primary-custom">{match[3]}</strong>);
+      parts.push(<strong key={`m${match.index}`} className="font-bold text-primary-custom"><HighlightedPlainText text={match[3]} /></strong>);
     } else if (match[4]) {
-      parts.push(<em key={match.index} className="italic">{match[4]}</em>);
+      parts.push(<em key={`m${match.index}`} className="italic"><HighlightedPlainText text={match[4]} /></em>);
     } else if (match[5]) {
       parts.push(
-        <code key={match.index} className="mono-font rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-body)] text-[var(--accent)] break-words [overflow-wrap:anywhere] dark:bg-[var(--surface-raised)]">
-          {match[5]}
+        <code key={`m${match.index}`} className="mono-font rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-body)] text-[var(--accent)] break-words [overflow-wrap:anywhere] dark:bg-[var(--surface-raised)]">
+          <HighlightedPlainText text={match[5]} />
         </code>
       );
     } else if (match[6]) {
-      parts.push(<del key={match.index} className="line-through text-secondary-custom">{match[6]}</del>);
+      parts.push(<del key={`m${match.index}`} className="line-through text-secondary-custom"><HighlightedPlainText text={match[6]} /></del>);
     } else if (match[7] && match[8]) {
       const safeHref = safeLinkHref(match[8]);
       if (!safeHref) {
-        parts.push(<span key={match.index}>{match[7]}</span>);
+        parts.push(<span key={`m${match.index}`}><HighlightedPlainText text={match[7]} /></span>);
         lastIndex = match.index + match[0].length;
         continue;
       }
       parts.push(
-        <a key={match.index} href={safeHref} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline">
-          {match[7]}
+        <a key={`m${match.index}`} href={safeHref} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline">
+          <HighlightedPlainText text={match[7]} />
         </a>
       );
     }
@@ -503,7 +545,7 @@ function renderInline(text: string): React.ReactNode {
   }
 
   if (lastIndex < text.length) {
-    parts.push(<span key={lastIndex}>{text.slice(lastIndex)}</span>);
+    parts.push(<span key={`t${lastIndex}`}><HighlightedPlainText text={text.slice(lastIndex)} /></span>);
   }
 
   if (parts.length === 0) {

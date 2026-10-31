@@ -5,7 +5,7 @@ import { isDesktopRuntime } from '../desktopRuntime';
  * fast27b 引擎（三元量化 Bonsai-2-27B 离线包）启动通道的 IPC 传输层。
  */
 
-export type Fast27bModelVariant = 'heretic' | 'swift';
+export type Fast27bModelVariant = 'heretic' | 'saluki';
 
 export interface Fast27bModelPreset {
   id: Fast27bModelVariant;
@@ -61,7 +61,10 @@ export interface Fast27bStatus {
   /** 模型文件是否存在（DLC 就绪检测）。 */
   model_exists: boolean;
   api_key: string;
+  /** 配置的上下文窗口（用户保存值）。 */
   context_window: number;
+  /** 实际下发给引擎的上下文窗口（按所选模型上限收口）。 */
+  context_window_effective: number;
   draft_tokens: number;
   /** 引擎默认输出上限（--default-max-tokens）；0 = 未设，由引擎自身默认决定。 */
   default_max_tokens: number;
@@ -83,7 +86,8 @@ export interface Fast27bConfig {
   engine_path: string;
   model_path: string;
   selected_model: Fast27bModelVariant;
-  swift_model_path: string;
+  /** Saluki 槽位路径；旧配置里的 swift_model_path 由后端别名兼容。 */
+  saluki_model_path: string;
   heretic_model_path: string;
   port: number;
   lan: boolean;
@@ -176,6 +180,8 @@ export interface Fast27bRequestMetric {
   cache_tokens: number | null;
   draft_accepted: number | null;
   draft_proposed: number | null;
+  /** done 原因为 `tool calls N` 时的调用次数；null = 非工具调用收尾或旧记录。 */
+  tool_calls: number | null;
   error: string | null;
 }
 

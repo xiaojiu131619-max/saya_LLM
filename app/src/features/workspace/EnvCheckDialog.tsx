@@ -153,17 +153,17 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          initial={{ opacity: 0 }}
+          initial={false}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[115] flex items-center justify-center bg-white/70 p-4 dark:bg-black/75"
+          className="anim-enter-fade fixed inset-0 z-[115] flex items-center justify-center bg-white/70 p-4 dark:bg-black/75"
         >
           <motion.div
-            initial={{ scale: 0.92, opacity: 0 }}
+            initial={false}
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.92, opacity: 0 }}
             transition={{ type: 'spring', stiffness: 320, damping: 26 }}
-            className="glass-panel-strong w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--border)] dark:border-white/[0.08]"
+            className="anim-enter-dialog glass-panel-strong w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--border)] dark:border-white/[0.08]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="env-check-title"
@@ -224,7 +224,7 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                               <button
                                 type="button"
                                 onClick={goToKernelUpdate}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
                               >
                                 <Download className="h-3.5 w-3.5" />
                                 前往核心更新
@@ -281,7 +281,7 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                   type="button"
                   onClick={close}
                   disabled={phase === 'checking'}
-                  className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                  className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                 >
                   {manualOpen ? '完成' : failed > 0 ? '仍要继续' : '开始使用'}
                 </button>

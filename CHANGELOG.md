@@ -8,6 +8,67 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **产品界面改名「拾壹」**：只改显示名（`index.html` 标题、窗口标题、标题栏、侧边栏、设置页关于），仓库名与 `productName`/`identifier` 不动。标识改为 `components/BrandLogo.tsx` 的 CSS 字标（圆角方块 + 「拾」），底色跟随强调色，因此换主题色时 logo 一起变；原来的「晓」方块与「Agent LLM」文字移除。
+- **对话侧边栏可拖拽调宽，内容按宽度重排**：右侧加 5px 分隔条（悬停/拖拽时显形），宽度收口 200–480px，双击恢复 288px，拖拽结束写进 `ui.sidebarWidth` 持久化。内容不是「简单隐藏」：窄于 260px 收掉快捷键提示与状态卡细节行、搜索框缩短为「搜索」。侧边栏底部服务状态卡从 2 项扩到 4 项（ctx / 显存 / 内存 / GPU，固定顺序），并用容器查询做两档适配：常规宽度 2×2 网格，卡片窄于 200px 时切成 1×4 单列、进度条压到 1.5px（断点按卡片实际宽度定：侧边栏 288px 时卡片约 239px，仍应保持 2×2）。
+- **侧栏导航按后端运行状态着色**：Agent / NiNfer / Strata 未启动时是灰字，启动后染主题色；窄栏图标导航与宽栏文字导航一致。Agent 没有独立进程，按当前 WebUI 后端（主模型 / NiNfer / Strata）是否在跑来判定。
+- **去掉底部系统状态栏**：原先横跨窗口底部的「系统监控 · 内存 / 显存 / ctx / GPU」一条移除，主内容区因此多出 44px 高度。运行状态改由对话侧边栏底部的状态卡呈现（见上一条）。随之一并删除已无入口的 `pages/SystemStatusOverlay.tsx`（该弹窗的详细监控视图）与仅它使用的 `components/NumericTicker.tsx`——只删可见入口会留下再也打不开的死文件。
+- **使用统计：饼图与热力图并排，热力图支持年/月/日缩放**：左列时间维度、右列模型维度，同一份 token 的两个切面并排互相印证。缩放三档：年为整年每日一格、月为单月（格子放大到 27px）、日给出当日汇总与当月按天分布——小时级用量尚未落盘，日视图不做任何推算，界面上直接写明。配套前后翻页（不能翻到未来）与「今天」回位。
+- **搜索同时覆盖标题模糊匹配与对话内正文**：`features/chat/sessionSearch.ts` 用子序列匹配（「推理排障」能命中「本地推理服务排障」，英文缩写同理），标题命中优先于正文命中；正文命中会在会话行下方给出带角色前缀的摘要。当前会话内有命中时页头显示「本对话命中 N 处」并提供上/下一处跳转，正文命中字用 `mark` 高亮——高亮在最终文本节点上做（`SearchHighlightContext`），不会把 `**加粗**`、行内代码或表格的 Markdown 语法拆坏。
+- **对话后端改为自动选择，去掉手动下拉**：主模型 / NiNfer / Strata 在显存上互斥、任一时刻最多一个在跑，「该用哪个」没有歧义。`hooks/useAutoChatEngine.ts` 按「谁在跑」自动切换（主模型 → NiNfer → Strata，都没跑时保持当前值），页头只显示「后端 X · 自动」。
+- **三个推理后端加硬互斥闸门**（`services/backend_gate.rs`）：启动任一个之前先停掉另外两个（只停确实在跑的），并经 `backend:exclusive` 事件告知前端。此前三者可同时起，两套权重抢显存会双双掉速甚至 OOM。
+- **生成动画只保留在消息内**：正文下方那行「输出中」转圈移除，改为与完成后的统计行同位的点阵 + 「输出中」+ 实时耗时；页头不再重复显示「工作中」徽章。
+- **NiNfer 胶囊新增 Fast 预留位**：点击打开一块空页面（后续接入 9B 小模型），不碰引擎配置；再点一次可退出——引擎变体按钮在引擎未就绪时禁用，只靠「点变体退出」会卡在 Fast 页。
+- **设置 → 工具重做为左右双栏**：左列原生工具（llama.cpp 进程内能力开关 + 全部开/全部关），右列 MCP 服务器；窄于 1100px 自动堆成上下两栏（并排时每列不足 480px，MCP 表单会挤成一团）。
+- **设置新增 Skills 空页面**：只放入口与留白，不预埋假数据或「即将上线」的假开关。
+- **设置 → 模型主题页移除，改在模型参数页点头像调**：原页面按模型系列分组改色，调一个颜色得从模型页跳进设置。现在点模型图标弹出「头像与主题色」面板：左侧品牌 logo 网格，右侧取色器 + 12 个预选色 + 恢复默认色，改完直接落到该模型（同步模型卡片、对话头像与使用统计）。`lib/modelTheme.ts` 补 `getThemeDefaultColor`，把扫描得到的 CSS 变量主题色换成等价纯色供取色器使用。
+- **设置 → 数据管理重写为「目录设置 + 数据清除」两段**：目录段含模型目录（多选、可打开/移除）、引擎目录、日志目录、归档聊天记录文件夹（三者可改、可恢复默认、保存后立即生效），并新增「归档全部对话」（每个会话写一份含 Markdown 正文的 JSON 到归档目录）。清除段收拢对话历史 / 使用统计 / 模型扫描缓存 / 界面偏好 / 应用配置 / 出厂重置。原「清除 dsh 会话」「清理 dsh 安装仓库缓存」随 dsh 一并移除；设置主页的重复入口改为跳转。
+- **使用统计纳入 NiNfer 与 Strata 的全部 token**：新增 `lib/engineUsage.ts` + `hooks/useEngineUsageSync.ts`，把两个引擎的请求快照折算成累计值（只计 `success`，速度用每请求 decode TPS、首字延迟转秒、生成时长按 `output / decode_tps` 反推），以快照式 `SET_ENGINE_USAGE` 挂在合成运行时 ID 下；统计页新增「按来源（主模型 / 对外 API / 引擎）」一行与排名行的来源标签。引擎指标只在使用统计页订阅，避免每个页面都起两个每秒一次的 IPC 轮询。
+
+### 修复
+
+#### 2026-11-01 代码审查批次
+
+- **Job Object 结构体布局错误，整树回收实际从未生效**：自定义的 `JOBOBJECT_BASIC_LIMIT_INFORMATION` 末尾写成了 `ChildProcessCount + Reserved[2]`，正确布局是 `PriorityClass + SchedulingClass`（各 u32）。多出的 4 字节让 `SetInformationJobObject` 恒以 `ERROR_BAD_LENGTH (24)` 失败，`KILL_ON_JOB_CLOSE` 从未设置——应用崩溃或被任务管理器强杀时，llama-server / NiNfer / dsh / 向量服务 / Strata 内核都会整体存活。五个模块（`process_manager`、`fast27b_manager`、`dsh_manager`、`embedding_manager`、`strata_manager`）一并修正，并加 x64 编译期尺寸断言（`== 144`）防止回归。
+- **互斥闸门绕过命令层，前端以为主模型还在跑**：`backend_gate` 原先直接调 `process_manager::stop_server()`，既取消不了 `NORMAL_LOAD` 的监视线程，也不发 `server:stopped`；停 NiNfer 还漏掉 webui 桥与 `fast27b:stopped`。现在闸门统一走各后端的命令层停止实现（`stop_server_with_app` / `stop_fast27b_with_app` / `stop_strata_with_app`），事件与手动停止完全一致；任一步停不下来就返回错误、放弃启动目标后端。闸门位置也移到生命周期 / 参数校验之后，路径写错不会再把正在跑的后端一起带走。
+- **取消加载被当成「服务静默退出」**：`monitor_server` 对取消返回 `Exited`，worker 于是走 CPU 兼容回退，或在纯 CPU 模式下弹 `server:error`「进程在监听端口前异常退出」。新增 `MonitorResult::Cancelled`：取消只写一条日志，不重试、不报错。
+- **启动新加载时永远撞上「正在加载」**：`start_server` 先 `acquire_lifecycle()` 再取旧的 `NORMAL_LOAD`，而旧加载自己握着生命周期锁。改为先取消并 join 旧加载，再申请生命周期，最后执行互斥闸门。
+- **Strata 停止后 6 秒的残留内核清理会误杀重启的新实例**：延迟线程现在校验停止代数未变且当前没有运行中的网关；匹配条件从命令行子串改为逐参数精确比较（`--serve` 独立成项、`--pack` 的值完全相等），不再误伤同前缀 pack 或「启动模型.bat」起的实例。
+- **Strata 指标把错误请求记成成功**：`finish` 为 `error` / `timeout` / `disconnect` 的请求原先只有含 `cancel` 的算取消，其余全部记 `success`，于是失败与断流也计入成功率、token 与 TPS。现按三档映射为 `success` / `cancelled` / `failed`，性能表格与失败色同步。
+- **Strata 运行中改 API Key / 局域网开关导致「界面可用、请求 401」**：这两项与端口一样是网关出生参数，现纳入运行中禁止修改的检查；提示文案一并列出。
+- **Strata 开发模式 CORS 端口写错**：派生配置只放行 1420，而本项目 vite dev 是 3000，`tauri dev` 下对话与接入校验会被浏览器拦掉。补上 3000 与非 Windows 的 `tauri://localhost`。
+- **Strata 状态查询阻塞 IPC 最长 2 秒**：`strata_get_status` 改为 async，`/health` 探活放进 `spawn_blocking`，日志滚动与按钮不再随轮询卡顿。
+- **Strata 停止后「进行中请求」残留**：`stop_strata` 清零指标快照里的 `active_requests`。
+- **Strata 附加参数可静默覆盖端口 / 鉴权**：`extra_args` 追加在应用参数之后，argparse 后者优先。现拒绝 `--engine` / `--config` / `--host` / `--port` / `--api-key`，并校验端口与超时非 0。
+- **Strata / NiNfer 默认配置硬编码作者本机路径与固定 Key**：Python 与 run config 默认路径改由 `%LOCALAPPDATA%` 推导，源码目录留空由界面填写；本地 Bearer Key 改为每次全新配置随机生成（`RandomState` 种子，32 位十六进制），不再往公开仓库里写固定凭据。
+- **归档文件名把标题里的省略号当成路径穿越**：`write_archive_file` 原先只要名字含 `..` 就拒绝，「帮我看看...」这类标题会让「归档全部对话」中断。现在只拒绝整名为 `.` / `..`、路径分隔符、盘符与控制字符，并在 join 后确认落点仍在归档目录内；前端文件名追加会话标识，同名会话不再互相覆盖。
+- **首轮自动标题永远不执行**：`handleSend` 的闭包持有发送前的 `chatSessions`，新建会话此时还不在数组里，`regenerateSessionTitle` 直接 return。现在由发送方显式带入用户原文 / 助手正文 / 会话桶 ID；标题请求按 `runtimeModelId` 解析主模型 / NiNfer / Strata 的端口、Key 与 API 模型名（原先所有会话都按主模型取，引擎会话必然 401/404）。
+- **标题请求只给 64 token 且不关思考**：思考模型可能把预算全花在 reasoning 上、正文为空。提高到 128 并显式传 `chat_template_kwargs.enable_thinking=false`（不支持的服务端会忽略）。
+- **媒体附件写进 localStorage 会撑爆配额并静默丢失全部持久化**：图片 / 音频 / 视频的 data URL 随消息进入会话，单张截图即可超过 5–10 MB 配额，之后所有会话与配置都不再落盘。持久化前剥离消息里的非文本 part（本次运行内仍可显示），重启后保留文字与「N 个附件」说明。
+- **使用统计时长格式在 59.95 秒附近输出「1分60.0秒」**：先按最终显示的 0.1 秒精度取整再拆分单位。
+- **引擎 TPS 的分子分母来自不同请求集合**：缺 `total_ms` / `decode_tps` 读数的请求原先只加 token 不加时长，吞吐被无限高估。现在分子只累计实际贡献了耗时的请求。
+- **热力图按月翻页在 29–31 日不动或跳月**：`setMonth` 会把 31 日溢出到下个月（10-31 点上月变成 10-01）。翻月前把日号钳到目标月最后一天。
+- **导出文件名用 UTC 日期，非法 `createdAt` 还会炸整个界面**：改用本地日期；非法时间回退到今天，`toISOString` 不再抛 `RangeError`。
+- **重复拖入同一附件会发送两遍**：跨多次拖入 / 选择按 `name + size + kind` 去重。
+- **Strata 页面事件监听在卸载后泄漏**：`listenDesktopEvent` 是异步的，组件在 Promise 完成前卸载时 disposer 还没入数组。补 `disposed` 标志与 `.catch`，每进一次页面不再累积 4 个监听器。
+- **Strata 启用开关用 3 秒前的整份配置回写**：可能把刚保存的路径 / 端口 / Key 覆盖回旧值。改用专用 `strataSetEnabled`，只切开关。
+- **版本 2 的主题偏好被丢弃**：读取门槛从 `>= 3` 放宽到 `>= 2`，初始提交写入的浅 / 深色选择不再被静默改成「跟随系统」。
+- **「恢复界面默认值」漏掉侧边栏宽度**：`RESET_UI_PREFS` 补 `sidebarWidth`，与界面文案一致。
+- **自动调参把界面偏好当成配置冲突**：`sameLoadConfig` 改为只比较参与加载 / 推理的字段，调参期间切换「记住设置」「高级设置」「空闲卸载」不再丢弃结果。
+- **残留 llama-server 清扫在生产路径上不可达**：`start_server_internal` 用 `cancel.is_none()` 当清扫开关，而所有生产调用都传 `Some(cancel)`。改为每次加载都清扫本应用目录树内的遗留实例（跳过受管进程与向量服务）。
+- **自动后端选择在互斥切换后最多滞后 3 秒**：监听 `fast27b:stopped/ready` 与 `strata:stopped/ready` 立即刷新对应快照，不再把请求发向刚被停掉的引擎。
+
+- **DFlash / DSpark 侧车加载不上：内核的显存拟合降级告警被误判成「加载失败」**：挂侧车启动时，内核在 `-fit` 显存拟合阶段会先给侧车模型试建 context，此时主模型的 `ctx_other` 尚未设置，于是打印两条日志后**继续加载并正常启用推测解码**：
+  - `E llama_init_from_model: failed to initialize the context: dflash requires ctx_other to be set (this warning is normal during memory fitting)`
+  - `W operator (): failed to measure the memory of the extra model, fitting without it: failed to create llama_context from model`
+
+  之前只放行了第一条。第二条同时含 `failed` / `llama` / `model`，命中 `detect_error` 的兜底规则被判成「加载失败」，app 于是在内核就绪前就报错、放弃这次加载——内核其实一直好好地在服务，前端却显示加载失败，DFlash 永远加载不上。两条拟合期告警现一并放行；非拟合阶段真正的 context 创建失败仍照常报错。
+- **`PRUNE_USAGE` 不再误删引擎用量**：清理已删除模型的统计时，`engine:` 前缀条目与 `api-` 一样被排除在外。
+- **数据管理页长路径溢出**：目录行改为 `min-w-0` + `basis-64`，`D:\...\resources\kernels` 这类长路径不再撑破卡片右边界。
+- **点「核心更新」会闪出黑色控制台窗口**：`detect_cuda_version()` 里的 `nvidia-smi` 与 `nvcc` 调用漏了 `CREATE_NO_WINDOW`，进入核心更新页自动做内核检查时两者各弹一个控制台窗口。改成走统一的隐藏窗口执行路径（`command_text`），并把两个解析函数改为接受文本以免重复拼 stdout/stderr。
+- **主题持久化读写的版本号不一致**：读取要求 `themePreferenceVersion === 2`，落盘写的却是 `3`，导致用户选过的主题永远读不回来——设置页写着「当前固定为深色主题」而界面实际按默认「跟随系统」渲染。统一为常量 `THEME_PREFERENCE_VERSION = 3` 并接受 `>= 3`。
+
 ### 新增
 
 - **AMD 显卡 HIP / ROCm 适配**：AMD 路线不再只有 Vulkan——识别本机 AMD 独显是否在 ROCm 官方支持列表内，支持的卡可以把 ROCm 内核作为正式候选下载使用：

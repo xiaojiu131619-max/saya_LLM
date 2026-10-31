@@ -1,5 +1,5 @@
 ﻿import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, Database, Download, Palette, Settings, Wrench } from 'lucide-react';
+import { ArrowLeft, BarChart3, Database, Download, Settings, Sparkles, Wrench } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
@@ -8,20 +8,22 @@ import ToolsPage from '@/pages/ToolsPage';
 import KernelUpdatePage from '@/pages/KernelUpdatePage';
 import UsagePage from '@/pages/UsagePage';
 import DataManagementPage from '@/pages/DataManagementPage';
-import ModelThemePage from '@/pages/ModelThemePage';
+import SkillsPage from '@/pages/SkillsPage';
 
+// 「模型主题」入口已移除：模型头像与主题色改在模型加载参数界面点图标直接改，
+// 不必为了调一个颜色跳到设置里（见 ModelLoadView 的头像弹窗）。
 const settingsTabs: Array<{ id: ViewType; label: string; icon: ComponentType<{ className?: string }> }> = [
   { id: 'settings', label: '软件设置', icon: Settings },
   { id: 'kernel', label: '核心更新', icon: Download },
   { id: 'usage', label: '使用统计', icon: BarChart3 },
   { id: 'tools', label: '工具', icon: Wrench },
-  { id: 'modelTheme', label: '模型主题', icon: Palette },
+  { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'data', label: '数据管理', icon: Database },
 ];
 
 export default function SettingsWorkspace() {
   const { state, dispatch } = useApp();
-  const activeView = ['tools', 'kernel', 'usage', 'data', 'modelTheme'].includes(state.currentView)
+  const activeView = ['tools', 'kernel', 'usage', 'data', 'skills'].includes(state.currentView)
     ? state.currentView
     : 'settings';
   const returnToModel = () => {
@@ -47,8 +49,8 @@ export default function SettingsWorkspace() {
         return <UsagePage />;
       case 'data':
         return <DataManagementPage />;
-      case 'modelTheme':
-        return <ModelThemePage />;
+      case 'skills':
+        return <SkillsPage />;
       default:
         return <SettingsPage />;
     }
@@ -107,10 +109,9 @@ export default function SettingsWorkspace() {
         </div>
         <motion.div
           key={activeView}
-          initial={{ opacity: 0, y: 8 }}
+          initial={false}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-          className="min-h-0 flex-1"
+          className="anim-enter-rise min-h-0 flex-1"
         >
           {renderPanel()}
         </motion.div>

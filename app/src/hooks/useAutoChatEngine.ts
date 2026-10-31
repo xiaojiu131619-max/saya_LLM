@@ -1,0 +1,70 @@
+import { useEffect } from 'react';
+import { useApp } from '@/context/AppContext';
+import { refreshEngineStatus, useEngineStatuses } from '@/hooks/useEngineStatuses';
+import { useStrataStatus } from '@/hooks/useStrataStatus';
+import { isDesktopRuntime } from '@/lib/desktop';
+import { refreshStrataStatus } from '@/lib/desktopState';
+import { listenDesktopEvent } from '@/lib/ipc/system';
+import type { ChatEngineId } from '@/types';
+
+/**
+ * 对话后端自动选择。
+ *
+ * 对话页不再暴露「后端」下拉：三个后端在显存上互斥，任一时刻最多只有一个在跑，
+ * 「当前该用哪个」本来就没有歧义，让用户手动切只会切到未运行的那一个然后报错。
+ *
+ * 判定优先级：
+ * 1. 主模型服务在跑（llama-server 起来 + 有加载中的模型）→ 主模型；
+ * 2. 否则 NiNfer 进程在跑 → NiNfer；
+ * 3. 否则 Strata 进程在跑 → Strata；
+ * 4. 都没跑 → 保持当前值（默认主模型），界面会提示「未加载模型」。
+ *
+ * 用「进程在跑」而不是「可对话」作为判据：引擎启动要几秒到十几分钟，
+ * 启动期间对话页就该显示「引擎正在加载」，而不是继续指向已经在被顶掉的主模型。
+ */
+export function useAutoChatEngine() {
+  const { state, dispatch } = useApp();
+  const engineStatuses = useEngineStatuses();
+  const strataStatus = useStrataStatus();
+
+  const mainRunning = state.serverRunning;
+  const fast27bRunning = Boolean(engineStatuses.fast27b?.running);
+  const strataRunning = Boolean(strataStatus?.running);
+
+  useEffect(() => {
+    const target: ChatEngineId = mainRunning
+      ? 'main'
+      : fast27bRunning
+        ? 'fast27b'
+        : strataRunning
+          ? 'strata'
+          : state.chatEngine;
+    if (target !== state.chatEngine) {
+      dispatch({ type: 'SET_CHAT_ENGINE', payload: target });
+    }
+  }, [dispatch, fast27bRunning, mainRunning, strataRunning, state.chatEngine]);
+
+  // 互斥闸门停掉某个后端时会发 stopped/ready 事件；立刻刷新对应快照，
+  // 别让「自动选择」在 3 秒轮询间隙里继续指向已经被停掉的后端。
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    const disposers: Array<() => void> = [];
+    const track = (pending: Promise<() => void>) => {
+      void pending
+        .then((dispose) => {
+          if (disposed) dispose();
+          else disposers.push(dispose);
+        })
+        .catch(() => {});
+    };
+    track(listenDesktopEvent('fast27b:stopped', () => void refreshEngineStatus()));
+    track(listenDesktopEvent('fast27b:ready', () => void refreshEngineStatus()));
+    track(listenDesktopEvent('strata:stopped', () => void refreshStrataStatus()));
+    track(listenDesktopEvent('strata:ready', () => void refreshStrataStatus()));
+    return () => {
+      disposed = true;
+      disposers.forEach((dispose) => dispose());
+    };
+  }, []);
+}

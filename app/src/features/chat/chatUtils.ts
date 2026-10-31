@@ -89,6 +89,35 @@ export function classifyAttachment(file: { name: string; type: string; size: num
   return null;
 }
 
+export function attachmentBackendError(
+  kind: AttachmentKind,
+  engine: 'main' | 'fast27b' | 'strata',
+): string | null {
+  // Strata 的 /health 回报 images: false —— 纯文本后端，没有视觉塔也没有音频通道。
+  // 放行出去只会得到一条 400，不如在选文件时就说明白。
+  if (engine === 'strata') {
+    return kind === 'text'
+      ? null
+      : 'Strata 是纯文本后端（未加载视觉塔），不支持图片、音频或视频输入。';
+  }
+  return engine === 'fast27b' && kind === 'audio'
+    ? 'NiNfer 不支持音频输入；视频仅分析画面，不识别声轨。'
+    : null;
+}
+
+export function attachmentMediaMime(name: string, type: string): string {
+  if (/^(image|audio|video)\//i.test(type)) return type;
+  const byExtension: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+    wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+    ogg: 'audio/ogg', oga: 'audio/ogg', flac: 'audio/flac', opus: 'audio/ogg',
+    mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska',
+    webm: 'video/webm', avi: 'video/x-msvideo', m4v: 'video/mp4', ogv: 'video/ogg',
+  };
+  return byExtension[fileExtension(name)] ?? 'application/octet-stream';
+}
+
 export function isSupportedTextFile(file: File) {
   const ext = fileExtension(file.name);
   return file.type.startsWith('text/')
@@ -402,7 +431,7 @@ export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: numbe
 }
 
 // ---------------------------------------------------------------------------
-// fast-27b 引擎日志解析
+// NiNfer 引擎日志解析
 // 引擎日志与 llama-server 是两套完全不同的格式（独立缓冲 FAST27B_LOGS），llama 的
 // `prompt eval time` / `eval time = … tokens per second` 正则对它无效。引擎自己的行：
 //   req#25 started | openai-chat stream | 36 messages | max output 32,768 | thinking xhigh

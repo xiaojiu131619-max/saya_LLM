@@ -177,10 +177,10 @@ export default function LogPanel() {
             <AnimatePresence>
               {showExportMenu && (
                 <motion.div
-                  initial={{ opacity: 0, y: -4 }}
+                  initial={false}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  className="absolute right-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] shadow-lg dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
+                  className="anim-enter-pop absolute right-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--app-bg)] shadow-lg dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
                 >
                   <button
                     onClick={() => handleExport('text')}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>聊天列宽回归</title></head>
+<body>
+<div id="root"></div>
+<script type="module">
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { AppProvider } from '/src/context/AppContext.tsx';
+import ChatBubble from '/src/components/ChatBubble.tsx';
+import '/src/index.css';
+
+const h = React.createElement;
+const paragraph = '技术文档需要明确说明系统设计、输入输出与异常处理，并在长段落中保持清晰的阅读边界。'.repeat(8);
+const message = {
+  id: 'layout-regression', role: 'assistant', timestamp: 0,
+  content: `${paragraph}\n\n${paragraph}`,
+  reasoningContent: '检查长文本与工具参数不能扩大消息列。\n'.repeat(20),
+  toolActivity: [{
+    id: 'long-tool', tool: 'web_search_exa_' + 'long_name_'.repeat(18),
+    server: 'exa_' + 'server_'.repeat(18),
+    arguments: {query: paragraph, objective: paragraph, numResults: 5},
+    result: paragraph.repeat(4), pending: false,
+  }],
+  stats: {ctxUsed: 1000, ctxTotal: 32768, outputTokens: 5062, firstTokenDelay: 24.88, tokensPerSec: 48, genTime: 102},
+};
+
+function Probe() {
+  const [result, setResult] = React.useState('等待布局');
+  React.useEffect(() => {
+    const inspect = () => {
+      const column = document.getElementById('message-column').getBoundingClientRect();
+      const composer = document.getElementById('composer').getBoundingClientRect();
+      const article = document.querySelector('article');
+      const overflow = [...article.querySelectorAll('*')].filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && (rect.left < column.left - 1 || rect.right > column.right + 1);
+      }).map(node => ({tag: node.tagName, className: node.className}));
+      setResult(JSON.stringify({
+        viewport: innerWidth, column: column.width, composer: composer.width,
+        aligned: Math.abs(column.left - composer.left) < 1 && Math.abs(column.right - composer.right) < 1,
+        article: article.getBoundingClientRect().width,
+        overflow, pass: overflow.length === 0 && Math.abs(column.width - composer.width) < 1,
+      }));
+    };
+    const observer = new ResizeObserver(inspect);
+    observer.observe(document.getElementById('message-column'));
+    const mutations = new MutationObserver(inspect);
+    mutations.observe(document.querySelector('article'), {childList: true, subtree: true, attributes: true});
+    return () => { observer.disconnect(); mutations.disconnect(); };
+  }, []);
+  return h('main', {className: 'h-screen overflow-y-auto px-6 py-4'},
+    h('h1', null, '聊天列宽回归'),
+    h('output', {id: 'result', className: 'block break-words'}, result),
+    h('div', {className: 'relative mx-auto w-full min-w-0 max-w-3xl min-[1600px]:max-w-4xl', id: 'message-column'},
+      h(ChatBubble, {message, modelId: '', sessionId: '', sessionCtx: {used: 1000, total: 32768}})),
+    h('div', {id: 'composer', className: 'mx-auto w-full min-w-0 max-w-3xl min-[1600px]:max-w-4xl rounded-xl border p-4'}, '输入框列宽基准'));
+}
+createRoot(document.getElementById('root')).render(h(AppProvider, null, h(Probe)));
+</script>
+</body>
+</html>

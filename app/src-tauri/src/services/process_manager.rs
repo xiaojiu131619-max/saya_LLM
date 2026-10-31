@@ -37,8 +37,11 @@ mod job_guard {
         MaximumWorkingSetSize: usize,
         ActiveProcessLimit: u32,
         Affinity: usize,
-        ChildProcessCount: u32,
-        Reserved: [u32; 2],
+        // 末尾两项是 PriorityClass / SchedulingClass（各 u32）。
+        // 早期误写成 ChildProcessCount + Reserved[2]，使结构体多 4 字节，
+        // SetInformationJobObject 会以 ERROR_BAD_LENGTH 失败、整树回收实际从未生效。
+        PriorityClass: u32,
+        SchedulingClass: u32,
     }
 
     #[repr(C)]
@@ -50,6 +53,11 @@ mod job_guard {
         PeakProcessMemoryUsed: usize,
         PeakJobMemoryUsed: usize,
     }
+
+    // x64 下 JOBOBJECT_EXTENDED_LIMIT_INFORMATION 固定 144 字节；布局写错会让
+    // SetInformationJobObject 以 ERROR_BAD_LENGTH 失败，编译期直接拦住。
+    #[cfg(target_pointer_width = "64")]
+    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
 
     extern "system" {
         fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
@@ -866,6 +874,28 @@ fn wait_for_port_release(config: &ServerConfig, timeout: Duration) -> bool {
 fn detect_error(line: &str) -> Option<ServerError> {
     let line_lower = line.to_lowercase();
 
+    // -fit 内存拟合会先给草稿模型试建 context，此时主模型的 ctx_other 尚未
+    // 设置；内核打印这条 E 级日志后仍会继续拟合并最终正常就绪，日志原文也
+    // 标注了 "this warning is normal during memory fitting"。dflash / dspark
+    // 都会走到这里，误判会导致前端显示「未加载」而进程实际在服务。
+    //
+    // 同一阶段还有一条 W 级伴随日志：
+    //   W operator (): failed to measure the memory of the extra model,
+    //                  fitting without it: failed to create llama_context from model
+    // 它同样只是「侧车没被计入显存拟合」的降级提示——内核测不到侧车模型的显存
+    // 就先不计入、继续拟合，之后照样正常加载并启用推测解码。但它同时含
+    // "failed" / "llama" / "model"，会被下面的兜底规则判成「加载失败」，
+    // app 就会在内核就绪前报错并放弃这次加载 ⇒ DFlash 永远加载不上。
+    // 必须与上面那条 E 级日志一起放行。
+    if line_lower.contains("this warning is normal during memory fitting")
+        || (line_lower.contains("requires ctx_other to be set")
+            && line_lower.contains("memory fitting"))
+        || (line_lower.contains("failed to measure the memory of the extra model")
+            && line_lower.contains("fitting without it"))
+    {
+        return None;
+    }
+
     // Some llama.cpp builds can crash during the empty warmup pass after the
     // model is already loaded. Treat it as a launch failure with actionable
     // GPU/parameter guidance instead of leaving the frontend waiting.
@@ -1383,6 +1413,8 @@ enum MonitorResult {
     Error(ServerError),
     Exited,
     TimedOut,
+    /// 用户（或互斥闸门）主动取消加载，不是故障：不得走 CPU 回退或报 server:error。
+    Cancelled,
 }
 
 fn server_request(
@@ -1890,6 +1922,93 @@ fn validate_backend_support(exe: &str, config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// 解析内核 `--help` 中 `--spec-type` 接受的取值列表。
+///
+/// 不能靠「在二进制里搜 `draft-dflash` 连续字节」判断内核能力：上游内核把 spec-type
+/// 取值表按共享后缀拆分存放（b11913/b11982 的 llama-common.dll 里只有 `draft-d` / `f` /
+/// `lash` 这类碎片），明明支持 DFlash 的内核会被判成不支持而拒绝启动。内核自己打印的
+/// 取值列表才是权威来源。
+fn parse_spec_types_from_help(help: &str) -> Option<Vec<String>> {
+    let mut values: Vec<String> = Vec::new();
+    let mut found = false;
+    let mut lines = help.lines().map(|line| line.trim_start());
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("--spec-type") else {
+            continue;
+        };
+        // 参数名后必须跟空白，避免误匹配 --spec-type-k 这类同前缀选项。
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        found = true;
+        let rest = rest.trim_start();
+        let Some(mut token) = rest.split_whitespace().next() else {
+            break;
+        };
+        loop {
+            values.extend(
+                token
+                    .split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            );
+            // 取值列表换行续接时，下一行的首个 token 仍是列表的一部分。
+            if !token.ends_with(',') {
+                break;
+            }
+            let Some(next) = lines.next() else {
+                break;
+            };
+            match next.split_whitespace().next() {
+                Some(next_token) => token = next_token,
+                None => break,
+            }
+        }
+        break;
+    }
+    if found && !values.is_empty() {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+/// 询问内核自己支持哪些推测解码类型（`llama-server --help` 里 `--spec-type` 的取值列表）。
+fn kernel_spec_types(exe: &str) -> Option<Vec<String>> {
+    let output = llama_command(exe).arg("--help").output().ok()?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_spec_types_from_help(&combined)
+}
+
+/// 判断内核是否支持某个 `--spec-type` 取值。
+///
+/// `known_types` 是从内核 `--help` 读到的取值列表（读不到为 None）：
+/// - 读到了就以列表为准，列表里没有就是不支持；
+/// - 没读到才退回二进制标记扫描，标记放宽到类型名本身（`dflash` / `dspark`），
+///   因为上游内核会把 `draft-` 前缀拆成独立字面量，只搜连续字节会漏判。
+fn spec_type_supported(known_types: Option<&[String]>, spec_value: &str, exe: &str) -> bool {
+    let bare = spec_value.strip_prefix("draft-").unwrap_or(spec_value);
+    if let Some(types) = known_types {
+        return types.iter().any(|value| value == spec_value || value == bare);
+    }
+    let exe_path = Path::new(exe);
+    let runtime_candidates = [
+        exe_path.with_file_name("llama.dll"),
+        exe_path.with_file_name("libllama.so"),
+        exe_path.with_file_name("libllama.dylib"),
+        exe_path.with_file_name("llama-common.dll"),
+        exe_path.to_path_buf(),
+    ];
+    any_file_contains(
+        &runtime_candidates,
+        &[spec_value.as_bytes(), bare.as_bytes()],
+    )
+}
+
 /// DSpark/DFlash 侧车启动前校验：文件存在 + 内核带对应 --spec-type 能力。
 /// 与 MTP 校验同样采用显式失败：不支持时阻止启动并给出中文指引，
 /// 不做静默降级（用户显式选择的参数不能被悄悄丢弃）。
@@ -1904,7 +2023,7 @@ fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
     if mtp_active {
         return Ok(());
     }
-    let candidates: [(&str, &str); 2] = [
+    let candidates: [(&str, &str, &str); 2] = [
         (
             config
                 .dspark_draft_path
@@ -1913,6 +2032,7 @@ fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
                 .filter(|path| !path.is_empty())
                 .unwrap_or(""),
             "draft-dspark",
+            "dspark",
         ),
         (
             config
@@ -1922,29 +2042,28 @@ fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
                 .filter(|path| !path.is_empty())
                 .unwrap_or(""),
             "draft-dflash",
+            "dflash",
         ),
     ];
-    for (draft_path, marker) in candidates {
+    // 内核自报的 --spec-type 取值列表（读不到时退回二进制标记扫描）。
+    let known_types = kernel_spec_types(exe);
+    for (draft_path, spec_value, type_name) in candidates {
         if draft_path.is_empty() {
             continue;
         }
         if !Path::new(draft_path).is_file() {
             bail!("推测解码侧车文件不存在：{}；请重新扫描模型或关闭该侧车。", draft_path);
         }
-        let exe_path = Path::new(exe);
-        let runtime_candidates = [
-            exe_path.with_file_name("llama.dll"),
-            exe_path.with_file_name("libllama.so"),
-            exe_path.with_file_name("libllama.dylib"),
-            exe_path.with_file_name("llama-common.dll"),
-            exe_path.to_path_buf(),
-        ];
-        let marker_bytes = marker.as_bytes();
-        if !any_file_contains(&runtime_candidates, &[marker_bytes]) {
+        if !spec_type_supported(known_types.as_deref(), spec_value, exe) {
+            let supported = known_types
+                .as_ref()
+                .map(|types| types.join(", "))
+                .unwrap_or_else(|| "（未能读取内核参数列表）".to_string());
             bail!(
-                "当前 llama.cpp 内核不支持 {} 推测解码（--spec-type {}）；请更新内核，或关闭该侧车后加载。",
-                marker.trim_start_matches("draft-"),
-                marker
+                "当前 llama.cpp 内核不支持 {} 推测解码（--spec-type {}）；内核可用类型：{}。请更新内核，或关闭该侧车后加载。",
+                type_name,
+                spec_value,
+                supported
             );
         }
         // 只校验优先级最高的那个侧车。
@@ -2245,10 +2364,11 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         .map(|path| path.trim())
         .filter(|path| !path.is_empty());
     // (草稿路径, 未显式指定 spec_type 时跟随的默认模式)
+    // --spec-type 的取值统一带 draft- 前缀，与 validate_drafter_config 的能力标记一致。
     let drafter: Option<(&str, &str)> = mtp_draft_path
         .map(|path| (path, "draft-mtp"))
-        .or_else(|| dspark_draft_path.map(|path| (path, "dspark")))
-        .or_else(|| dflash_draft_path.map(|path| (path, "dflash")));
+        .or_else(|| dspark_draft_path.map(|path| (path, "draft-dspark")))
+        .or_else(|| dflash_draft_path.map(|path| (path, "draft-dflash")));
     if let Some((draft_path, _)) = drafter {
         cmd.arg("-md").arg(draft_path);
         if let Some(device) = selected_device.as_deref().filter(|device| *device != "none") {
@@ -2347,6 +2467,7 @@ fn monitor_server(
     rx: &Receiver<String>,
     on_progress: &Arc<dyn Fn(ServerProgress) + Send + Sync>,
     on_ready: &Arc<dyn Fn() + Send + Sync>,
+    cancel: Option<&AtomicBool>,
 ) -> MonitorResult {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -2371,7 +2492,12 @@ fn monitor_server(
     let mut last_health_check = Instant::now() - Duration::from_secs(1);
     let mut max_progress = 0u32;
 
+    let is_cancelled = || cancel.is_some_and(|flag| flag.load(Ordering::SeqCst));
+
     loop {
+        if is_cancelled() {
+            return MonitorResult::Cancelled;
+        }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
                 add_log(&line);
@@ -2399,7 +2525,10 @@ fn monitor_server(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return MonitorResult::Exited,
+            // 管道断开也可能是 stop 杀了子进程：先判取消，再判静默退出。
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return if is_cancelled() { MonitorResult::Cancelled } else { MonitorResult::Exited };
+            }
         }
 
         if last_health_check.elapsed() >= Duration::from_millis(500) {
@@ -2432,7 +2561,7 @@ fn monitor_server(
         }
 
         if !is_server_running() {
-            return MonitorResult::Exited;
+            return if is_cancelled() { MonitorResult::Cancelled } else { MonitorResult::Exited };
         }
     }
 }
@@ -2456,6 +2585,26 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
     on_ready: impl Fn() + Send + Sync + 'static,
     on_error: impl Fn(ServerError) + Send + Sync + 'static,
 ) -> Result<()> {
+    start_server_internal(config, on_progress, on_ready, on_error, None).map(|_| ())
+}
+
+/// 调参专用：不清扫外部进程，释放所有权前必须等待返回的线程退出。
+pub(crate) fn start_tuning_server(
+    config: &ServerConfig,
+    cancel: Arc<AtomicBool>,
+    on_ready: impl Fn() + Send + Sync + 'static,
+    on_error: impl Fn(ServerError) + Send + Sync + 'static,
+) -> Result<std::thread::JoinHandle<()>> {
+    start_server_internal(config, |_| {}, on_ready, on_error, Some(cancel))
+}
+
+pub(crate) fn start_server_internal(
+    config: &ServerConfig,
+    on_progress: impl Fn(ServerProgress) + Send + Sync + 'static,
+    on_ready: impl Fn() + Send + Sync + 'static,
+    on_error: impl Fn(ServerError) + Send + Sync + 'static,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<std::thread::JoinHandle<()>> {
     eprintln!(
         "[server] start_server called with: ngl={}, n_ctx={}, host={}, port={}",
         config.ngl,
@@ -2479,6 +2628,9 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
         return Err(anyhow::anyhow!("{}", message));
     }
 
+    // 每次加载都清扫本应用目录树内的遗留 llama-server（上一次崩溃 / 切换版本化内核
+    // 留下的实例），跳过当前受管进程与向量服务。此前用 `cancel.is_none()` 当开关，
+    // 而生产路径都会传 Some(cancel)，导致这段清扫实际从未执行。
     stop_stale_servers_for_exe_excluding(&exe, &managed_llama_pids());
     log_session_separator(&format!(
         "开始加载模型：{}（端口 {}，监听 {}）",
@@ -2510,11 +2662,14 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
     let fired = Arc::new(AtomicBool::new(false));
     let generation = SERVER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let mut current_config = initial_config;
         let mut did_cpu_retry = false;
 
         loop {
+            if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                return;
+            }
             on_progress(ServerProgress {
                 progress: 1,
                 stage: if current_config.no_cuda {
@@ -2547,7 +2702,7 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
                 }
             };
 
-            match monitor_server(&current_config, &rx, &on_progress, &on_ready) {
+            match monitor_server(&current_config, &rx, &on_progress, &on_ready, cancel.as_deref()) {
                 MonitorResult::Ready => {
                     fired.store(true, Ordering::SeqCst);
                     eprintln!("[server] ready, entering post-ready watch loop (gen={})", generation);
@@ -2562,6 +2717,9 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
                     let mut pipes_closed = false;
                     let mut last_liveness_check = Instant::now();
                     loop {
+                        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                            return;
+                        }
                         if pipes_closed {
                             std::thread::sleep(Duration::from_millis(200));
                         } else {
@@ -2655,6 +2813,11 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
                     }
                     return;
                 }
+                MonitorResult::Cancelled => {
+                    // 主动取消：不重试、不报错、不弹「服务异常退出」。
+                    add_log("[server] 已取消本次加载。");
+                    return;
+                }
                 MonitorResult::Exited => {
                     // 静默退出也可能是 CUDA 问题，尝试 CPU 回退
                     if current_config.retry_cpu_fallback && !current_config.no_cuda && !did_cpu_retry {
@@ -2699,7 +2862,7 @@ pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
         }
     });
 
-    Ok(())
+    Ok(worker)
 }
 
 pub fn stop_server() -> Result<()> {
@@ -3124,6 +3287,90 @@ mod tests {
     }
 
     #[test]
+    fn parse_spec_types_from_help_reads_accepted_values() {
+        // b11982 实际输出（取值表在参数名同一行）。
+        let help = "--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache\n\
+                    \x20                                      comma-separated list of types of speculative decoding to use\n";
+        let types = super::parse_spec_types_from_help(help).expect("应解析出取值列表");
+        assert!(types.contains(&"draft-dflash".to_string()), "{types:?}");
+        assert!(types.contains(&"draft-dspark".to_string()), "{types:?}");
+        assert!(types.contains(&"draft-mtp".to_string()), "{types:?}");
+    }
+
+    /// 走真实内核验证：读取本机部署内核 `--help` 的 `--spec-type` 取值表，
+    /// 确认 DFlash 侧车不再被判成「内核不支持」。本机没装内核时跳过。
+    #[test]
+    fn kernel_spec_types_accepts_dflash_on_deployed_kernel() {
+        let exe = match std::env::var("AGENT_LLM_TEST_KERNEL") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                let exe = std::env::current_exe().unwrap_or_default();
+                let kernels = exe
+                    .parent()
+                    .map(|dir| dir.join("resources").join("kernels"))
+                    .unwrap_or_default();
+                match kernels.read_dir().ok().and_then(|mut entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .filter(|entry| entry.path().is_dir())
+                        .max_by_key(|entry| entry.file_name())
+                        .map(|entry| entry.path().join("llama-server.exe"))
+                }) {
+                    Some(path) => path,
+                    None => {
+                        eprintln!("跳过：未找到本机内核");
+                        return;
+                    }
+                }
+            }
+        };
+        let exe = exe.to_string_lossy().to_string();
+        if !std::path::Path::new(&exe).exists() {
+            eprintln!("跳过：内核不存在 {}", exe);
+            return;
+        }
+        let types = super::kernel_spec_types(&exe).expect("应能从内核 --help 读到取值表");
+        assert!(
+            types.iter().any(|value| value == "draft-dflash"),
+            "内核未声明 draft-dflash：{types:?}"
+        );
+        assert!(
+            super::spec_type_supported(Some(&types), "draft-dflash", &exe),
+            "DFlash 侧车应被判定为支持"
+        );
+    }
+
+    #[test]
+    fn parse_spec_types_from_help_ignores_other_options() {
+        // --spec-type-k 之类同前缀选项不能被当成取值表；没有 --spec-type 时返回 None。
+        assert!(super::parse_spec_types_from_help("--spec-type-k TYPE\n").is_none());
+        assert!(super::parse_spec_types_from_help("--spec-draft-n-max N\n").is_none());
+        // 解析不出取值时按「读不到」处理，交回二进制标记扫描，而不是当成不支持。
+        assert!(super::parse_spec_types_from_help("--spec-type\n").is_none());
+    }
+
+    #[test]
+    fn spec_type_supported_follows_kernel_list() {
+        let types = vec!["none".to_string(), "draft-mtp".to_string(), "draft-dflash".to_string()];
+        assert!(super::spec_type_supported(Some(&types), "draft-dflash", ""));
+        assert!(super::spec_type_supported(Some(&types), "draft-mtp", ""));
+        assert!(!super::spec_type_supported(Some(&types), "draft-dspark", ""));
+    }
+
+    #[test]
+    fn spec_type_supported_falls_back_to_split_binary_marker() {
+        // 回归场景：上游内核把 `draft-dflash` 拆成碎片存放，二进制里搜不到连续字节，
+        // 但类型名 `dflash` 仍在——读不到 --help 时不能因此判成不支持。
+        let dir = quant_test_dir("spec-marker");
+        let dll = dir.join("llama.dll");
+        std::fs::write(&dll, b"prefix-draft-d suffix-dflash tail").expect("write marker dll");
+        let exe = dir.join("llama-server.exe");
+        std::fs::write(&exe, b"stub").expect("write stub exe");
+        assert!(super::spec_type_supported(None, "draft-dflash", exe.to_str().unwrap()));
+        assert!(!super::spec_type_supported(None, "draft-dspark", exe.to_str().unwrap()));
+    }
+
+    #[test]
     fn parse_print_timing_extracts_tokens() {
         // prompt_eval 行返回 (P, 0)；eval 行返回 (0, C)；total 行返回 None。
         let prompt = "0.09.682.736 I slot print_timing: id  3 | task 0 | prompt eval time =      73.83 ms /    18 tokens (    4.10 ms per token,   243.79 tokens per second)";
@@ -3192,6 +3439,40 @@ mod tests {
     fn detect_error_identifies_vulkan_failure() {
         let error = super::detect_error("ggml-vulkan: failed to create device");
         assert_eq!(error.unwrap().error_type, "vulkan");
+    }
+
+    #[test]
+    fn detect_error_ignores_drafter_fitting_warning() {
+        // -fit 为草稿模型试建 context 时 ctx_other 尚未设置：内核原文标注这是
+        // 拟合期间的正常告警，之后仍会就绪（dflash / dspark 通用）。
+        let warning = "0.01.206.063 E llama_init_from_model: failed to initialize the context: \
+                       dflash requires ctx_other to be set (this warning is normal during memory fitting)";
+        assert!(super::detect_error(warning).is_none());
+
+        // 没有 fitting 标注的 ctx_other 报错仍然算真实加载失败。
+        let fatal = "llama_init_from_model: failed to initialize the context: \
+                     gemma4-assistant requires ctx_other to be set";
+        assert!(super::detect_error(fatal).is_some());
+    }
+
+    #[test]
+    fn detect_error_ignores_drafter_fitting_extra_model_warning() {
+        // 拟合阶段的第二条 W 级伴随日志：侧车模型没被计入显存拟合，内核降级为
+        // 「fitting without it」继续，之后仍会正常加载并启用推测解码。
+        // 这行含 "failed" + "llama" + "model"，不放行会被兜底规则判成「加载失败」。
+        let warning = "0.01.206.241 W operator (): failed to measure the memory of the extra \
+                       model, fitting without it: failed to create llama_context from model";
+        assert!(
+            super::detect_error(warning).is_none(),
+            "拟合阶段测不到侧车显存只是降级提示，不该判成加载失败"
+        );
+
+        // 真的创建 context 失败时仍然要判成加载失败（白名单只认 fitting 那一段）。
+        let fatal = "failed to create llama_context from model";
+        assert!(
+            super::detect_error(fatal).is_some(),
+            "非拟合阶段的 context 创建失败必须照常报错"
+        );
     }
 
     /// 写一个带指定张量类型的最小 GGUF（只需解析器能读出 tensor_type_summary）。

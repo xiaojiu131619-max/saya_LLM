@@ -47,6 +47,7 @@ pub async fn download_and_update(
     use_mirror: Option<bool>,
     mirror_url: Option<String>,
 ) -> Result<String, String> {
+    let guard = crate::services::benchmark::acquire_lifecycle()?;
     let app2 = app.clone();
     let url2 = url.clone();
     let version2 = version.clone();
@@ -54,6 +55,7 @@ pub async fn download_and_update(
     let proxy = proxy_from_state(&state);
 
     tokio::task::spawn_blocking(move || {
+        let _guard = guard;
         if process_manager::is_server_running() {
             app2.emit(
                 "updater:progress",

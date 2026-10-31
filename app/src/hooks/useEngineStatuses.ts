@@ -7,13 +7,15 @@ export type EngineStatusMap = {
   fetchedAt: number;
 };
 
-// ---- fast-27b 引擎的共享标识 -------------------------------------------------
+// ---- NiNfer 引擎的共享标识 -------------------------------------------------
 // 引擎不是 GGUF 模型，进不了 state.models；会话与用量都挂在这个合成运行时模型 ID 下。
 export const FAST27B_SERVICE_ID = 'engine:fast27b';
 export const FAST27B_SERVICE_COLOR = '#0ea5e9';
-export const FAST27B_SERVICE_LABEL = 'fast-27b';
+export const FAST27B_SERVICE_LABEL = 'NiNfer';
 export const FAST27B_DEFAULT_PORT = 8094;
 export const FAST27B_DEFAULT_MODEL_ID = 'qwen3.8-27b';
+/** Saluki 槽位的模型 id（start-saluki-best.bat 同款，引擎未上报时的兜底）。 */
+export const FAST27B_SALUKI_MODEL_ID = 'underdog-saluki-27b';
 export const FAST27B_DEFAULT_CONTEXT_WINDOW = 262144;
 /** 引擎启动参数硬编码 --max-concurrency 1，界面上不可配置。 */
 export const FAST27B_MAX_CONCURRENCY = 1;
@@ -63,7 +65,7 @@ export function refreshEngineStatus(): Promise<void> {
 }
 
 /**
- * fast-27b 引擎运行状态（桌面环境常驻轮询，3 秒一次，多处调用共享同一份快照）。
+ * NiNfer 引擎运行状态（桌面环境常驻轮询，3 秒一次，多处调用共享同一份快照）。
  * 与「当前对话后端」无关：服务状态页与侧边栏在主模型后端下同样需要它，
  * 用来判断引擎是否也已在跑。
  */
@@ -92,7 +94,7 @@ export function useEngineStatuses(): EngineStatusMap {
  */
 export interface EngineServiceView {
   label: string;
-  /** Swift 27B / Heretic 27B */
+  /** Saluki 27B / Heretic 27B */
   modelLabel: string;
   /** 进程存活。 */
   running: boolean;
@@ -138,7 +140,7 @@ export function fast27bServiceView(status: Fast27bStatus | null): EngineServiceV
   const faultKind = status?.fault_kind ?? null;
   return {
     label: FAST27B_SERVICE_LABEL,
-    modelLabel: status?.selected_model === 'swift' ? 'Swift 27B' : 'Heretic 27B',
+    modelLabel: status?.selected_model === 'saluki' ? 'Saluki 27B' : 'Heretic 27B',
     running: Boolean(status?.running),
     serviceable: Boolean(status?.running) && !status?.degraded,
     apiReachable: Boolean(status?.api_reachable),
@@ -151,7 +153,9 @@ export function fast27bServiceView(status: Fast27bStatus | null): EngineServiceV
     faultKindText: faultKind ? (FAULT_KIND_LABELS[faultKind] ?? faultKind) : null,
     port: status?.port ?? FAST27B_DEFAULT_PORT,
     lan: Boolean(status?.lan),
-    modelId: status?.model_id ?? FAST27B_DEFAULT_MODEL_ID,
+    // 引擎未上报 model_id（未启动/旧引擎）时按所选槽位兜底。
+    modelId: status?.model_id
+      ?? (status?.selected_model === 'saluki' ? FAST27B_SALUKI_MODEL_ID : FAST27B_DEFAULT_MODEL_ID),
     contextWindow,
     apiKey: status?.api_key ?? '',
     devicePoolTokens: poolTokens,

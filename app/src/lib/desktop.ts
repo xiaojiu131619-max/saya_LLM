@@ -10,7 +10,10 @@ import {
 } from '@/lib/reasoningGears';
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
-import { filterLlamaCppServerTools } from '@/lib/llamaTools';
+import { prepareFast27bMessages } from '@/lib/fast27bMedia';
+import { buildServerConfig } from '@/lib/serverConfig';
+import type { ServerConfig } from '@/lib/ipc/model';
+export { buildServerConfig } from '@/lib/serverConfig';
 import { resolveApiName } from '@/lib/modelIdentity';
 import { isDesktopRuntime } from '@/lib/desktopRuntime';
 import {
@@ -21,7 +24,11 @@ import {
 } from '@/lib/desktopState';
 import { getDesktopVideoRuntimeInfo, getExternalApiKeyForSession, logDesktopEvent } from '@/lib/ipc';
 import type { DesktopModelInfo, PingResult } from '@/lib/ipc';
+import { assertNoAutoTune, ensureAutoTuneRuntime } from '@/lib/autoTuneRuntime';
+import { stopDesktopServer as invokeStopDesktopServer } from '@/lib/ipc/server';
 import type { VramSnapshot } from '@/lib/vramMeasurement';
+import { collectCompletionMetrics, finalizeCompletionMetrics } from '@/lib/completionMetrics';
+import type { ChatCompletionMetrics, ChatToolCall } from '@/lib/completionMetrics';
 
 // ---------------------------------------------------------------------------
 // 传输层再导出
@@ -62,15 +69,7 @@ export interface ChatToolSpec {
 }
 
 /** 模型在流式响应中请求的一次工具调用。 */
-export interface ChatToolCall {
-  id: string;
-  name: string;
-  /** 已解析的参数对象；JSON 不合法时保留原文在 rawArguments。 */
-  arguments: Record<string, unknown>;
-  rawArguments: string;
-  /** rawArguments 是否解析成了合法的 JSON 对象；false 时调用方必须回填错误，不能拿空参数真的执行。 */
-  argumentsValid: boolean;
-}
+export type { ChatToolCall, ChatCompletionMetrics } from './completionMetrics';
 
 export interface ChatCompletionMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -84,72 +83,6 @@ export interface ChatCompletionMessage {
   /** role = tool 时必须带上，对应发起调用的 tool_call id。 */
   tool_call_id?: string;
   name?: string;
-}
-
-interface ServerConfig {
-  executable_path: string;
-  model_path: string;
-  model_alias: string | null;
-  port: number;
-  host: string;
-  api_key: string | null;
-  ngl: number;
-  n_ctx: number;
-  batch_size: number;
-  ubatch_size: number;
-  threads: number;
-  parallel: number;
-  flash_attn: boolean;
-  kv_offload: boolean;
-  kv_unified: boolean;
-  mmap: boolean;
-  mlock: boolean;
-  no_warmup: boolean;
-  cache_type_k: string;
-  cache_type_v: string;
-  cache_type_k_enabled: boolean;
-  cache_type_v_enabled: boolean;
-  rope_freq_base: number | null;
-  rope_freq_scale: number | null;
-  seed: number | null;
-  chat_template: string | null;
-  mmproj_path: string | null;
-  mtp_draft_path: string | null;
-  dspark_draft_path: string | null;
-  dflash_draft_path: string | null;
-  spec_draft_n_max: number | null;
-  spec_type: string | null;
-  ncmoe: number;
-  tools: string | null;
-  reasoning_budget: number;
-  /** 向量/重排专用：传 --embeddings 限定服务只提供向量用途。 */
-  embedding?: boolean;
-  /** --pooling 取值（none/mean/cls/last/rank）；null = 用模型默认。 */
-  pooling?: string | null;
-  /** 启用重排端点 --rerank。 */
-  rerank?: boolean;
-  /** --embd-normalize 归一化方式；null = 内核默认 2。 */
-  embd_normalize?: number | null;
-  device: string | null;
-  main_gpu: number | null;
-  retry_cpu_fallback: boolean;
-  no_cuda: boolean;
-}
-
-interface StreamUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-}
-
-interface StreamTimings {
-  prompt_n?: number;
-  predicted_n?: number;
-  prompt_ms?: number;
-  predicted_ms?: number;
-  prompt_per_second?: number;
-  predicted_per_second?: number;
-  tokens_per_second?: number;
 }
 
 interface ChatCompletionChoice {
@@ -183,18 +116,6 @@ interface RawToolCallDelta {
   function?: { name?: string; arguments?: string };
 }
 
-export interface ChatCompletionMetrics {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  tokensPerSec?: number;
-  firstTokenDelay: number;
-  genTime: number;
-  ctxUsed: number;
-  ctxTotal: number;
-  /** 本轮模型请求的工具调用（已按 index 合并分片）。空数组 = 没有工具调用。 */
-  toolCalls: ChatToolCall[];
-}
 
 function createAbortError(partialMetrics?: Partial<ChatCompletionMetrics>) {
   const error = new Error('已停止生成。');
@@ -627,106 +548,6 @@ export function serverErrorHint(error: unknown): string {
   return '请确认模型已经加载完成，llama-server 正在运行。';
 }
 
-function buildServerConfig(
-  model: ModelInfo,
-  port: number,
-  executablePath: string,
-  apiConfig?: ExternalApiConfig,
-  tools?: string[]
-): ServerConfig {
-  if (!model.filePath) {
-    throw new Error('这个模型没有本地 GGUF 文件路径，不能启动真实推理服务。');
-  }
-
-  const config = model.loadConfig;
-  const gpuLayers = Math.max(0, config.gpuLayers);
-  const cpuOnly = gpuLayers === 0;
-  const ctxLength = Math.max(1, config.ctxLength);
-  const moeCpuLayers = Math.max(0, config.moeCpuLayers);
-  const reasoningBudget = Math.max(0, Math.round(Number(config.reasoningBudget ?? 0)));
-  const ropeFreqBase = config.ropeFreqBaseEnabled && Number(config.ropeFreqBase) > 0
-    ? Number(config.ropeFreqBase)
-    : null;
-  const ropeFreqScale = config.ropeFreqScaleEnabled && Number(config.ropeFreqScale) > 0
-    ? Number(config.ropeFreqScale)
-    : null;
-  const seed = config.seedEnabled ? Math.round(Number(config.seed ?? -1)) : null;
-  const chatTemplate = config.chatTemplate?.trim() || null;
-  const enabledTools = filterLlamaCppServerTools(tools ?? []);
-
-  // 推测解码模式与模型实际能力的交集：用户选了但模型没有对应侧车/内置 MTP 时，
-  // 显式回退为 off（不静默传一个没有文件的路径）。
-  const requestedMode = config.speculativeDecoding;
-  const speculativeMode = requestedMode === 'mtp' && !model.supportsMtp
-    ? 'off'
-    : requestedMode === 'dspark' && !model.dsparkDraftPath
-      ? 'off'
-      : requestedMode === 'dflash' && !model.dflashDraftPath
-        ? 'off'
-        : requestedMode;
-  const mtpDraft = speculativeMode === 'mtp' ? (model.mtpDraftPath ?? null) : null;
-  const dsparkDraft = speculativeMode === 'dspark' ? (model.dsparkDraftPath ?? null) : null;
-  const dflashDraft = speculativeMode === 'dflash' ? (model.dflashDraftPath ?? null) : null;
-  // 显式模式传新拼写（dspark/dflash）；MTP 沿用兼容拼写 draft-mtp。
-  const specType = speculativeMode === 'mtp' ? 'draft-mtp'
-    : speculativeMode === 'dspark' ? 'dspark'
-      : speculativeMode === 'dflash' ? 'dflash'
-        : null;
-  // 草稿深度只在推测解码已启用且用户显式开启时传，None=不传（用内核默认）。
-  // 模式为 off 时即使持久化里开着也忽略，避免在没有 --spec-type 的命令行上残留孤立参数。
-  const specDraftNMax = speculativeMode !== 'off' && config.specDraftNMaxEnabled
-    ? Math.min(16, Math.max(1, Math.round(Number(config.specDraftNMax) || 1)))
-    : null;
-  const hasMultimodalProjector = Boolean(
-    model.mmprojPath && (model.supportsVision || model.supportsAudio)
-  );
-
-  return {
-    executable_path: executablePath || 'resources/llama-server.exe',
-    model_path: model.filePath ?? '',
-    model_alias: resolveApiName(model),
-    port,
-    host: apiHost(apiConfig),
-    api_key: apiKey(apiConfig),
-    ngl: gpuLayers,
-    n_ctx: ctxLength,
-    batch_size: config.batchSize,
-    ubatch_size: config.physicalBatchSize,
-    threads: config.threads,
-    parallel: config.parallel,
-    flash_attn: config.fastAttention,
-    kv_offload: cpuOnly ? false : config.kvCache,
-    kv_unified: config.kvUnified,
-    mmap: config.mmap,
-    mlock: config.mlock,
-    no_warmup: config.noWarmup,
-    cache_type_k: config.cacheTypeK,
-    cache_type_v: config.cacheTypeV,
-    cache_type_k_enabled: config.cacheTypeKEnabled,
-    cache_type_v_enabled: config.cacheTypeVEnabled,
-    rope_freq_base: ropeFreqBase,
-    rope_freq_scale: ropeFreqScale,
-    seed,
-    chat_template: chatTemplate,
-    mmproj_path: hasMultimodalProjector ? (model.mmprojPath ?? null) : null,
-    mtp_draft_path: mtpDraft,
-    dspark_draft_path: dsparkDraft,
-    dflash_draft_path: dflashDraft,
-    spec_draft_n_max: specDraftNMax,
-    spec_type: specType,
-    ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
-    tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
-    reasoning_budget: reasoningBudget,
-    embedding: false,
-    pooling: null,
-    rerank: false,
-    embd_normalize: null,
-    device: cpuOnly ? 'none' : null,
-    main_gpu: cpuOnly ? null : 0,
-    retry_cpu_fallback: !cpuOnly,
-    no_cuda: cpuOnly,
-  };
-}
 
 /// 向量/重排模型的独立服务配置：只保留与显存/上下文相关的通用参数，
 /// 追加 --embeddings / --pooling / --rerank / --embd-normalize。
@@ -811,6 +632,8 @@ export async function startEmbeddingServer(
   embdNormalize?: number,
 ) {
   if (!isDesktopRuntime()) return;
+  await ensureAutoTuneRuntime();
+  assertNoAutoTune();
   // 对外开放时同样要求鉴权，与对话服务一致。
   let storedApiKey: string | null = null;
   if (apiConfig?.enabled) {
@@ -822,6 +645,7 @@ export async function startEmbeddingServer(
   const runtimeApiConfig = apiConfig
     ? { ...apiConfig, apiKey: storedApiKey ?? undefined }
     : undefined;
+  assertNoAutoTune();
   await invoke('start_embedding_server', {
     config: buildEmbeddingServerConfig(model, port, executablePath, runtimeApiConfig, pooling, embdNormalize),
   });
@@ -835,6 +659,8 @@ export async function startDesktopServer(
   tools?: string[]
 ) {
   if (!isDesktopRuntime()) return;
+  await ensureAutoTuneRuntime();
+  assertNoAutoTune();
   let storedApiKey: string | null = null;
   if (apiConfig?.enabled) {
     try {
@@ -849,7 +675,15 @@ export async function startDesktopServer(
   const runtimeApiConfig = apiConfig
     ? { ...apiConfig, apiKey: storedApiKey ?? undefined }
     : undefined;
+  assertNoAutoTune();
   await invoke('start_server', { config: buildServerConfig(model, port, executablePath, runtimeApiConfig, tools) });
+}
+
+/** 调参独占主服务，普通卸载不得中断候选进程。停止调参须走带 run_id 的取消请求。 */
+export async function stopDesktopServer() {
+  await ensureAutoTuneRuntime();
+  assertNoAutoTune();
+  await invokeStopDesktopServer();
 }
 
 export async function getDesktopVramSnapshot(): Promise<VramSnapshot | null> {
@@ -1009,7 +843,7 @@ async function sanitizeMessagesForLlama(
     role: message.role,
     content: await sanitizeContentForLlama(message.content, useNativeVideo),
     // 工具回填轮次必须保留 assistant.tool_calls 与 tool.tool_call_id；
-    // 只清洗多模态 content 会丢掉这两组协议字段，fast-27b/llama-server
+    // 只清洗多模态 content 会丢掉这两组协议字段，NiNfer/llama-server
     // 会因此无法把 MCP 执行结果接回同一次对话。
     ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
     ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
@@ -1135,6 +969,7 @@ export async function streamChatCompletion(options: {
   /** 模型的思考挡位档案（按对话模板自动识别）；不传表示未识别，只按预算请求。 */
   reasoningProfile?: ReasoningProfile;
   videoSupport?: VideoSupportLevel;
+  mediaBackend?: 'llama' | 'fast27b';
   apiKey?: string;
   signal?: AbortSignal;
   /** 工具清单（llama.cpp 原生工具由服务端 --tools 提供；这里传 MCP 工具）。 */
@@ -1147,6 +982,7 @@ export async function streamChatCompletion(options: {
   const requestStartedAt = performance.now();
   let firstTokenAt: number | null = null;
   let latestUsage: Partial<ChatCompletionMetrics> = {};
+  let finishReason: string | undefined;
   let reasoningContent = '';
   let latestToolCalls: ChatToolCall[] = [];
   const localAbortController = new AbortController();
@@ -1170,17 +1006,24 @@ export async function streamChatCompletion(options: {
     options.videoSupport ?? 'none',
     abortSignal,
   );
-  validateMediaSupport(serverModalities, hasAudio, hasVideo);
+  const fast27b = options.mediaBackend === 'fast27b';
+  if (!fast27b) validateMediaSupport(serverModalities, hasAudio, hasVideo);
 
   const buildMessages = async (useNativeVideo: boolean): Promise<ChatCompletionMessage[]> => {
-    const sanitizedMessages = await sanitizeMessagesForLlama(options.messages, useNativeVideo);
+    const sanitizedMessages = fast27b
+      ? prepareFast27bMessages(options.messages, serverModalities)
+      : await sanitizeMessagesForLlama(options.messages, useNativeVideo);
     return options.config.systemPrompt.trim()
       ? [{ role: 'system', content: options.config.systemPrompt.trim() }, ...sanitizedMessages]
       : sanitizedMessages;
   };
 
   const messages = await buildMessages(serverModalities.video);
-  logMultimodalMode(hasAudio, hasVideo, serverModalities);
+  if (fast27b) {
+    if (hasVideo) logInfo('multimodal', 'NiNfer 使用原生 video_url 视频输入；仅分析画面，不识别声轨。');
+  } else {
+    logMultimodalMode(hasAudio, hasVideo, serverModalities);
+  }
 
   const reasoningMode = options.config.reasoningMode ?? 'auto';
   const reasoningBudget = Math.max(0, Math.round(Number(options.reasoningBudget ?? 0)));
@@ -1231,6 +1074,10 @@ export async function streamChatCompletion(options: {
     model: requestModelName,
     messages,
     stream: true,
+    // 显式索取 usage：llama.cpp 流式默认不带 usage 分片，缺了它只能靠本地计数估算。
+    // NiNfer 引擎（fast27b）不开这个字段——它不是 llama.cpp 的参数集，避免多一次 400 往返；
+    // 那边同样有本地 delta 计数兜底。
+    ...(fast27b ? {} : { stream_options: { include_usage: true } }),
     temperature: options.config.temperature,
     top_p: options.config.topP,
     repeat_penalty: options.config.repeatPenalty,
@@ -1245,12 +1092,17 @@ export async function streamChatCompletion(options: {
     ...(reasoningPlan.enableThinking === false ? {
       reasoning_budget: 0,
       thinking_budget_tokens: 0,
+      // ninfer 引擎只认 thinking_budget；llama-server 用前两个字段。
+      ...(fast27b ? { thinking_budget: 0 } : {}),
       ...(reasoningTemplateKwargs ? { chat_template_kwargs: reasoningTemplateKwargs } : {}),
     } : {}),
     ...(supportsReasoning ? {
       reasoning_budget: effectiveReasoningBudget,
       reasoning_format: 'deepseek',
       thinking_budget_tokens: effectiveReasoningBudget,
+      // 引擎只读 thinking_budget（实测 reasoning_budget / thinking_budget_tokens 命中 0 次，
+      // 思考仍按服务端 --default-thinking-budget 跑）。引擎拒绝 <1024 的显式值，故只在达标时下发。
+      ...(fast27b && effectiveReasoningBudget >= 1024 ? { thinking_budget: effectiveReasoningBudget } : {}),
       // 挡位同时走两个通道：native 字段（llama-server 会把它绑定进模板上下文）
       // 与 chat_template_kwargs（模板自定义路径 / 老内核只认后者）。
       ...(reasoningPlan.effort ? { reasoning_effort: reasoningPlan.effort } : {}),
@@ -1258,7 +1110,7 @@ export async function streamChatCompletion(options: {
     } : {}),
   };
 
-  let activeRequestBody = requestBody;
+  let activeRequestBody: Record<string, unknown> = requestBody;
   const apiStartedAt = performance.now();
   let response = await fetch(chatUrl, {
     method: 'POST',
@@ -1276,7 +1128,25 @@ export async function streamChatCompletion(options: {
   if (!response.ok) {
     let firstError = await response.text();
     let retried = false;
-    if (hasVideo && serverModalities.video) {
+    // 老版本 llama.cpp 不认 stream_options 会直接 400：只有错误体明确指向这个字段时才
+    // 剔掉重试一次（其它 400 可能是视频 / 参数问题，重试没有意义，还会多打一次请求）。
+    if (response.status === 400
+      && 'stream_options' in activeRequestBody
+      && /stream_options|unknown field|unrecognized|unsupported/i.test(firstError)) {
+      const { stream_options: droppedStreamOptions, ...bodyWithoutStreamOptions } = activeRequestBody;
+      void droppedStreamOptions;
+      logInfo('chat', '服务端不接受 stream_options，已去掉该字段重试本轮请求。');
+      activeRequestBody = bodyWithoutStreamOptions;
+      response = await fetch(chatUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(activeRequestBody),
+        signal: abortSignal,
+      });
+      retried = true;
+      if (!response.ok) firstError = await response.clone().text();
+    }
+    if (!fast27b && hasVideo && serverModalities.video) {
       logInfo('multimodal', '原生视频请求失败，自动改用图像帧兼容模式重试。');
       activeRequestBody = {
         ...requestBody,
@@ -1306,7 +1176,12 @@ export async function streamChatCompletion(options: {
       const errorBody = `${retryError || firstError}`;
       const truncated = errorBody.length > 500 ? errorBody.slice(0, 500) + '…（响应已截断）' : errorBody;
       void logDesktopEvent('error', 'api', `POST ${chatUrl} 失败：HTTP ${response.status}，响应体：${truncated || '（空）'}`);
-      throw new Error(`llama-server 返回 ${response.status}: ${truncated}`);
+      const mediaHint = fast27b && response.status === 413
+        ? '附件请求过大，请缩小照片或视频后重试。'
+        : fast27b && /media_budget_exceeded|context_length_exceeded/.test(errorBody)
+          ? '照片、视频或历史消息超过引擎预算，请减少附件或新建会话。'
+          : '';
+      throw new Error(`${fast27b ? 'NiNfer' : 'llama-server'} 返回 ${response.status}: ${mediaHint}${truncated}`);
     }
   }
 
@@ -1333,7 +1208,9 @@ export async function streamChatCompletion(options: {
     }
     latestUsage = collectCompletionMetrics(latestUsage, json);
     latestUsage.toolCalls = latestToolCalls;
-    return finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
+    const metrics = finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
+    if (choice?.finish_reason) metrics.finishReason = choice.finish_reason;
+    return metrics;
   }
 
   const reader = response.body.getReader();
@@ -1351,6 +1228,7 @@ export async function streamChatCompletion(options: {
     const record = json as { choices?: ChatCompletionChoice[] };
     const choice = record?.choices?.[0] as ChatCompletionChoice | undefined;
     let receivedContent = false;
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
 
     const reasoningToken = extractReasoningDelta(choice);
     if (reasoningToken) {
@@ -1471,7 +1349,18 @@ export async function streamChatCompletion(options: {
   }
 
   latestUsage.toolCalls = latestToolCalls;
-  return finalizeCompletionMetrics(latestUsage, requestStartedAt, firstTokenAt, options.ctxTotal, options.onUsage);
+  // 流式结束：服务端没下发 usage / timings 时，用本地 delta 计数兜底，
+  // 否则正常完成的回复在气泡统计里会退化成 `-- tok` / `-- tok/s`。
+  const finalMetrics = finalizeCompletionMetrics(
+    latestUsage,
+    requestStartedAt,
+    firstTokenAt,
+    options.ctxTotal,
+    options.onUsage,
+    streamedTokenCount,
+  );
+  if (finishReason) finalMetrics.finishReason = finishReason;
+  return finalMetrics;
   } finally {
     cleanupAbortListeners();
     if (getActiveChatAbortController() === localAbortController) {
@@ -1509,75 +1398,6 @@ function extractContentFromChoice(choice: ChatCompletionChoice | undefined) {
     ?? '';
 }
 
-function numeric(value: unknown) {
-  const next = Number(value ?? 0);
-  return Number.isFinite(next) && next > 0 ? next : undefined;
-}
-
-function collectCompletionMetrics(current: Partial<ChatCompletionMetrics>, json: unknown): Partial<ChatCompletionMetrics> {
-  if (typeof json !== 'object' || json === null) return current;
-  const record = json as { usage?: StreamUsage; timings?: StreamTimings };
-  const promptTokens = numeric(record.usage?.prompt_tokens) ?? numeric(record.timings?.prompt_n) ?? current.promptTokens;
-  const completionTokens = numeric(record.usage?.completion_tokens) ?? numeric(record.timings?.predicted_n) ?? current.completionTokens;
-  const totalTokens = numeric(record.usage?.total_tokens)
-    ?? (promptTokens && completionTokens ? promptTokens + completionTokens : undefined)
-    ?? current.totalTokens;
-  const tokensPerSec = numeric(record.timings?.predicted_per_second)
-    ?? numeric(record.timings?.tokens_per_second)
-    ?? current.tokensPerSec;
-
-  return {
-    ...current,
-    ...(promptTokens ? { promptTokens } : {}),
-    ...(completionTokens ? { completionTokens } : {}),
-    ...(totalTokens ? { totalTokens } : {}),
-    ...(tokensPerSec ? { tokensPerSec } : {}),
-  };
-}
-
-function finalizeCompletionMetrics(
-  latestUsage: Partial<ChatCompletionMetrics>,
-  requestStartedAt: number,
-  firstTokenAt: number | null,
-  ctxTotal = 0,
-  onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; tokensPerSec?: number; firstTokenDelay?: number; genTime?: number }) => void
-) {
-  const finishedAt = performance.now();
-  const genTime = Math.max(0, (finishedAt - requestStartedAt) / 1000);
-  const firstTokenDelay = firstTokenAt ? Math.max(0, (firstTokenAt - requestStartedAt) / 1000) : 0;
-  const promptTokens = Math.max(0, Math.round(latestUsage.promptTokens ?? 0));
-  const completionTokens = Math.max(0, Math.round(latestUsage.completionTokens ?? 0));
-  const totalTokens = Math.max(0, Math.round(latestUsage.totalTokens ?? promptTokens + completionTokens));
-  const fallbackTokensPerSec = completionTokens > 0 && genTime > firstTokenDelay
-    ? completionTokens / Math.max(0.001, genTime - firstTokenDelay)
-    : undefined;
-  const tokensPerSec = latestUsage.tokensPerSec ?? fallbackTokensPerSec;
-
-  const metrics: ChatCompletionMetrics = {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    ...(tokensPerSec && tokensPerSec > 0 ? { tokensPerSec } : {}),
-    firstTokenDelay,
-    genTime,
-    ctxUsed: promptTokens + completionTokens,
-    ctxTotal,
-    toolCalls: latestUsage.toolCalls ?? [],
-  };
-
-  if (totalTokens > 0) {
-    onUsage?.({
-      promptTokens,
-      completionTokens,
-      totalTokens,
-      ...(tokensPerSec && tokensPerSec > 0 ? { tokensPerSec } : {}),
-      firstTokenDelay,
-      genTime,
-    });
-  }
-
-  return metrics;
-}
 
 /**
  * 合并服务端增量下发的工具调用分片。

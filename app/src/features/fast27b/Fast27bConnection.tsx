@@ -8,7 +8,9 @@ export default function Fast27bConnection({ status, desktop, onOpenChat }: {
   const [copied, setCopied] = useState<'url' | 'model' | null>(null);
   const port = status?.port ?? 8094;
   const baseUrl = `http://127.0.0.1:${port}/v1`;
-  const modelId = status?.model_id ?? 'qwen3.8-27b';
+  // 引擎未上报 model_id 时按所选槽位兜底（与 fast-llm 启动器的 --model-id 同源）。
+  const modelId = status?.model_id
+    ?? (status?.selected_model === 'saluki' ? 'underdog-saluki-27b' : 'qwen3.8-27b');
   const copy = async (kind: 'url' | 'model', value: string) => {
     await navigator.clipboard.writeText(value);
     setCopied(kind);
@@ -36,7 +38,7 @@ export default function Fast27bConnection({ status, desktop, onOpenChat }: {
     <div className="flex items-start gap-2 rounded-[var(--radius-lg)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-caption)] leading-relaxed text-secondary-custom"><KeyRound className="mt-0.5 h-4 w-4 shrink-0" /><p>API key 使用高级配置中保存的值，客户端以 <code className="mono-font">Authorization: Bearer &lt;API key&gt;</code> 发送。{status?.lan ? `已开放局域网：其他设备使用本机局域网 IP 和端口 ${port}。` : '当前仅本机可访问；需要局域网接入时可在高级配置中开启。'}</p></div>
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] pt-4">
       <p className="text-[length:var(--font-caption)] text-secondary-custom">单并发 · 推理性能可在“性能”标签中查看</p>
-      <button type="button" onClick={onOpenChat} disabled={!desktop || !status?.api_ready} className="inline-flex items-center gap-2 rounded-[var(--radius-lg)] bg-[var(--accent)] px-4 py-2 text-[length:var(--font-caption)] font-medium text-[var(--text-on-accent)] disabled:cursor-not-allowed disabled:opacity-40"><MessageSquare className="h-4 w-4" />使用 fast-27b 对话</button>
+      <button type="button" onClick={onOpenChat} disabled={!desktop || !status?.api_ready} className="inline-flex items-center gap-2 rounded-[var(--radius-lg)] bg-[var(--accent)] px-4 py-2 text-[length:var(--font-caption)] font-medium text-[var(--text-on-accent)] disabled:cursor-not-allowed disabled:opacity-40"><MessageSquare className="h-4 w-4" />使用 NiNfer 对话</button>
     </div>
   </section>;
 }

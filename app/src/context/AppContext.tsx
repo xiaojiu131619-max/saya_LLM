@@ -21,6 +21,10 @@ import {
 } from '@/lib/desktop';
 import { DEFAULT_MAX_COMPLETION_TOKENS, RECOMMENDED_CTX_LENGTH, maxGpuLayers } from '@/lib/modelDefaults';
 import { getModelThemeGroup } from '@/lib/modelTheme';
+import { autoTuneManager, ensureAutoTuneRuntime } from '@/lib/autoTuneRuntime';
+import { canApplyAutoTune, tuneRecordPatch, type AutoTuneAuthorization } from '@/lib/autoTuneTask';
+import type { AutoTuneResult } from '@/lib/ipc/model';
+import { activateMainModel, clearMainLoadedModels } from '@/lib/modelState';
 
 /**
  * 把 hex 颜色朝白（amount > 0）或黑（amount < 0）线性混合。
@@ -48,9 +52,18 @@ type Action =
   | { type: 'SET_THEME_MODE'; payload: ThemeMode }
   | { type: 'SET_SYNC_SYSTEM_ACCENT'; payload: boolean }
   | { type: 'SET_ACRYLIC_MODE'; payload: boolean }
+  // 界面偏好：减少动画、发送快捷键。
+  | { type: 'SET_REDUCE_MOTION'; payload: boolean }
+  | { type: 'SET_ENTER_TO_SEND'; payload: boolean }
+  // 数据维护：清空全部对话历史、清空使用统计、界面偏好恢复默认值。
+  | { type: 'CLEAR_ALL_CHAT_HISTORY' }
+  | { type: 'RESET_USAGE' }
+  | { type: 'RESET_UI_PREFS' }
   | { type: 'TOGGLE_SIDEBAR' }
+  | { type: 'SET_SIDEBAR_WIDTH'; payload: number }
   | { type: 'SET_SORT'; payload: SortType }
   | { type: 'SET_GRID_COLUMNS'; payload: GridColumnType }
+  | { type: 'ACTIVATE_MODEL'; payload: string }
   | { type: 'SET_ACTIVE_MODEL'; payload: string | null }
   | { type: 'SET_SELECTED_MODEL'; payload: string | null }
   | { type: 'UPDATE_MODELS'; payload: ModelInfo[] }
@@ -61,12 +74,13 @@ type Action =
   | { type: 'DELETE_CHAT_SESSION'; payload: { modelId: string; sessionId: string } }
   | { type: 'RENAME_CHAT_SESSION'; payload: { modelId: string; sessionId: string; title: string } }
   | { type: 'ADD_MESSAGE'; payload: { modelId: string; sessionId: string; message: Message } }
-  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[] } }
+  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[]; warnings?: string[] } }
   | { type: 'SET_MESSAGE_STREAMING'; payload: { modelId: string; sessionId: string; messageId: string; streaming: boolean; stats?: Message['stats'] } }
   | { type: 'REPLACE_MESSAGE_AND_TRUNCATE_AFTER'; payload: { modelId: string; sessionId: string; messageId: string; message: Message } }
   | { type: 'DELETE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string } }
   | { type: 'CLEAR_MESSAGES'; payload: { modelId: string; sessionId: string } }
   | { type: 'SET_SEARCH'; payload: string }
+  | { type: 'APPLY_AUTO_TUNE'; payload: { authorization: AutoTuneAuthorization; result: AutoTuneResult } }
   | { type: 'UPDATE_MODEL_CONFIG'; payload: { modelId: string; config: Partial<ModelLoadConfig> } }
   | { type: 'REMEMBER_MODEL_LAUNCH_CONFIG'; payload: { modelId: string; config: ModelLoadConfig } }
   | { type: 'MARK_MODEL_RECENTLY_USED'; payload: { modelId: string } }
@@ -115,6 +129,30 @@ type Action =
         totalTokens: number;
         responseCount: number;
       };
+    }
+  | {
+      /**
+       * 引擎（NiNfer / Strata）用量的快照式写入。
+       *
+       * 引擎的请求记录本身是「全量快照」（最近 24 小时、按请求一条），
+       * 与主模型的增量累加不同：这里直接用它算出的累计值覆盖该后端条目，
+       * 避免每次轮询都重复累加。按天分桶沿用主模型的本地日期口径。
+       */
+      type: 'SET_ENGINE_USAGE';
+      payload: {
+        modelId: string;
+        modelName: string;
+        modelColor: string;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        responseCount: number;
+        totalTokensPerSec: number;
+        totalFirstTokenDelay: number;
+        totalGenTime: number;
+        dailyTokens: Record<string, number>;
+        lastUsedAt: number;
+      };
     };
 
 const initialSystemStats: SystemStats = {
@@ -124,6 +162,18 @@ const initialSystemStats: SystemStats = {
 };
 
 const STORAGE_KEY = 'agent-llm-local-state-v1';
+
+/** 聊天侧边栏宽度的默认值与上下限（拖拽分隔条时同样按这套值收口）。 */
+export const SIDEBAR_DEFAULT_WIDTH = 288;
+export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_MAX_WIDTH = 480;
+
+/** 把任意来源（拖拽 / localStorage）的宽度收敛到合法区间；非法值回落默认。 */
+export function clampSidebarWidth(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(numeric)));
+}
 
 interface StoredAppState {
   chatConfig?: Partial<ChatGenerationConfig>;
@@ -139,7 +189,7 @@ interface StoredAppState {
   modelThemeGroups?: Record<string, string>;
   modelApiNames?: Record<string, string>;
   modelCustomLogos?: Record<string, string>;
-  ui?: Partial<Pick<AppState, 'theme' | 'themeMode' | 'syncSystemAccent' | 'acrylicMode' | 'sidebarCollapsed' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
+  ui?: Partial<Pick<AppState, 'theme' | 'themeMode' | 'syncSystemAccent' | 'acrylicMode' | 'reduceMotion' | 'enterToSend' | 'sidebarCollapsed' | 'sidebarWidth' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
     themePreferenceVersion?: number;
   };
 }
@@ -181,10 +231,85 @@ function sanitizeStoredSessions(sessionsByModel: Record<string, ChatSession[]>) 
   );
 }
 
+/**
+ * 持久化前剥离消息里的媒体二进制。
+ *
+ * 图片 / 音频 / 视频以 data URL（base64）挂在 `multimodalContent` 上，单张截图
+ * 就能到几 MB；localStorage 配额通常只有 5–10 MB，写满后 `setItem` 抛
+ * QuotaExceededError，之后的会话与配置**全部**不再落盘。媒体只在本次运行内
+ * 可用，重启后保留文字与「N 个附件」的说明；不让它挤掉真正需要持久化的会话。
+ */
+function stripPersistedMedia(sessionsByModel: Record<string, ChatSession[]>) {
+  return Object.fromEntries(
+    Object.entries(sessionsByModel).map(([modelId, sessions]) => [
+      modelId,
+      sessions.map((session) => ({
+        ...session,
+        messages: session.messages.map((message) => {
+          if (!message.multimodalContent) return message;
+          const textParts = message.multimodalContent.filter((part) => part.type === 'text');
+          if (textParts.length === message.multimodalContent.length) return message;
+          return { ...message, multimodalContent: textParts.length > 0 ? textParts : undefined };
+        }),
+      })),
+    ]),
+  );
+}
+
+/** 自动标题的最大字数：超出后截断并加省略号。
+    侧边栏标题现在按两行折行显示（见 ChatSidebar 的 SessionRow），
+    24 字会把「写一段 200 字左右的介绍，主题是你自己，尽量慢一点输出。」这类句子砍掉一半。 */
+const AUTO_TITLE_MAX_LENGTH = 40;
+
+/** 旧版自动标题的字数上限：超出的部分被硬切掉且不带省略号。 */
+const LEGACY_AUTO_TITLE_MAX_LENGTH = 24;
+
+function titleFromFirstUserMessage(message: Message) {
+  if (message.role !== 'user') return null;
+  const title = message.content.trim().replace(/\s+/g, ' ');
+  if (!title) return null;
+  return title.length > AUTO_TITLE_MAX_LENGTH ? `${title.slice(0, AUTO_TITLE_MAX_LENGTH)}…` : title;
+}
+
+/**
+ * 把旧规则生成的自动标题按新规则重算一遍。
+ * 判定条件是「当前标题 == 首条用户消息的前 24 字」——只有机器按旧规则生成的标题才会命中，
+ * 用户手动改过名的会话（标题对不上）保持原样，不会被覆盖。
+ */
+function refreshLegacyAutoTitles(sessionsByModel: Record<string, ChatSession[]>) {
+  return Object.fromEntries(
+    Object.entries(sessionsByModel).map(([modelId, sessions]) => [
+      modelId,
+      sessions.map((session) => {
+        const firstUserMessage = session.messages.find((message) => message.role === 'user');
+        if (!firstUserMessage) return session;
+        const source = firstUserMessage.content.trim().replace(/\s+/g, ' ');
+        if (!source || session.title !== source.slice(0, LEGACY_AUTO_TITLE_MAX_LENGTH)) return session;
+        const title = source.length > AUTO_TITLE_MAX_LENGTH ? `${source.slice(0, AUTO_TITLE_MAX_LENGTH)}…` : source;
+        return title === session.title ? session : { ...session, title };
+      }),
+    ])
+  );
+}
+
 const storedState = loadStoredState();
 const storedUi = storedState.ui ?? {};
 const storedApiConfig = storedState.apiConfig ?? {};
-const storedTheme = storedUi.themePreferenceVersion === 2 ? storedUi.theme : undefined;
+/**
+ * 主题持久化版本门控。
+ *
+ * themeMode 从版本 3 起单独持久化（版本 2 及更早只有 theme + manual flag）。
+ * 这里必须与落盘处写的版本号保持一致：曾经读 `=== 2` 而写 `3`，导致用户选的
+ * 主题永远读不回来——界面按默认「跟随系统」显示，设置页却写着用户选过的档位。
+ * 现在接受「>= 2」：版本 2 是初始提交写入的格式（theme + manual flag），
+ * 它的 theme 值同样是用户显式选择，只有 themeMode 需要从 legacy flag 推导。
+ */
+const THEME_PREFERENCE_VERSION = 3;
+const storedThemeVersion = Number(storedUi.themePreferenceVersion ?? 0);
+const storedTheme = storedThemeVersion >= 2
+  && (storedUi.theme === 'light' || storedUi.theme === 'dark')
+  ? storedUi.theme
+  : undefined;
 
 /**
  * GPU 卸载上限口径的一次性迁移（版本 2）：
@@ -242,7 +367,10 @@ const initialState: AppState = {
   themeMode: storedThemeMode(storedUi.themeMode, legacyThemeMode),
   syncSystemAccent: storedUi.syncSystemAccent ?? true,
   acrylicMode: storedUi.acrylicMode ?? false,
+  reduceMotion: storedUi.reduceMotion ?? false,
+  enterToSend: storedUi.enterToSend ?? true,
   sidebarCollapsed: storedUi.sidebarCollapsed ?? false,
+  sidebarWidth: clampSidebarWidth(storedUi.sidebarWidth),
   models: [],
   sortBy: storedUi.sortBy ?? 'default',
   gridColumns: storedUi.gridColumns ?? 2,
@@ -287,7 +415,7 @@ const initialState: AppState = {
       .sort(([, a], [, b]) => b - a)
       .slice(0, 3)
   ),
-  chatSessions: sanitizeStoredSessions(storedState.chatSessions ?? {}),
+  chatSessions: refreshLegacyAutoTitles(sanitizeStoredSessions(storedState.chatSessions ?? {})),
   activeChatSessionIds: storedState.activeChatSessionIds ?? {},
   // MCP 服务器配置以后端 config.json 为唯一真源，hydrate 时拉取，这里只给空初值。
   mcpServers: [],
@@ -296,7 +424,7 @@ const initialState: AppState = {
   // Agent 页 WebUI 标签的后端选择（会话级）：与对话页的后端各自独立。
   webuiEngine: 'main',
   // Agent 页标签（会话级）：默认 dsh 主框架。
-  agentTab: 'dsh',
+  agentTab: 'shiyi',
 };
 
 function todayKey() {
@@ -431,12 +559,6 @@ function mergeModels(current: ModelInfo[], incoming: ModelInfo[]) {
   return [...nonLocal, ...mergedLocal];
 }
 
-function titleFromFirstUserMessage(message: Message) {
-  if (message.role !== 'user') return null;
-  const title = message.content.trim().replace(/\s+/g, ' ').slice(0, 24);
-  return title || null;
-}
-
 function updateSessionList(
   sessions: ChatSession[],
   sessionId: string,
@@ -486,12 +608,51 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, syncSystemAccent: action.payload };
     case 'SET_ACRYLIC_MODE':
       return { ...state, acrylicMode: action.payload };
+    case 'SET_REDUCE_MOTION':
+      return { ...state, reduceMotion: action.payload };
+    case 'SET_ENTER_TO_SEND':
+      return { ...state, enterToSend: action.payload };
+    case 'CLEAR_ALL_CHAT_HISTORY':
+      // 只清空会话与消息，保留模型配置、使用统计与界面偏好。
+      return { ...state, chatSessions: {}, activeChatSessionIds: {} };
+    case 'RESET_USAGE':
+      // 使用统计按模型累加，清零不影响任何运行参数或会话内容。
+      return { ...state, usageByModel: {}, recentModelUsage: {} };
+    case 'RESET_UI_PREFS':
+      // 外观与交互偏好回到出厂值；主题跟随系统、强调色恢复自动同步。
+      // 不触碰 serverPort、模型目录、MCP 配置与对话记录。
+      return {
+        ...state,
+        themeMode: 'system',
+        theme: typeof window !== 'undefined' && window.matchMedia
+          && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+        syncSystemAccent: true,
+        acrylicMode: false,
+        reduceMotion: false,
+        enterToSend: true,
+        sidebarCollapsed: false,
+        // 文案承诺「侧边栏宽度恢复出厂值」，就必须一起重置，否则用户拖动过的宽度会留着。
+        sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
+        sortBy: 'default',
+        gridColumns: 2,
+      };
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed };
+    case 'SET_SIDEBAR_WIDTH':
+      return { ...state, sidebarWidth: action.payload };
     case 'SET_SORT':
       return { ...state, sortBy: action.payload };
     case 'SET_GRID_COLUMNS':
       return { ...state, gridColumns: action.payload };
+    case 'ACTIVATE_MODEL': {
+      const model = state.models.find((item) => item.id === action.payload);
+      if (!model || model.modelTask === 'embedding' || model.modelTask === 'rerank') return state;
+      return {
+        ...state,
+        activeModelId: action.payload,
+        models: activateMainModel(state.models, action.payload),
+      };
+    }
     case 'SET_ACTIVE_MODEL':
       return { ...state, activeModelId: action.payload };
     case 'SET_SELECTED_MODEL':
@@ -595,6 +756,7 @@ function appReducer(state: AppState, action: Action): AppState {
           ...(action.payload.content !== undefined ? { content: action.payload.content } : {}),
           ...(action.payload.reasoningContent !== undefined ? { reasoningContent: action.payload.reasoningContent } : {}),
           ...(action.payload.toolActivity !== undefined ? { toolActivity: action.payload.toolActivity } : {}),
+          ...(action.payload.warnings !== undefined ? { warnings: action.payload.warnings } : {}),
         } : m),
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
@@ -643,6 +805,21 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
     }
+    case 'APPLY_AUTO_TUNE': {
+      const { authorization, result } = action.payload;
+      if (state.autoTuneApplication?.runId === result.run_id) return state;
+      const target = state.models.find((model) => model.id === authorization.config.model_id);
+      const applied = result.run_id === authorization.config.run_id && result.model_id === authorization.config.model_id
+        && canApplyAutoTune(target, authorization);
+      return {
+        ...state,
+        autoTuneApplication: { runId: result.run_id, applied },
+        models: applied ? state.models.map((model) => model.id === result.model_id
+          ? { ...model, loadConfig: { ...model.loadConfig, ...tuneRecordPatch(result.best) } } : model) : state.models,
+        appStatus: applied ? `${authorization.modelName} 已自动应用调参结果。短负载实测不保证长对话或交互最优。`
+          : `${authorization.modelName} 的身份或完整加载配置已变化，未自动覆盖当前参数。`,
+      };
+    }
     case 'UPDATE_MODEL_CONFIG': {
       return { ...state, models: state.models.map((m) => m.id === action.payload.modelId ? { ...m, loadConfig: { ...m.loadConfig, ...action.payload.config } } : m) };
     }
@@ -688,15 +865,22 @@ function appReducer(state: AppState, action: Action): AppState {
       };
     case 'PRUNE_USAGE': {
       const keepIds = new Set(action.payload);
+      // `api-` 是日志口径的外部 API 用量，`engine:` 是 NiNfer / Strata 引擎用量；
+      // 两者都不来自模型扫描，不能被「清理已删除模型」一并抹掉。
       const nextUsageByModel = Object.fromEntries(
-        Object.entries(state.usageByModel).filter(([modelId]) => keepIds.has(modelId) || modelId.startsWith('api-')),
+        Object.entries(state.usageByModel).filter(([modelId]) =>
+          keepIds.has(modelId) || modelId.startsWith('api-') || modelId.startsWith('engine:')),
       );
       return { ...state, usageByModel: nextUsageByModel };
     }
     case 'SET_BACKEND_AVAILABLE':
       return { ...state, backendAvailable: action.payload };
     case 'SET_SERVER_RUNNING':
-      return { ...state, serverRunning: action.payload };
+      return {
+        ...state,
+        serverRunning: action.payload,
+        models: action.payload ? state.models : clearMainLoadedModels(state.models),
+      };
     case 'SET_SERVER_PORT':
       return { ...state, serverPort: action.payload };
     case 'SET_API_CONFIG':
@@ -887,6 +1071,34 @@ function appReducer(state: AppState, action: Action): AppState {
       };
       return { ...state, usageByModel: { ...state.usageByModel, [modelId]: nextUsage } };
     }
+    // 引擎后端：指标快照已是全量口径，直接覆盖该后端的累计条目。
+    // 不累加的原因：快照每次轮询都会把同一批历史请求再算一遍，累加会让总量持续虚高。
+    case 'SET_ENGINE_USAGE': {
+      const {
+        modelId, modelName, modelColor,
+        promptTokens, completionTokens, totalTokens, responseCount,
+        totalTokensPerSec, totalFirstTokenDelay, totalGenTime, dailyTokens, lastUsedAt,
+      } = action.payload;
+      // 没有任何 token 时不要凭空创建条目（引擎起来了但还没请求过）。
+      if (totalTokens <= 0 && responseCount <= 0) return state;
+      const nextUsage: ModelUsageStats = {
+        modelName,
+        modelColor,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        responseCount,
+        totalTokensPerSec,
+        totalFirstTokenDelay,
+        totalGenTime,
+        lastUsedAt: lastUsedAt > 0 ? lastUsedAt : Date.now(),
+        dailyTokens,
+      };
+      return {
+        ...state,
+        usageByModel: { ...state.usageByModel, [modelId]: nextUsage },
+      };
+    }
     default:
       return state;
   }
@@ -898,6 +1110,7 @@ const AppContext = createContext<AppContextType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, baseDispatch] = useReducer(appReducer, initialState);
+  const stateRef = useRef(state);
 
   /**
    * 包装 dispatch：用户手动改主题时打 localStorage 标记，
@@ -909,6 +1122,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     baseDispatch(action);
   }, []);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    autoTuneManager.setApplicationHandler((authorization, result) => {
+      dispatch({ type: 'APPLY_AUTO_TUNE', payload: { authorization, result } });
+    });
+    void ensureAutoTuneRuntime().catch((error) => {
+      dispatch({ type: 'SET_APP_STATUS', payload: `自动调参状态连接失败：${String(error)}` });
+    });
+    return () => autoTuneManager.setApplicationHandler(undefined);
+  }, [dispatch]);
+
+  useEffect(() => {
+    const receipt = state.autoTuneApplication;
+    if (receipt) autoTuneManager.reportApplication(receipt.runId, receipt.applied);
+  }, [state.autoTuneApplication]);
 
   /**
    * 把 Rust 端读到的 Windows accent color 注入到 CSS 变量。
@@ -985,6 +1217,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!isDesktopRuntime()) return;
     void setDesktopWindowMaterial(state.acrylicMode ? 'acrylic' : 'mica');
   }, [state.acrylicMode]);
+
+  /**
+   * 减少动画：html.reduce-motion 让 CSS 过渡/动画瞬间完成（index.css 里有对应规则）；
+   * framer-motion 侧由 App 根节点的 MotionConfig 读取同一开关，两边口径一致。
+   */
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.classList.toggle('reduce-motion', state.reduceMotion);
+  }, [state.reduceMotion]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -1175,7 +1416,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       (error) => {
         if (disposed) return;
         dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
-        const modelId = state.activeModelId;
+        const modelId = stateRef.current.models.find((model) => model.status === 'loading')?.id
+          ?? stateRef.current.activeModelId;
         if (modelId) {
           dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId, status: 'error' } });
         }
@@ -1318,7 +1560,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           hasApiKey: state.apiConfig.hasApiKey,
         },
         usageByModel: state.usageByModel,
-        chatSessions: sanitizeStoredSessions(state.chatSessions),
+        chatSessions: stripPersistedMedia(sanitizeStoredSessions(state.chatSessions)),
         activeChatSessionIds: state.activeChatSessionIds,
         modelLoadConfigs,
         modelLaunchMemories: state.modelLaunchMemories,
@@ -1329,11 +1571,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         modelCustomLogos,
         ui: {
           theme: state.theme,
-          themePreferenceVersion: 3,
+          themePreferenceVersion: THEME_PREFERENCE_VERSION,
           themeMode: state.themeMode,
           syncSystemAccent: state.syncSystemAccent,
           acrylicMode: state.acrylicMode,
+          reduceMotion: state.reduceMotion,
+          enterToSend: state.enterToSend,
           sidebarCollapsed: state.sidebarCollapsed,
+          sidebarWidth: state.sidebarWidth,
           sortBy: state.sortBy,
           gridColumns: state.gridColumns,
           serverPort: state.serverPort,
@@ -1378,8 +1623,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.systemPromptPresets,
     state.serverPort,
     state.sidebarCollapsed,
+    state.sidebarWidth,
     state.sortBy,
     state.theme,
+    state.themeMode,
+    state.syncSystemAccent,
+    state.acrylicMode,
+    state.reduceMotion,
+    state.enterToSend,
     state.usageByModel,
   ]);
 

@@ -479,7 +479,7 @@ export default function KernelUpdatePage() {
                       <button
                         onClick={() => void handleUpdateFromRelease(release)}
                         disabled={updating || state.serverRunning || release.assets.length === 0}
-                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                       >
                         {isUpdatingThis
                           ? <Loader2 className="h-3 w-3 animate-spin" />
@@ -677,7 +677,7 @@ export default function KernelUpdatePage() {
                   <button
                     onClick={() => void handleSaveOverride()}
                     disabled={overrideSaving || updating || overrideInput.trim() === (overridePath ?? '')}
-                    className="flex min-h-8 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                    className="flex min-h-8 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                   >
                     {overrideSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
                     保存

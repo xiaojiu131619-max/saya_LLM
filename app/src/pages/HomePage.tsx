@@ -5,15 +5,30 @@ import ModelCard from '@/components/ModelCard';
 import SortDropdown from '@/components/SortDropdown';
 import ColumnToggle from '@/components/ColumnToggle';
 import { isDesktopRuntime, openExternalUrl, scanDesktopModels, toFrontendModel, clearModelRunRecords } from '@/lib/desktop';
+import type { ModelInfo } from '@/types';
 
 const MODEL_SCOPE_URL = 'https://www.modelscope.cn/';
+
+/**
+ * 向量 / 重排模型不进对话模型列表：它们是独立服务（独立端口、独立进程），
+ * 混在列表里只会被当成聊天模型点开，然后在加载页被劝去向量服务。
+ * 展示入口统一收在「向量服务」。
+ */
+function isVectorModel(model: ModelInfo) {
+  return model.modelTask === 'embedding' || model.modelTask === 'rerank';
+}
 
 export default function HomePage() {
   const { state, dispatch } = useApp();
   const [isScanning, setIsScanning] = useState(false);
+  // 列表、计数、空状态统一走这一份「可见模型」：向量/重排模型只在向量服务里出现。
+  const visibleModels = useMemo(
+    () => state.models.filter((model) => !isVectorModel(model)),
+    [state.models],
+  );
 
   const sortedModels = useMemo(() => {
-    let models = [...state.models];
+    let models = [...visibleModels];
     // Search filter
     if (state.searchQuery.trim()) {
       const q = state.searchQuery.toLowerCase();
@@ -52,12 +67,12 @@ export default function HomePage() {
       default:
         return sortWithRecent();
     }
-  }, [state.models, state.recentModelUsage, state.sortBy, state.searchQuery]);
+  }, [visibleModels, state.recentModelUsage, state.sortBy, state.searchQuery]);
 
   const recentModelCount = useMemo(() => {
-    const visibleModelIds = new Set(state.models.map((model) => model.id));
+    const visibleModelIds = new Set(visibleModels.map((model) => model.id));
     return Object.keys(state.recentModelUsage).filter((modelId) => visibleModelIds.has(modelId)).length;
-  }, [state.models, state.recentModelUsage]);
+  }, [visibleModels, state.recentModelUsage]);
 
   const handleSurfacePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -101,9 +116,18 @@ export default function HomePage() {
           .filter((id) => !keepIds.has(id) && !id.startsWith('api-'))
           .map((id) => clearModelRunRecords(id).catch(() => undefined)),
       );
+      // 面板只列对话模型：向量/重排模型单独计数并指向「向量服务」，
+      // 否则这里的数字和列表条数对不上，看着像漏扫。
+      const chatModelCount = models.filter((model) => !isVectorModel(model)).length;
+      const vectorModelCount = models.length - chatModelCount;
       dispatch({
         type: 'SET_APP_STATUS',
-        payload: models.length > 0 ? `已发现 ${models.length} 个本地 GGUF 模型。` : '模型目录里暂未发现 GGUF 文件。',
+        payload:
+          chatModelCount > 0
+            ? `已发现 ${chatModelCount} 个本地 GGUF 模型${vectorModelCount > 0 ? `（另有 ${vectorModelCount} 个向量模型，见「向量服务」）` : ''}。`
+            : vectorModelCount > 0
+              ? `模型目录里只有 ${vectorModelCount} 个向量模型，已收在「向量服务」里。`
+              : '模型目录里暂未发现 GGUF 文件。',
       });
     } catch (error) {
       dispatch({ type: 'SET_APP_STATUS', payload: `刷新模型列表失败：${String(error)}` });
@@ -134,7 +158,7 @@ export default function HomePage() {
           <div className="model-library-count ml-auto flex-shrink-0 text-right">
             {/* 直接显示真实数量：原 padStart(2,'0') 在 0 个模型时渲染成「00」，
                 空状态下看起来像未初始化的占位符。 */}
-            <div className="mono-font text-3xl font-semibold leading-none text-[var(--text-primary)]">{state.models.length}</div>
+            <div className="mono-font text-3xl font-semibold leading-none text-[var(--text-primary)]">{visibleModels.length}</div>
             <div className="mt-2 text-xs text-[var(--text-secondary)]">本地模型</div>
           </div>
         </div>
@@ -183,11 +207,11 @@ export default function HomePage() {
         <div className="model-list-container mx-auto max-w-[1180px] min-[1600px]:max-w-[1520px]">
           <div className="model-library-meta mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
             <span className="px-0.5 py-1">
-              {state.models.length} 个模型
+              {visibleModels.length} 个模型
             </span>
             <span className="text-[var(--border)]">·</span>
             <span className="px-0.5 py-1">
-              {state.models.filter((m) => m.status === 'loaded').length} 个已加载
+              {visibleModels.filter((m) => m.status === 'loaded').length} 个已加载
             </span>
             {recentModelCount > 0 && (
               <>
@@ -233,14 +257,14 @@ export default function HomePage() {
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="text-base font-semibold text-[var(--text-primary)]">
-                            {state.models.length === 0 ? '尚未发现真实 GGUF 模型' : '未找到匹配的模型'}
+                            {visibleModels.length === 0 ? '尚未发现真实 GGUF 模型' : '未找到匹配的模型'}
                           </div>
                           <p className="mt-1 text-sm leading-relaxed text-[var(--text-secondary)]">
-                            {state.models.length === 0
+                            {visibleModels.length === 0
                               ? '按照以下 3 步开始使用本地模型：'
                               : '请调整搜索关键词或排序方式。'}
                           </p>
-                          {state.models.length === 0 && (
+                          {visibleModels.length === 0 && (
                             <div className="mt-3 grid gap-2 sm:grid-cols-3">
                               <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)]">
                                 <div className="font-semibold text-[var(--text-primary)]">1. 进入设置</div>
@@ -258,7 +282,7 @@ export default function HomePage() {
                           )}
                         </div>
                       </div>
-                      {state.models.length === 0 && (
+                      {visibleModels.length === 0 && (
                         <div className="flex flex-shrink-0 gap-2 sm:self-center">
                           <button
                             onClick={() => void handleRefreshModels()}
@@ -270,7 +294,7 @@ export default function HomePage() {
                           </button>
                           <button
                             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'settings' })}
-                            className="flex h-9 items-center rounded-lg bg-[var(--accent)] px-3 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+                            className="flex h-9 items-center rounded-lg bg-[var(--accent)] px-3 text-sm font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
                           >
                             选择目录
                           </button>
@@ -284,14 +308,14 @@ export default function HomePage() {
                       <FolderPlus className="h-6 w-6" />
                     </div>
                     <div className="text-base font-semibold text-[var(--text-primary)]">
-                      {state.models.length === 0 ? '尚未发现真实 GGUF 模型' : '未找到匹配的模型'}
+                      {visibleModels.length === 0 ? '尚未发现真实 GGUF 模型' : '未找到匹配的模型'}
                     </div>
                     <p className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">
-                      {state.models.length === 0
+                      {visibleModels.length === 0
                         ? '请先在设置中添加包含 .gguf 文件的目录，或点击上方「魔搭下载」在浏览器中打开魔搭模型库。'
                         : '请调整搜索关键词或排序方式。'}
                     </p>
-                    {state.models.length === 0 && (
+                    {visibleModels.length === 0 && (
                       <>
                         <div className="mt-4 grid gap-2 text-left sm:grid-cols-3">
                           <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-left text-xs text-[var(--text-secondary)]">
@@ -318,7 +342,7 @@ export default function HomePage() {
                           </button>
                           <button
                             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'settings' })}
-                            className="flex h-9 items-center rounded-lg bg-[var(--accent)] px-3 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+                            className="flex h-9 items-center rounded-lg bg-[var(--accent)] px-3 text-sm font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
                           >
                             选择目录
                           </button>

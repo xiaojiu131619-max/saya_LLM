@@ -52,6 +52,10 @@ pub struct Fast27bRequestMetric {
     pub cache_tokens: Option<u64>,
     pub draft_accepted: Option<u64>,
     pub draft_proposed: Option<u64>,
+    /// done 原因为 `tool calls N` 时的工具调用次数；Some(>0) = 请求以工具调用收尾。
+    /// 服务状态页「运行时间分布」工具行的数据源；旧持久化记录缺该字段时按 None 读入。
+    #[serde(default)]
+    pub tool_calls: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -97,6 +101,8 @@ enum RequestLogEvent {
         request_id: u64,
         outcome: Fast27bRequestOutcome,
         readings: EngineReadings,
+        /// done 原因为 `tool calls N` 时的调用次数（其余终态为 None）。
+        tool_calls: Option<u64>,
         error: Option<String>,
     },
     WorkerCrash(String),
@@ -231,10 +237,7 @@ fn completed_outcome(clauses: &[&str], readings: &EngineReadings) -> Fast27bRequ
     let completed = matches!(
         reason,
         "stop token" | "stop string" | "output limit" | "context capacity"
-    ) || reason
-        .strip_prefix("tool calls ")
-        .and_then(parse_count)
-        .is_some_and(|count| count > 0);
+    ) || tool_call_count(clauses).is_some_and(|count| count > 0);
     if completed
         && readings.prompt_tokens.is_some()
         && readings.output_tokens.is_some()
@@ -244,6 +247,14 @@ fn completed_outcome(clauses: &[&str], readings: &EngineReadings) -> Fast27bRequ
     } else {
         Fast27bRequestOutcome::Failed
     }
+}
+
+/// done 原因 `tool calls N`（工具循环收尾）里的调用次数。
+fn tool_call_count(clauses: &[&str]) -> Option<u64> {
+    clauses
+        .iter()
+        .find_map(|clause| clause.strip_prefix("tool calls "))
+        .and_then(parse_count)
 }
 
 fn parse_request_log(line: &str) -> Option<RequestLogEvent> {
@@ -279,6 +290,7 @@ fn parse_request_log(line: &str) -> Option<RequestLogEvent> {
             request_id,
             outcome,
             readings,
+            tool_calls: tool_call_count(&clauses).filter(|count| *count > 0),
             error,
         });
     }
@@ -296,6 +308,7 @@ fn parse_request_log(line: &str) -> Option<RequestLogEvent> {
                 Fast27bRequestOutcome::Failed
             },
             readings: EngineReadings::default(),
+            tool_calls: None,
             error: Some(short_error(line)),
         });
     }
@@ -383,6 +396,7 @@ impl MetricsState {
         request_id: u64,
         outcome: Fast27bRequestOutcome,
         readings: EngineReadings,
+        tool_calls: Option<u64>,
         error: Option<String>,
         at: u64,
         now: u64,
@@ -412,6 +426,7 @@ impl MetricsState {
                 metric.error = error;
             }
             readings.fill_missing(metric);
+            metric.tool_calls = metric.tool_calls.or(tool_calls);
             return *metric != previous;
         }
         // prepare 失败可能没有 started。只移除真实存在的活跃项，不做减一计数。
@@ -433,6 +448,7 @@ impl MetricsState {
             cache_tokens: None,
             draft_accepted: None,
             draft_proposed: None,
+            tool_calls,
             error,
         };
         readings.fill_missing(&mut metric);
@@ -454,6 +470,7 @@ impl MetricsState {
                 request_id,
                 outcome,
                 EngineReadings::default(),
+                None,
                 Some(short_error(error)),
                 now,
                 now,
@@ -501,6 +518,7 @@ impl MetricsState {
                         request_id,
                         Fast27bRequestOutcome::Failed,
                         EngineReadings::default(),
+                        None,
                         Some(error),
                         at,
                         now,
@@ -515,8 +533,9 @@ impl MetricsState {
                 request_id,
                 outcome,
                 readings,
+                tool_calls,
                 error,
-            } => self.terminal(request_id, outcome, readings, error, at, now),
+            } => self.terminal(request_id, outcome, readings, tool_calls, error, at, now),
             RequestLogEvent::WorkerCrash(error) => {
                 if let Some(generation) = self.generation.as_mut() {
                     generation.worker_failure = Some(error.clone());
@@ -529,6 +548,7 @@ impl MetricsState {
                         request_id,
                         Fast27bRequestOutcome::Failed,
                         EngineReadings::default(),
+                        None,
                         Some(error.clone()),
                         at,
                         now,
@@ -848,12 +868,12 @@ mod tests {
     }
 
     #[test]
-    fn swift_mtp_and_nullable_missing_readings() {
-        let mut state = state(Fast27bModel::Swift);
+    fn saluki_mtp_and_nullable_missing_readings() {
+        let mut state = state(Fast27bModel::Saluki);
         let line = "req#1 done | openai-chat | output limit | prompt 1,612 | output 957 | TTFT 500 ms | total 6.3s | decode 1.20k tok/s | mtp accepted 698/1,032 (67.6%)";
         assert!(state.ingest(1, line, NOW));
         let metric = &state.history[0];
-        assert_eq!(metric.model, Fast27bModel::Swift);
+        assert_eq!(metric.model, Fast27bModel::Saluki);
         assert_eq!(metric.outcome, Fast27bRequestOutcome::Success);
         assert_eq!(metric.ttft_ms, Some(500.0));
         assert_eq!(metric.decode_tps, Some(1200.0));
@@ -884,13 +904,13 @@ mod tests {
         let mut state = state(Fast27bModel::Heretic);
         state.ingest(1, DONE, NOW);
         let first_id = state.history[0].id.clone();
-        state.begin_generation(3, Fast27bModel::Swift, NOW + 1);
+        state.begin_generation(3, Fast27bModel::Saluki, NOW + 1);
         assert!(!state.ingest(1, START, NOW + 2));
         state.ingest(3, START, NOW + 3);
         state.ingest(3, DONE, NOW + 1903);
         assert_eq!(state.history.len(), 2);
         assert_ne!(state.history[1].id, first_id);
-        assert_eq!(state.history[1].model, Fast27bModel::Swift);
+        assert_eq!(state.history[1].model, Fast27bModel::Saluki);
     }
 
     #[test]
@@ -911,6 +931,27 @@ mod tests {
             assert_eq!(state.history[0].error.as_deref(), Some(failure));
             assert!(!state.ingest(1, DONE, NOW + 1901));
         }
+    }
+
+    #[test]
+    fn tool_call_done_reason_records_call_count_for_timeline() {
+        let mut state = state(Fast27bModel::Heretic);
+        state.ingest(1, START, NOW);
+        assert!(state.ingest(1, &DONE.replace("stop token", "tool calls 3"), NOW + 1900));
+        let metric = &state.history[0];
+        assert_eq!(metric.outcome, Fast27bRequestOutcome::Success);
+        assert_eq!(metric.tool_calls, Some(3));
+
+        // 普通完成不携带工具调用数。
+        let mut state = super::tests::state(Fast27bModel::Heretic);
+        state.ingest(1, DONE, NOW);
+        assert_eq!(state.history[0].tool_calls, None);
+
+        // 「tool calls 0」不是有效的工具调用收尾，也不计次数。
+        let mut state = super::tests::state(Fast27bModel::Heretic);
+        state.ingest(1, &DONE.replace("stop token", "tool calls 0"), NOW);
+        assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Failed);
+        assert_eq!(state.history[0].tool_calls, None);
     }
 
     #[test]
@@ -949,7 +990,7 @@ mod tests {
         let mut state = state(Fast27bModel::Heretic);
         assert!(!state.ingest(1, crash, NOW));
         assert!(state.history.is_empty());
-        state.begin_generation(2, Fast27bModel::Swift, NOW);
+        state.begin_generation(2, Fast27bModel::Saluki, NOW);
         state.ingest(2, START, NOW);
         state.ingest(2, crash, NOW + 1);
         state.ingest(2, DONE, NOW + 1900);
@@ -978,7 +1019,7 @@ mod tests {
         }
         let mut state = state(Fast27bModel::Heretic);
         state.ingest(1, START, NOW);
-        assert!(state.begin_generation(2, Fast27bModel::Swift, NOW + 1));
+        assert!(state.begin_generation(2, Fast27bModel::Saluki, NOW + 1));
         assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Failed);
     }
 
@@ -1044,11 +1085,11 @@ mod tests {
         let json = serde_json::to_string(&PersistedHistory::from_state(&state)).unwrap();
         let restored = MetricsState::from_json("session-two".into(), &json, NOW + 2001).unwrap();
         assert_eq!(restored.history, state.history);
-        state.begin_generation(3, Fast27bModel::Swift, NOW + 2002);
+        state.begin_generation(3, Fast27bModel::Saluki, NOW + 2002);
         assert!(!state.ingest(1, DONE, NOW + 2003));
         state.ingest(3, DONE, NOW + 2004);
         assert_eq!(state.history.len(), 5);
-        assert_eq!(state.history.back().unwrap().model, Fast27bModel::Swift);
+        assert_eq!(state.history.back().unwrap().model, Fast27bModel::Saluki);
     }
 
     #[test]
@@ -1122,7 +1163,7 @@ mod tests {
         let mut restored = MetricsState::from_json("session-two".into(), &json, NOW + 2).unwrap();
         assert_eq!(restored.snapshot(NOW + 2).active_requests, 0);
         assert_eq!(restored.history, original.history);
-        restored.begin_generation(1, Fast27bModel::Swift, NOW + 3);
+        restored.begin_generation(1, Fast27bModel::Saluki, NOW + 3);
         restored.ingest(1, DONE, NOW + 4);
         assert_eq!(restored.history.len(), 2);
         assert_ne!(restored.history[0].id, restored.history[1].id);
@@ -1169,7 +1210,7 @@ mod tests {
         assert!(object.contains_key("collected_at"));
         assert!(object.contains_key("active_requests"));
         let metric = snapshot["requests"][0].as_object().unwrap();
-        assert_eq!(metric.len(), 16);
+        assert_eq!(metric.len(), 17);
         for key in [
             "id",
             "request_id",
@@ -1186,6 +1227,7 @@ mod tests {
             "cache_tokens",
             "draft_accepted",
             "draft_proposed",
+            "tool_calls",
             "error",
         ] {
             assert!(metric.contains_key(key), "缺少字段 {key}");

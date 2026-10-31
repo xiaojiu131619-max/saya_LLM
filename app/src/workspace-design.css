@@ -20,6 +20,16 @@
 .model-glass-card:hover, .model-glass-card--active { background: var(--accent-subtle); }
 .model-tile { border-radius: var(--radius-panel); box-shadow: none; }
 .model-tile:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); box-shadow: none; }
+.model-tile--loaded { border-color: var(--state-success-border); }
+.model-tile--selected, .model-tile--selected:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+.model-tile-specs { background: color-mix(in srgb, var(--surface-muted) 55%, var(--surface)); }
+.model-tile-status { color: var(--text-secondary); }
+.model-tile-status--loaded { color: var(--state-success); }
+.model-tile-status--loading { color: var(--state-warning); }
+.model-tile-status--error { color: var(--state-danger); }
+.model-tile-status--downloading { color: var(--accent); }
+.model-tile-capabilities > div { min-width: 0; flex-shrink: 1; }
+.model-tile-capabilities > div > span { font-size: var(--font-caption); }
 .model-library-empty { padding: 28px; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--surface); }
 .workspace-setting-section { padding-block: 24px; }
 .workspace-setting-section > div:first-child { margin-bottom: 18px; }

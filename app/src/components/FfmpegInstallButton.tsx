@@ -135,7 +135,7 @@ export default function FfmpegInstallButton({
         <button
           type="button"
           onClick={() => void handleInstall()}
-          className="flex min-h-8 flex-shrink-0 items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+          className="flex min-h-8 flex-shrink-0 items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
         >
           <Download className="h-3.5 w-3.5" />
           一键安装 ffmpeg

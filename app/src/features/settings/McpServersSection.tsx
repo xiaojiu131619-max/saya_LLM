@@ -77,7 +77,13 @@ function stateClass(state: McpServerStatus['state']) {
   return 'border-[var(--border)] bg-[var(--surface-muted)] text-[var(--text-secondary)]';
 }
 
-export default function McpServersSection() {
+/**
+ * MCP 服务器区块。
+ *
+ * `embedded`：被「工具」页塞进左/右双栏时使用——外层不再画分隔线与上内边距，
+ * 由双栏容器统一负责分栏与间距。默认（独立使用）保持原有的独立卡片外观。
+ */
+export default function McpServersSection({ embedded = false }: { embedded?: boolean }) {
   const { state, dispatch } = useApp();
   const [draft, setDraft] = useState<McpServerConfig | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -223,9 +229,9 @@ export default function McpServersSection() {
   };
 
   return (
-    <section className="border-b border-[var(--border-subtle)] py-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
+    <section className={`mcp-section ${embedded ? 'min-w-0' : 'border-b border-[var(--border-subtle)] py-5'}`}>
+      <div className="mcp-header-row flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 flex-1">
           <div className="mb-2 flex items-center gap-2">
             <Plug className="h-4.5 w-4.5 text-[var(--accent)]" />
             <h2 className="text-[15px] font-semibold text-primary-custom">MCP 服务器</h2>
@@ -299,8 +305,8 @@ export default function McpServersSection() {
             const busy = busyId === server.id;
             return (
               <div key={server.id} className="py-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0">
+                <div className="mcp-entry-row flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <Server className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                       <span className="text-sm font-semibold text-primary-custom">{server.name}</span>
@@ -706,7 +712,7 @@ function McpServerForm({
           type="button"
           onClick={onSave}
           disabled={Boolean(endpointError)}
-          className="h-9 rounded-lg bg-[var(--text-primary)] px-4 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:opacity-50 dark:bg-[var(--accent)] dark:text-white dark:hover:bg-[var(--accent-hover)]"
+          className="h-9 rounded-lg bg-[var(--text-primary)] px-4 text-sm font-medium text-[var(--app-bg)] transition-colors hover:bg-[var(--text-primary)] disabled:opacity-50 dark:bg-[var(--accent)] dark:text-[var(--text-on-accent)] dark:hover:bg-[var(--accent-hover)]"
         >
           保存
         </button>

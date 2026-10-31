@@ -338,7 +338,7 @@ export default function EmbeddingWorkspace() {
                       type="button"
                       onClick={() => void handleStart()}
                       disabled={!selected || busy || running}
-                      className="flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-60"
+                      className="flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-60"
                     >
                       <Play className="h-4 w-4" />
                       {running ? '运行中' : '启动向量服务'}

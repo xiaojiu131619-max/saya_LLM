@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Bot,
   Boxes,
+  Brain,
   ChevronRight,
   Database,
   MessageSquare,
@@ -25,6 +26,7 @@ import Fast27bPage from '@/pages/Fast27bPage';
 import HomePage from '@/pages/HomePage';
 import LlamaLogsPage from '@/pages/LlamaLogsPage';
 import ModelLoadPage from '@/pages/ModelLoadPage';
+import StrataPage from '@/pages/StrataPage';
 import {
   fast27bGetLogs,
   getDesktopServerLogsTail,
@@ -40,6 +42,7 @@ import {
   sessionBelongsToModel,
 } from '@/features/chat/chatUtils';
 import { fast27bServiceView, useEngineStatuses } from '@/hooks/useEngineStatuses';
+import { strataServiceView, useStrataStatus } from '@/hooks/useStrataStatus';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -106,26 +109,39 @@ export default function ModelWorkspace() {
   // 触发 systemStats 每秒轮询，便于服务状态卡显示实时显存/内存占用。
   const systemStats = useSystemStats();
   const [apiRuntimeStats, setApiRuntimeStats] = useState<MessageStats | undefined>();
-  // fast-27b 引擎的日志快照：引擎的 tok/s 与已用 ctx 只能从它自己的日志解析
+  // NiNfer 引擎的日志快照：引擎的 tok/s 与已用 ctx 只能从它自己的日志解析
   // （格式与 llama-server 完全不同，llama 那套正则对它无效），仅在选中引擎后端时轮询。
   const [engineLogs, setEngineLogs] = useState<string[]>([]);
 
-  // ---- 服务后端：跟随「对话后端」选择（主模型 llama-server / fast-27b 引擎）----
+  // ---- 服务后端：跟随「对话后端」选择（主模型 llama-server / NiNfer 引擎）----
   // 两套后端共用同一批渲染分支，差异全部收敛到下面那组 service* 派生值。
   const engineStatuses = useEngineStatuses();
-  const engine = fast27bServiceView(engineStatuses.fast27b);
+  const strataStatus = useStrataStatus();
+  // 两个引擎共用同一批渲染分支：主模型后端下两者都不参与，引擎后端下按当前选择取视图。
+  const engineMode = state.chatEngine !== 'main';
+  const engine =
+    state.chatEngine === 'strata'
+      ? strataServiceView(strataStatus)
+      : fast27bServiceView(engineStatuses.fast27b);
   const engineRunning = engine.running;
-  const engineMode = state.chatEngine === 'fast27b';
   const detailOpen = state.currentView === 'modelLoad';
   const llamaLogsOpen = state.currentView === 'llamaLogs';
-  // API 状态、Agent、向量服务、fast-27b 同级：保留左侧边栏，在右侧内容区展示。
+  // API 状态、向量服务、Agent、NiNfer 同级：保留左侧边栏，在右侧内容区展示。
   const apiStatusOpen = state.currentView === 'apiStatus';
   const agentOpen = state.currentView === 'agent';
   const embeddingOpen = state.currentView === 'embedding';
   const fast27bOpen = state.currentView === 'fast27b';
+  const strataOpen = state.currentView === 'strata';
+  // Agent 页的整体可用性：它没有一个独立后端进程，但 WebUI 标签需要一个在跑的后端。
+  // 因此「Agent 是否算启动」跟随当前 WebUI 后端：主模型服务 / NiNfer / Strata 任一在跑即可。
+  const agentRunning = state.webuiEngine === 'main'
+    ? state.serverRunning
+    : state.webuiEngine === 'strata'
+      ? Boolean(strataStatus?.running)
+      : Boolean(engineStatuses.fast27b?.running);
   const selectedModel = state.models.find((model) => model.id === state.selectedModelId);
-  const loadedModel = state.models.find((model) => model.status === 'loaded')
-    ?? state.models.find((model) => model.id === state.activeModelId);
+  const loadedModel = state.models.find((model) => model.id === state.activeModelId && model.status === 'loaded')
+    ?? state.models.find((model) => model.status === 'loaded');
   const loadedUsage = loadedModel ? state.usageByModel[loadedModel.id] : undefined;
   // 会话按模型过滤：所有会话都存在 'chat-workspace' 桶里，直接取桶会把别的
   // 模型的会话（及其 ctx 分母）串到当前模型的服务状态卡上。
@@ -150,8 +166,13 @@ export default function ModelWorkspace() {
 
   // 引擎后端的实时读数：来自引擎日志（与 llama 的 prompt eval / eval time 行无关）。
   const engineStats = useMemo(
-    () => (engineMode ? latestEngineRuntimeStats(engineLogs, engine.effectiveCtxTotal) : undefined),
-    [engineMode, engineLogs, engine.effectiveCtxTotal],
+    // 只有 NiNfer 的日志里有 `req#N done | prompt X | output Y | TTFT z ms` 这种读数行。
+    // 智慧模型的网关日志格式不同，硬套解析会拿上一次 NiNfer 的残留日志算出错误速度。
+    () =>
+      state.chatEngine === 'fast27b'
+        ? latestEngineRuntimeStats(engineLogs, engine.effectiveCtxTotal)
+        : undefined,
+    [state.chatEngine, engineLogs, engine.effectiveCtxTotal],
   );
 
   // ---- 统一后的服务视图（两套后端共用同一批渲染分支）----
@@ -238,9 +259,10 @@ export default function ModelWorkspace() {
     };
   }, [loadedModel, shouldFetchRuntimeStats]);
 
-  // 引擎后端：引擎日志走独立缓冲、格式与 llama-server 不同，需单独轮询再解析。
+  // NiNfer 引擎后端：引擎日志走独立缓冲、格式与 llama-server 不同，需单独轮询再解析。
+  // 智慧模型不在这里轮询——它的日志在智慧模型页里看，格式是网关自己的。
   useEffect(() => {
-    if (!engineMode || !isDesktopRuntime()) return;
+    if (state.chatEngine !== 'fast27b' || !isDesktopRuntime()) return;
     let disposed = false;
     const refreshEngineLogs = async () => {
       try {
@@ -258,7 +280,7 @@ export default function ModelWorkspace() {
       window.clearInterval(timer);
       setEngineLogs([]);
     };
-  }, [engineMode]);
+  }, [state.chatEngine]);
 
   // 竖屏 / 窄窗口（≤959px，与对话页侧边栏折叠同一断点）：侧边栏收缩为图标栏，
   // 保留全部导航入口（服务状态与 llama 日志在窄栏下以图标形式可达）。
@@ -286,15 +308,8 @@ export default function ModelWorkspace() {
             <RailNavButton
               icon={Database}
               label="模型列表"
-              active={!detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen}
+              active={!detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen}
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
-            />
-            <RailNavButton
-              icon={Bot}
-              label="Agent"
-              active={agentOpen}
-              title="Agent（智能体）· dsh 工作台 + 官方 WebUI 入口"
-              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
             />
             <RailNavButton
               icon={Boxes}
@@ -304,11 +319,28 @@ export default function ModelWorkspace() {
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
             />
             <RailNavButton
+              icon={Bot}
+              label="Agent"
+              active={agentOpen}
+              title="Agent（智能体）· 官方 WebUI 入口"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
+              running={agentRunning}
+            />
+            <RailNavButton
               icon={Zap}
-              label="fast-27b"
+              label="NiNfer"
               active={fast27bOpen}
-              title="fast-27b · Swift / Heretic 27B 推理引擎（切换模型、一键启动）"
+              title="NiNfer · Saluki / Heretic 27B 推理引擎（切换模型、一键启动）"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
+              running={engineStatuses.fast27b?.running}
+            />
+            <RailNavButton
+              icon={Brain}
+              label="Strata"
+              active={strataOpen}
+              title="Strata · 90GiB MoE 引擎（慢加载、强推理，与 NiNfer 互补）"
+              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'strata' })}
+              running={strataStatus?.running}
             />
             {detailOpen && (
               <RailNavButton
@@ -365,7 +397,7 @@ export default function ModelWorkspace() {
               {selectedModel?.family?.[0] || '晓'}
             </button>
             <div className="min-w-0">
-              <div className="truncate text-base font-semibold">Agent LLM PC</div>
+              <div className="truncate text-base font-semibold">拾壹</div>
               <div className="truncate text-xs text-[var(--text-tertiary)]">本地模型加载中心</div>
             </div>
           </div>
@@ -375,21 +407,11 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
+              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">模型列表</span>
-          </button>
-          <button
-            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              agentOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
-            }`}
-            title="Agent（智能体）· dsh 工作台 + 官方 WebUI 入口"
-          >
-            <Bot className="h-4 w-4 flex-shrink-0" />
-            <span className="truncate">Agent</span>
           </button>
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
@@ -402,14 +424,31 @@ export default function ModelWorkspace() {
             <span className="truncate">向量服务</span>
           </button>
           <button
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${wideNavTone(agentOpen, agentRunning)}`}
+            title="Agent（智能体）· 官方 WebUI 入口"
+            data-running={agentRunning ? 'true' : 'false'}
+          >
+            <Bot className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">Agent</span>
+          </button>
+          <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              fast27bOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
-            }`}
-            title="fast-27b · Swift / Heretic 27B 推理引擎（切换模型、一键启动）"
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${wideNavTone(fast27bOpen, Boolean(engineStatuses.fast27b?.running))}`}
+            title="NiNfer · Saluki / Heretic 27B 推理引擎（切换模型、一键启动）"
+            data-running={engineStatuses.fast27b?.running ? 'true' : 'false'}
           >
             <Zap className="h-4 w-4 flex-shrink-0" />
-            <span className="truncate">fast-27b</span>
+            <span className="truncate">NiNfer</span>
+          </button>
+          <button
+            onClick={() => dispatch({ type: 'SET_VIEW', payload: 'strata' })}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${wideNavTone(strataOpen, Boolean(strataStatus?.running))}`}
+            title="Strata · 90GiB MoE 引擎（慢加载、强推理，与 NiNfer 互补）"
+            data-running={strataStatus?.running ? 'true' : 'false'}
+          >
+            <Brain className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">Strata</span>
           </button>
           {detailOpen && (
             <button
@@ -499,17 +538,28 @@ export default function ModelWorkspace() {
         )}
 
         <div
-          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : embeddingOpen ? 'embedding' : fast27bOpen ? 'fast27b' : detailOpen ? 'model-detail' : 'model-list'}
+          key={llamaLogsOpen ? 'llama-logs' : apiStatusOpen ? 'api-status' : agentOpen ? 'agent' : embeddingOpen ? 'embedding' : fast27bOpen ? 'fast27b' : strataOpen ? 'strata' : detailOpen ? 'model-detail' : 'model-list'}
           className="anim-fade-rise min-h-0 flex-1 overflow-hidden"
         >
-          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : embeddingOpen ? <EmbeddingWorkspace /> : fast27bOpen ? <Fast27bPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
+          {llamaLogsOpen ? <LlamaLogsPage /> : apiStatusOpen ? <ApiStatusPage /> : agentOpen ? <AgentPage /> : embeddingOpen ? <EmbeddingWorkspace /> : fast27bOpen ? <Fast27bPage /> : strataOpen ? <StrataPage /> : detailOpen ? <ModelLoadPage /> : <HomePage />}
         </div>
       </section>
     </div>
   );
 }
 
-/** 窄栏（≤959px）导航图标按钮：图标 + tooltip，右上角可带运行指示点。 */
+/** 宽侧栏（>959px）导航项配色：未启动灰字，启动后染主题色，选中额外加底色。 */
+function wideNavTone(active: boolean, running?: boolean) {
+  if (active) return 'bg-[var(--surface-selected)] text-[var(--text-primary)]';
+  if (running === false) return 'text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-secondary)]';
+  if (running === true) return 'text-[var(--accent)] hover:bg-[var(--surface-hover)]';
+  return 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]';
+}
+
+/** 窄栏（≤959px）导航图标按钮：图标 + tooltip，右上角可带运行指示点。
+ *
+ * `running` 决定文字颜色：未启动（或未知）时按灰字显示，启动后染主题色。
+ * 这样一眼能看出哪些引擎正在跑，不必逐个页面点进去确认。 */
 function RailNavButton({
   icon: Icon,
   label,
@@ -517,6 +567,7 @@ function RailNavButton({
   onClick,
   title,
   indicator,
+  running,
 }: {
   icon: ComponentType<{ className?: string }>;
   label: string;
@@ -524,7 +575,17 @@ function RailNavButton({
   onClick: () => void;
   title?: string;
   indicator?: 'ok' | 'off';
+  /** 该入口对应的后端是否在运行；undefined = 该入口没有"运行"概念（如模型列表）。 */
+  running?: boolean;
 }) {
+  // 三态配色：选中 > 运行中（主题色） > 未运行（灰）。
+  const toneClass = active
+    ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]'
+    : running === true
+      ? 'text-[var(--accent)] hover:bg-[var(--surface-hover)]'
+      : running === false
+        ? 'text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-secondary)]'
+        : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]';
   return (
     <button
       type="button"
@@ -532,11 +593,8 @@ function RailNavButton({
       title={title ?? label}
       aria-label={label}
       aria-current={active ? 'page' : undefined}
-      className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
-        active
-          ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]'
-          : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
-      }`}
+      data-running={running === undefined ? undefined : running ? 'true' : 'false'}
+      className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${toneClass}`}
     >
       <Icon className="h-[18px] w-[18px]" />
       {indicator && (

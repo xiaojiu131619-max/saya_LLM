@@ -62,7 +62,9 @@ fn cache_path(file_path: &Path) -> PathBuf {
 // v26：新增 tensor memory_layout、逐层 KV/SWA 及全注意力间隔，完整合并分片，
 // 以纳秒 mtime 失效旧扫描缓存，避免模型替换后沿用显存校准签名。
 // v27：有完整 dense attention 张量证据时展开标量 KV 头数，补齐 Spark 等模型逐层向量。
-const SCANNER_VERSION: u32 = 27;
+// v28：识别 PrismML 的 `<模型名>-DFlash2-<量化>` 草稿侧车命名，并把 dflash 架构
+// 从独立模型列表中移除；旧缓存未记录 dflash_draft_path，需重扫重新配对。
+const SCANNER_VERSION: u32 = 28;
 
 fn infer_video_support(
     name: &str,
@@ -110,12 +112,26 @@ fn infer_video_support(
     VideoSupportLevel::Frames
 }
 
+/// 名称中是否出现独立标记（可带数字后缀）。
+/// 覆盖两类官方命名：前缀 `dflash-<模型名>` 与 PrismML 后缀
+/// `<模型名>-DFlash2-<量化>`（拆分后 token 为 `dflash2`）。
+/// 按 token 判断，避免把 `deepspark-7b` 这类正常模型误判成 `dspark` 侧车。
+fn stem_has_marker(stem: &str, marker: &str) -> bool {
+    stem.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            token
+                .strip_prefix(marker)
+                .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit()))
+        })
+}
+
 fn is_companion_gguf_stem(lower_stem: &str) -> bool {
     lower_stem.starts_with("mmproj")
         || lower_stem.contains("mmproj")
         || lower_stem.starts_with("mtp")
-        || lower_stem.starts_with("dspark")
-        || lower_stem.starts_with("dflash")
+        || stem_has_marker(lower_stem, "dspark")
+        || stem_has_marker(lower_stem, "dflash")
 }
 
 fn split_gguf_info(path: &Path) -> Option<(u32, u32)> {
@@ -682,14 +698,13 @@ fn companion_stem_matches(stem: &str, kind: &str, target: Option<&GgufMetadata>)
                 || stem.ends_with("-mtp")
                 || target.is_some_and(|main| main.architecture == "gemma4")
         }
-        // DSpark / DFlash 侧车按 unsloth 发布命名识别：前缀 `dspark-<模型名>`
-        // 或后缀 `<模型名>-dspark`（dflash 同理），其余兄弟文件不参与。
-        "dspark" => {
-            stem.starts_with("dspark-") || stem.starts_with("dspark_") || stem.ends_with("-dspark")
-        }
-        "dflash" => {
-            stem.starts_with("dflash-") || stem.starts_with("dflash_") || stem.ends_with("-dflash")
-        }
+        // DSpark / DFlash 侧车按发布命名识别：unsloth 的 `dspark-<模型名>` /
+        // `<模型名>-dspark`，以及 PrismML 的 `<模型名>-DFlash2-<量化>`。
+        // 其余兄弟文件不参与。
+        "dspark" => stem_has_marker(stem, "dspark"),
+        // 已转换的旧 DSpark 草稿命名为 `...-dspark-dflash-...`，它仍以
+        // `--spec-type draft-dspark` 加载，不能同时被当成 DFlash2 侧车。
+        "dflash" => !stem_has_marker(stem, "dspark") && stem_has_marker(stem, "dflash"),
         _ => false,
     }
 }
@@ -863,7 +878,10 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
 
     let gguf = parse_gguf_header(path).ok();
     if gguf.as_ref().is_some_and(|metadata| {
+        // dflash 是块草稿架构：只有草稿张量（没有 token_embd/output），
+        // 不能作为独立模型加载，只能通过 -md 挂在主模型上。
         metadata.is_mtp_draft_model
+            || metadata.architecture == "dflash"
             || (metadata.architecture == "clip"
                 && (metadata.mmproj_supports_vision || metadata.mmproj_supports_audio))
     }) {
@@ -1364,6 +1382,52 @@ mod tests {
     }
 
     #[test]
+    fn prism_dflash2_sidecar_pairs_with_main_model() {
+        // PrismML 官方命名：主模型 `...-PQ2_0.gguf`，块草稿 `...-DFlash2-Q8_0.gguf`。
+        // 草稿只有草稿张量，不能被当成 2.4B 的独立稠密模型列出来。
+        let dir = scanner_test_dir("prism-dflash");
+        let main = dir.join("Ternary-Bonsai-2-9B-PQ2_0.gguf");
+        write_scanner_gguf(&main, "qwen35", 32);
+        let draft = dir.join("Ternary-Bonsai-2-9B-DFlash2-Q8_0.gguf");
+        write_scanner_gguf(&draft, "dflash", 6);
+
+        let info = parse_model_info_from_path(&main).expect("parse main model");
+        assert_eq!(
+            info.dflash_draft_path.as_deref(),
+            Some(draft.to_string_lossy().as_ref()),
+            "PrismML 的 DFlash2 侧车应挂到 9B 主模型上"
+        );
+        assert!(
+            parse_model_info_from_path(&draft).is_none(),
+            "dflash 草稿架构不能作为独立模型"
+        );
+        assert!(is_companion_gguf_stem("ternary-bonsai-2-9b-dflash2-q8_0"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn converted_dspark_drafter_is_not_reused_as_dflash() {
+        // PrismML 的旧 DSpark 草稿转换后叫 `...-dspark-dflash-...`，仍按
+        // draft-dspark 加载；不能因为名字里有 dflash 就当成 DFlash2 侧车。
+        let dir = scanner_test_dir("dspark-converted");
+        let main = dir.join("Ternary-Bonsai-2-9B-PQ2_0.gguf");
+        write_scanner_gguf(&main, "qwen35", 32);
+        write_scanner_gguf(
+            &dir.join("Ternary-Bonsai-2-9B-dspark-dflash-Q4_0.gguf"),
+            "dflash",
+            6,
+        );
+
+        let info = parse_model_info_from_path(&main).expect("parse main model");
+        assert!(info.dspark_draft_path.is_some(), "应按 DSpark 侧车配对");
+        assert!(
+            info.dflash_draft_path.is_none(),
+            "已转换的 DSpark 草稿不能冒充 DFlash2"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn ud_quant_marker_flags_dynamic_quant() {
         let dir = scanner_test_dir("ud");
         let main = dir.join("Qwen3.5-30B-A3B-UD-Q4_K_XL.gguf");
@@ -1568,6 +1632,9 @@ mod tests {
         // 正常模型名不应被误排除
         assert!(!is_companion_gguf_stem("qwen3.5-30b-a3b-ud-q4_k_xl"));
         assert!(!is_companion_gguf_stem("deepspark-7b-q4_k_m"));
+        assert!(!is_companion_gguf_stem("dflashback-7b-q4_k_m"));
+        // PrismML 的后缀命名：<模型名>-DFlash2-<量化>
+        assert!(is_companion_gguf_stem("ternary-bonsai-2-9b-dflash2-q8_0"));
     }
 
     #[test]
@@ -1692,6 +1759,22 @@ mod tests {
             assert!(info.has_embedded_mtp);
             assert!(info.mtp_support);
             assert!(info.mtp_draft_path.is_none());
+        }
+
+        // PrismML：`<模型名>-DFlash2-<量化>` 是块草稿侧车，必须挂到主模型而不是
+        // 作为独立模型出现。
+        let prism_main = dir.join("Ternary-Bonsai-2-9B-PQ2_0.gguf");
+        if prism_main.exists() {
+            let info = parse_model_info_from_path(&prism_main).expect("scan PrismML main model");
+            let draft = info
+                .dflash_draft_path
+                .expect("PrismML DFlash2 侧车应挂到主模型上");
+            assert!(draft.ends_with("Ternary-Bonsai-2-9B-DFlash2-Q8_0.gguf"));
+            let draft_path = dir.join("Ternary-Bonsai-2-9B-DFlash2-Q8_0.gguf");
+            assert!(
+                parse_model_info_from_path(&draft_path).is_none(),
+                "DFlash2 草稿不能进入模型列表"
+            );
         }
     }
 

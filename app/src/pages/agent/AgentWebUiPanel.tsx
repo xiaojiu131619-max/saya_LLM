@@ -9,18 +9,20 @@ import {
 } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
 import { useEngineStatuses } from '@/hooks/useEngineStatuses';
+import { STRATA_DEFAULT_PORT, useStrataStatus } from '@/hooks/useStrataStatus';
 import type { WebUiEngineId } from '@/types';
 
 const ENGINE_OPTIONS: Array<{ id: WebUiEngineId; label: string }> = [
   { id: 'main', label: '主模型' },
-  { id: 'fast27b', label: 'fast-27b' },
+  { id: 'fast27b', label: 'NiNfer' },
+  { id: 'strata', label: 'Strata' },
 ];
 
 /**
  * Agent 页「WebUI」标签：**官方 llama.cpp 网页界面的入口**（不内嵌任何应用自绘界面）。
  *
  * - 主模型：本身就是 llama.cpp 服务，浏览器直接开它自己的端口即可；
- * - fast-27b：引擎没有任何 HTML 页面，由应用的**同源桥**（`services::webui_bridge`）在回环上
+ * - NiNfer：引擎没有任何 HTML 页面，由应用的**同源桥**（`services::webui_bridge`）在回环上
  *   提供官方页面并把引擎的协议差异（必须带 model、top_k ≤ 20、无 /props）抹平，
  *   所以这里显示的是桥的地址；引擎在跑时打开标签会自动把桥拉起来。
  */
@@ -29,6 +31,7 @@ export default function AgentWebUiPanel() {
   const engine = state.webuiEngine;
   // 共享轮询：与对话页 / 服务状态页读同一份引擎快照（只跑一个 3 秒 interval）。
   const statuses = useEngineStatuses();
+  const strata = useStrataStatus();
   const [serverApiKey, setServerApiKey] = useState<string | null>(null);
   const [copied, setCopied] = useState<'url' | 'key' | null>(null);
   const [bridge, setBridge] = useState<WebuiBridgeInfo | null>(null);
@@ -40,24 +43,39 @@ export default function AgentWebUiPanel() {
       return {
         label: '主模型',
         running: state.serverRunning,
+        loading: false,
         port: state.serverPort,
         // 主模型直接用 llama-server 自带页面（同源，无需桥）。
         webUrl: `http://127.0.0.1:${state.serverPort}`,
         engineApiKey: null as string | null,
       };
     }
+    if (engine === 'strata') {
+      // strata 的网关自带完整网页界面（serve/web），同源直连即可，不需要同源桥。
+      const status = strata;
+      const port = status?.port ?? STRATA_DEFAULT_PORT;
+      return {
+        label: 'Strata',
+        running: Boolean(status?.running),
+        loading: Boolean(status?.running) && !status?.model_loaded,
+        port,
+        webUrl: `http://127.0.0.1:${port}/`,
+        engineApiKey: status?.api_key ?? null,
+      };
+    }
     const status = statuses.fast27b;
     const port = status?.port ?? 8094;
     return {
-      label: 'fast-27b',
+      label: 'NiNfer',
       running: Boolean(status?.running),
+      loading: false,
       port,
       webUrl: bridge?.url ?? '',
       engineApiKey: status?.api_key ?? null,
     };
-  }, [engine, statuses, bridge, state.serverRunning, state.serverPort]);
+  }, [engine, statuses, strata, bridge, state.serverRunning, state.serverPort]);
 
-  // fast-27b 的网页地址来自桥；引擎在跑就自动把桥拉起来，省得用户手动点。
+  // NiNfer 的网页地址来自桥；引擎在跑就自动把桥拉起来，省得用户手动点。
   // 状态只在 Promise 回调里写（避免在 effect 体里同步 setState 触发级联渲染）。
   const ensureBridge = useCallback(
     () =>
@@ -96,7 +114,7 @@ export default function AgentWebUiPanel() {
     let cancelled = false;
     Promise.resolve()
       .then(() => {
-        if (!target.running || engine === 'fast27b') {
+        if (!target.running || engine !== 'main') {
           return null;
         }
         return getServerApiKey();
@@ -157,7 +175,9 @@ export default function AgentWebUiPanel() {
   if (!target.running) {
     const startAction = engine === 'main'
       ? { text: '去加载模型', run: () => dispatch({ type: 'SET_VIEW', payload: 'home' }) }
-      : { text: `去启动 ${target.label}`, run: () => dispatch({ type: 'SET_VIEW', payload: 'fast27b' }) };
+      : engine === 'strata'
+        ? { text: '去启动 Strata', run: () => dispatch({ type: 'SET_VIEW', payload: 'strata' }) }
+        : { text: `去启动 ${target.label}`, run: () => dispatch({ type: 'SET_VIEW', payload: 'fast27b' }) };
     return shell(
       <div className="mx-auto max-w-lg text-center">
         <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-[var(--surface)] text-[var(--text-tertiary)]">
@@ -169,13 +189,15 @@ export default function AgentWebUiPanel() {
         <p className="mt-2 text-xs leading-6 text-secondary-custom">
           {engine === 'main'
             ? <>这里给的是 llama-server <span className="text-primary-custom">自带网页界面</span>的入口，加载模型并启动服务后即可在浏览器里使用（当前端口<span className="mono-font"> {target.port}</span>）。</>
-            : <>请到 <span className="text-primary-custom">fast-27b</span> 页启动引擎（当前端口<span className="mono-font"> {target.port}</span>），就绪后这里会给出它的网页界面地址。</>}
+            : engine === 'strata'
+              ? <>请到 <span className="text-primary-custom">Strata</span> 页启动引擎（当前端口<span className="mono-font"> {target.port}</span>），就绪后这里会给出它的网页界面地址。</>
+              : <>请到 <span className="text-primary-custom">NiNfer</span> 页启动引擎（当前端口<span className="mono-font"> {target.port}</span>），就绪后这里会给出它的网页界面地址。</>}
         </p>
         <div className="mt-4 flex justify-center">
           <button
             type="button"
             onClick={startAction.run}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+            className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
           >
             <Zap className="h-3.5 w-3.5" /> {startAction.text}
           </button>
@@ -187,24 +209,32 @@ export default function AgentWebUiPanel() {
   // ---- 运行中：连接信息 + 打开网页（官方界面，浏览器打开；不在应用里内嵌） ----
   const address = target.webUrl;
   const isFast27b = engine === 'fast27b';
+  const isStrata = engine === 'strata';
   return shell(
     <div className="mx-auto max-w-2xl space-y-4">
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-semibold text-primary-custom">网页连接</h2>
-          <span className="rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]">
-            {target.label} 运行中
+          <span
+            className={
+              target.loading
+                ? 'rounded-full border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 py-0.5 text-xs text-[var(--state-warning)]'
+                : 'rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]'
+            }
+            title={target.loading ? '接口已在线，权重仍在加载：页面能打开，但对话要等加载完成' : undefined}
+          >
+            {target.label} {target.loading ? '权重加载中' : '运行中'}
           </span>
         </div>
         <div className="mt-3 flex items-center gap-2">
           <span className="mono-font min-w-0 flex-1 truncate rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1.5 text-[11px] text-secondary-custom" title="官方网页界面地址">
-            {address || '（正在启动 fast-27b 的网页桥…）'}
+            {address || '（正在启动 NiNfer 的网页桥…）'}
           </span>
           <button
             type="button"
             onClick={() => void openExternalUrl(address)}
             disabled={!address}
-            className="flex flex-shrink-0 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+            className="flex flex-shrink-0 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
             title="用系统浏览器打开官方网页界面"
           >
             <ExternalLink className="h-3 w-3" /> 打开网页
@@ -230,12 +260,23 @@ export default function AgentWebUiPanel() {
               {copied === 'key' ? '已复制' : '复制 API Key'}
             </button>
           )}
+          {isStrata && target.engineApiKey && (
+            <button
+              type="button"
+              onClick={() => void copy('key', target.engineApiKey ?? '')}
+              className="flex flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-warning-border)] px-2 py-1 text-xs text-[var(--state-warning)] transition-colors hover:bg-[var(--state-warning-bg)]"
+              title={`Strata 网关开了 Bearer 鉴权：官方界面首次使用需在「设置」里粘贴这个密钥。点击复制：${target.engineApiKey}`}
+            >
+              {copied === 'key' ? <Check className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
+              {copied === 'key' ? '已复制' : '复制 API Key'}
+            </button>
+          )}
           {isFast27b && (
             <button
               type="button"
               onClick={() => void ensureBridge()}
               className="flex flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1.5 text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
-              title="重新启动 fast-27b 的网页桥（引擎已就绪但地址为空时可点）"
+              title="重新启动 NiNfer 的网页桥（引擎已就绪但地址为空时可点）"
             >
               <RefreshCw className="h-3 w-3" /> 重启网页桥
             </button>
@@ -245,9 +286,15 @@ export default function AgentWebUiPanel() {
           <Info className="mt-0.5 h-3 w-3 flex-shrink-0" />
           {isFast27b ? (
             <span>
-              fast-27b 引擎没有任何内置网页界面，这里由应用在<span className="text-primary-custom">回环上起一层同源桥</span>：页面用 llama.cpp 官方 webui（随应用内嵌），
+              NiNfer 引擎没有任何内置网页界面，这里由应用在<span className="text-primary-custom">回环上起一层同源桥</span>：页面用 llama.cpp 官方 webui（随应用内嵌），
               请求转发到引擎并在转发时抹平差异（补 <span className="mono-font">model</span> 字段、<span className="mono-font">top_k</span> 收敛到 20、合成 <span className="mono-font">/props</span>）；
-              API Key 由桥自动注入，界面里不需要手填。桥端口可在 fast-27b 页的「引擎配置」里改。
+              API Key 由桥自动注入，界面里不需要手填。桥端口可在 NiNfer 页的「引擎配置」里改。
+            </span>
+          ) : isStrata ? (
+            <span>
+              Strata 网关<span className="text-primary-custom">自带网页界面</span>（`serve/web`，监听同一个端口），同源直连即可，不需要转发层。
+              权重加载期间页面能打开但对话会一直转圈，看上方徽章判断是「加载中」还是「运行中」；
+              网关开了 API Key 时，先在界面「设置」里粘贴一次（点上方按钮复制）。
             </span>
           ) : (
             <span>
@@ -268,7 +315,11 @@ export default function AgentWebUiPanel() {
         <p>
           官方 webui 提供对话、思考过程折叠、采样参数、模型信息与流式续传等完整能力；
           应用不再自带一份自绘的中文界面，页面的正确性以引擎/官方实现为准。
-          {isFast27b ? '主模型有自己的官方页面，浏览器直接开它的地址即可（切上方「后端」）。' : '切到 fast-27b 时，地址会自动变成应用提供的同源桥。'}
+          {isFast27b
+            ? '主模型有自己的官方页面，浏览器直接开它的地址即可（切上方「后端」）。'
+            : isStrata
+              ? '切到 Strata 时，地址是网关自带的网页界面（与 OpenAI 兼容 API 同端口、同源）。'
+              : '切到 NiNfer 时，地址会自动变成应用提供的同源桥。'}
         </p>
       </div>
     </div>

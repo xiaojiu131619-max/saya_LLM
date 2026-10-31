@@ -7,5 +7,7 @@ pub mod hardware;
 pub mod mcp;
 pub mod model;
 pub mod server;
+pub mod storage;
+pub mod strata;
 pub mod system;
 pub mod updater;

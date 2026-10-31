@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node ./scripts/run-tests.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop": "tauri dev",

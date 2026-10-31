@@ -1,4 +1,5 @@
 import { fast27bGetMetrics, type Fast27bMetricsSnapshot } from './ipc/fast27b';
+import { strataGetMetrics, strataGetStatus, type StrataMetricsSnapshot, type StrataStatus } from './ipc/strata';
 import { isDesktopRuntime } from './desktopRuntime';
 
 /**
@@ -74,6 +75,105 @@ export function subscribeFast27bMetrics(notify: () => void): () => void {
     if (fast27bMetricsListeners.size === 0 && fast27bMetricsTimer !== null) {
       window.clearInterval(fast27bMetricsTimer);
       fast27bMetricsTimer = null;
+    }
+  };
+}
+
+let strataMetrics: StrataMetricsSnapshot | null = null;
+const strataMetricsListeners = new Set<() => void>();
+let strataMetricsTimer: number | null = null;
+let strataMetricsRefresh: Promise<void> | null = null;
+
+export function getStrataMetricsSnapshot(): StrataMetricsSnapshot | null {
+  return strataMetrics;
+}
+
+export function refreshStrataMetrics(): Promise<void> {
+  if (!isDesktopRuntime()) return Promise.resolve();
+  if (strataMetricsRefresh) return strataMetricsRefresh;
+  strataMetricsRefresh = (async () => {
+    try {
+      const next = await strataGetMetrics();
+      if (next) {
+        strataMetrics = next;
+        strataMetricsListeners.forEach((notify) => notify());
+      }
+    } catch {
+      // 瞬时读取失败时保留最近一次有效快照。
+    } finally {
+      strataMetricsRefresh = null;
+    }
+  })();
+  return strataMetricsRefresh;
+}
+
+export function subscribeStrataMetrics(notify: () => void): () => void {
+  if (!isDesktopRuntime()) return () => {};
+  strataMetricsListeners.add(notify);
+  if (strataMetricsTimer === null) {
+    void refreshStrataMetrics();
+    strataMetricsTimer = window.setInterval(() => void refreshStrataMetrics(), 1000);
+  }
+  return () => {
+    strataMetricsListeners.delete(notify);
+    if (strataMetricsListeners.size === 0 && strataMetricsTimer !== null) {
+      window.clearInterval(strataMetricsTimer);
+      strataMetricsTimer = null;
+    }
+  };
+}
+
+let strataStatus: StrataStatus | null = null;
+const strataStatusListeners = new Set<() => void>();
+let strataStatusTimer: number | null = null;
+let strataStatusRefresh: Promise<void> | null = null;
+
+/**
+ * 智慧模型状态轮询间隔。
+ *
+ * `strata_get_status` 内含一次 `/health` 探活（最长 2 秒超时），不能像指标那样
+ * 每秒拉——多处同时调用会把界面拖成幻灯片。3 秒与引擎状态条保持一致。
+ */
+const STRATA_POLL_INTERVAL_MS = 3000;
+
+export function getStrataStatusSnapshot(): StrataStatus | null {
+  return strataStatus;
+}
+
+export function refreshStrataStatus(): Promise<void> {
+  if (!isDesktopRuntime()) return Promise.resolve();
+  if (strataStatusRefresh) return strataStatusRefresh;
+  strataStatusRefresh = (async () => {
+    try {
+      const next = await strataGetStatus();
+      if (next) {
+        strataStatus = next;
+        strataStatusListeners.forEach((notify) => notify());
+      }
+    } catch {
+      // 瞬时读取失败时保留最近一次有效快照，避免界面在「加载中」和「已停用」之间闪。
+    } finally {
+      strataStatusRefresh = null;
+    }
+  })();
+  return strataStatusRefresh;
+}
+
+export function subscribeStrataStatus(notify: () => void): () => void {
+  if (!isDesktopRuntime()) return () => {};
+  strataStatusListeners.add(notify);
+  if (strataStatusTimer === null) {
+    void refreshStrataStatus();
+    strataStatusTimer = window.setInterval(
+      () => void refreshStrataStatus(),
+      STRATA_POLL_INTERVAL_MS,
+    );
+  }
+  return () => {
+    strataStatusListeners.delete(notify);
+    if (strataStatusListeners.size === 0 && strataStatusTimer !== null) {
+      window.clearInterval(strataStatusTimer);
+      strataStatusTimer = null;
     }
   };
 }

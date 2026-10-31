@@ -3,7 +3,6 @@ import {
   Activity,
   Check,
   ChevronDown,
-  Code2,
   Copy,
   Cpu,
   Download,
@@ -19,12 +18,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import PageHeader from "@/components/PageHeader";
 import ToggleSwitch from "@/components/ToggleSwitch";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import WorkingBadge from "@/components/WorkingBadge";
 import Fast27bPerformance from "@/features/fast27b/Fast27bPerformance";
-import Fast27bConnection from "@/features/fast27b/Fast27bConnection";
-import Fast27bModelSwitch from "@/features/fast27b/Fast27bModelSwitch";
 import { useFast27bMetrics } from "@/hooks/useFast27bMetrics";
 import { refreshEngineStatus, useEngineStatuses } from "@/hooks/useEngineStatuses";
 import "@/features/fast27b/fast27b.css";
@@ -111,6 +108,9 @@ export default function Fast27bPage() {
   const status = engineStatuses.fast27b;
   const metrics = useFast27bMetrics();
   const [activeTab, setActiveTab] = useState<"overview" | "performance" | "api">("overview");
+  // 胶囊里的 Fast 通道：预留位（后续 9B 小模型），现在只显示一块空页面。
+  // 与 selectedModel 分开：它不改变引擎的模型槽位，也不触发任何配置写入。
+  const [fastView, setFastView] = useState(false);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
@@ -130,7 +130,7 @@ export default function Fast27bPage() {
     useState<Fast27bModelVariant>("heretic");
   const [modelPaths, setModelPaths] = useState<
     Record<Fast27bModelVariant, string>
-  >({ heretic: "", swift: "" });
+  >({ heretic: "", saluki: "" });
   const modelPath = modelPaths[selectedModel];
   const [port, setPort] = useState("8094");
   const [lan, setLan] = useState(false);
@@ -144,6 +144,9 @@ export default function Fast27bPage() {
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [openingDsh, setOpeningDsh] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  // 「工作中」计时起点：进入加载态时定一次，之后交给 WorkingBadge 走表。
+  const [loadStartedAt, setLoadStartedAt] = useState<number | null>(null);
 
   // 应用内确认对话框（替代原生 window.confirm）：待执行动作挂在 pendingConfirm 上。
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -159,9 +162,16 @@ export default function Fast27bPage() {
   // 引擎失效：进程还在、/v1/models 也可能还是 200，但引擎日志已判 worker 崩溃 / 连续 503。
   const degraded = status?.degraded ?? false;
   const needsRestart = status?.requires_restart ?? false;
-  const devicePoolTokens = status?.device_pool_tokens ?? null;
   const boundModel = status?.dsh_bound_model ?? null;
   const engineEnabled = status?.enabled ?? true;
+  // 加载态：引擎在跑但接口还没就绪，或者刚点了启动。
+  const loading = (running && !apiReady) || starting;
+  useEffect(() => {
+    // 起点在定时回调里落状态：effect 体内同步 setState 会触发级联渲染（lint 也会拦）。
+    const start = loading ? Date.now() : null;
+    const timer = window.setTimeout(() => setLoadStartedAt(start), 0);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
 
   const applyStatusToEditors = useCallback((next: Fast27bStatus) => {
     setEnginePath(next.engine_path);
@@ -170,8 +180,8 @@ export default function Fast27bPage() {
       heretic:
         next.model_presets.find((preset) => preset.id === "heretic")
           ?.model_path ?? "",
-      swift:
-        next.model_presets.find((preset) => preset.id === "swift")
+      saluki:
+        next.model_presets.find((preset) => preset.id === "saluki")
           ?.model_path ?? "",
     });
     setPort(String(next.port ?? 8094));
@@ -223,7 +233,7 @@ export default function Fast27bPage() {
     const unlistenReady = listenDesktopEvent<{ url?: string }>(
       "fast27b:ready",
       (payload) => {
-        setRuntimeMessage(`fast27b 已就绪：${payload.url ?? ""}`);
+        setRuntimeMessage(`NiNfer 已就绪：${payload.url ?? ""}`);
         setProgressMessage(null);
         setStarting(false);
         void refreshStatusOnly();
@@ -232,7 +242,7 @@ export default function Fast27bPage() {
     const unlistenStopped = listenDesktopEvent<{ message?: string }>(
       "fast27b:stopped",
       (payload) => {
-        setRuntimeMessage(payload.message ?? "fast27b 已停止。");
+        setRuntimeMessage(payload.message ?? "NiNfer 已停止。");
         setProgressMessage(null);
         setStarting(false);
         void refreshStatusOnly();
@@ -247,7 +257,7 @@ export default function Fast27bPage() {
     const unlistenError = listenDesktopEvent<{ message?: string }>(
       "fast27b:error",
       (payload) => {
-        setRuntimeMessage(payload.message ?? "fast27b 运行出错。");
+        setRuntimeMessage(payload.message ?? "NiNfer 运行出错。");
         setProgressMessage(null);
         setStarting(false);
         void refreshStatusOnly();
@@ -292,10 +302,10 @@ export default function Fast27bPage() {
     setSwitchingModel(true);
     setSelectedModel(model);
     setActionMessage(null);
-    if (running) setProgressMessage(`正在切换到 ${model === "heretic" ? "Heretic" : "Swift"} 27B，重新加载引擎…`);
+    if (running) setProgressMessage(`正在切换到 ${model === "heretic" ? "Heretic" : "Saluki"} 27B，重新加载引擎…`);
     try {
       await fast27bSelectModel(model);
-      setActionMessage(`已切换到 ${model === "heretic" ? "Heretic" : "Swift"} 27B${running ? "，正在加载引擎，API 就绪后即可使用。" : "，点击启动即可运行。"}`);
+      setActionMessage(`已切换到 ${model === "heretic" ? "Heretic" : "Saluki"} 27B${running ? "，正在加载引擎，API 就绪后即可使用。" : "，点击启动即可运行。"}`);
     } catch (error) {
       setSelectedModel(previousModel);
       setActionMessage(`模型切换失败：${String(error)}`);
@@ -327,13 +337,13 @@ export default function Fast27bPage() {
     setStarting(true);
     setRuntimeMessage(null);
     setProgressMessage(
-      `正在加载 ${selectedModel === "swift" ? "Swift" : "Heretic"} 27B…`,
+      `正在加载 ${selectedModel === "saluki" ? "Saluki" : "Heretic"} 27B…`,
     );
     try {
       await fast27bStart();
       // 就绪由 fast27b:ready 事件确认，状态徽标会随之更新。
       setRuntimeMessage(
-        "fast27b 正在启动，就绪后状态徽标会变为「运行中 · API 就绪」...",
+        "NiNfer 正在启动，就绪后状态徽标会变为「运行中 · API 就绪」...",
       );
     } catch (error) {
       setRuntimeMessage(`启动失败：${String(error)}`);
@@ -347,7 +357,7 @@ export default function Fast27bPage() {
 
   const handleStop = () => {
     setPendingConfirm({
-      title: "停止 fast-27b 引擎",
+      title: "停止 NiNfer 引擎",
       description: "正在进行的对话会被中断。",
       confirmLabel: "停止引擎",
       tone: "warning",
@@ -355,7 +365,7 @@ export default function Fast27bPage() {
         setStopping(true);
         try {
           await fast27bStop();
-          setRuntimeMessage("fast27b 已停止。");
+          setRuntimeMessage("NiNfer 已停止。");
         } catch (error) {
           setRuntimeMessage(`停止失败：${String(error)}`);
         } finally {
@@ -380,7 +390,7 @@ export default function Fast27bPage() {
       await fast27bRestart();
       setProgressMessage(null);
       setRuntimeMessage(
-        "fast27b 已重启完成：请新开对话，不要重发刚才那个超池的长历史。",
+        "NiNfer 已重启完成：请新开对话，不要重发刚才那个超池的长历史。",
       );
     } catch (error) {
       setProgressMessage(null);
@@ -401,7 +411,7 @@ export default function Fast27bPage() {
     busyRef.current = true;
     setBinding(true);
     setActionMessage(null);
-    setProgressMessage("正在把 fast27b 接入 dsh...");
+    setProgressMessage("正在把 NiNfer 接入 dsh...");
     try {
       const result = await fast27bBindDsh();
       if (result) {
@@ -534,7 +544,7 @@ export default function Fast27bPage() {
         engine_path: enginePath.trim(),
         model_path: modelPath.trim(),
         selected_model: selectedModel,
-        swift_model_path: modelPaths.swift.trim(),
+        saluki_model_path: modelPaths.saluki.trim(),
         heretic_model_path: modelPaths.heretic.trim(),
         port: portNumber,
         lan,
@@ -561,16 +571,6 @@ export default function Fast27bPage() {
 
   const markDirty = () => setSettingsDirty(true);
 
-  const applyBatPreset = () => {
-    setSelectedModel("heretic");
-    setContextWindow("262144");
-    setDraftTokens("4");
-    setDefaultMaxTokens("32768");
-    setThinkingBudget("8192");
-    markDirty();
-    setActionMessage("已套用 start-heretic-best.bat 的推理参数，保存后于下次启动生效。");
-  };
-
   /** 启用/停用 fast27b 引擎：只翻转开关（专用命令，不触碰其他配置项）。 */
   const applyEnabled = async (next: boolean) => {
     if (busyRef.current) return;
@@ -580,8 +580,8 @@ export default function Fast27bPage() {
       await fast27bSetEnabled(next);
       setActionMessage(
         next
-          ? "fast-27b 引擎已启用。"
-          : "fast-27b 引擎已停用；可随时在此重新启用。",
+          ? "NiNfer 引擎已启用。"
+          : "NiNfer 引擎已停用；可随时在此重新启用。",
       );
       await refreshStatusOnly();
     } catch (error) {
@@ -594,7 +594,7 @@ export default function Fast27bPage() {
   const handleToggleEnabled = (next: boolean) => {
     if (!next && running) {
       setPendingConfirm({
-        title: "停用 fast-27b 引擎",
+        title: "停用 NiNfer 引擎",
         description:
           "引擎当前正在运行；停用后启动按钮会锁定（已运行的引擎不受影响，可手动停止）。",
         confirmLabel: "停用",
@@ -604,6 +604,16 @@ export default function Fast27bPage() {
       return;
     }
     void applyEnabled(next);
+  };
+
+  const handleCopy = async (value: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(key);
+      window.setTimeout(() => setCopied(null), 1600);
+    } catch {
+      setCopied(null);
+    }
   };
 
   const handleCopyLogs = async () => {
@@ -624,7 +634,7 @@ export default function Fast27bPage() {
 
   const handleClearLogs = () => {
     setPendingConfirm({
-      title: "清空 fast27b 日志",
+      title: "清空 NiNfer 日志",
       description: "面板里的日志会立即清空；engine.log 落盘文件不受影响。",
       confirmLabel: "清空",
       tone: "warning",
@@ -701,7 +711,9 @@ export default function Fast27bPage() {
           )}
           {!needsRestart && (
             <p className="mt-1 leading-relaxed">
-              请新开对话（不要重发这条长历史）；若需要更大池子，先关掉占显存的程序再重启引擎。
+              请新开对话（不要重发这条长历史）。池大小由引擎启动环境的
+              NINFER_KV_WINDOW 决定并受显存封顶——若需要更大池子，调大该值后重启引擎，
+              仅关闭占显存的程序并不能扩大池子。
             </p>
           )}
           {(status?.completions_after_fault ?? 0) > 0 && (
@@ -731,7 +743,7 @@ export default function Fast27bPage() {
   const secondaryButton =
     "inline-flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] px-3 py-2 text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
   const primaryButton =
-    "inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
+    "inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
   const busy =
     starting || stopping || restarting || switchingModel || binding || saving || openingDsh;
   const desktop = isDesktopRuntime();
@@ -741,15 +753,13 @@ export default function Fast27bPage() {
   const resourcesReady = Boolean(
     status?.engine_exists && selectedPreset?.exists,
   );
+  const apiBaseUrl = `http://127.0.0.1:${status?.port ?? port}/v1`;
+  const apiModelId = status?.model_id
+    ?? (selectedModel === "saluki" ? "underdog-saluki-27b" : "qwen3.8-27b");
+  // 只留三个真正会影响体感的手动项；桥端口/默认输出上限/思考预算沿用保存值，
+  // 需要改的场景太少，摆出来只会让人以为必须调。
   const fields = [
     { label: "服务端口", value: port, update: setPort, min: 1, max: 65535 },
-    {
-      label: "WebUI 桥端口",
-      value: bridgePort,
-      update: setBridgePort,
-      min: 1,
-      max: 65535,
-    },
     {
       label: "上下文长度（ctx）",
       value: contextWindow,
@@ -763,18 +773,6 @@ export default function Fast27bPage() {
       min: 0,
       max: 5,
     },
-    {
-      label: "默认输出上限",
-      value: defaultMaxTokens,
-      update: setDefaultMaxTokens,
-      min: 0,
-    },
-    {
-      label: "思考预算（token）",
-      value: thinkingBudget,
-      update: setThinkingBudget,
-      min: 0,
-    },
   ];
 
   const openWebui = () => {
@@ -783,507 +781,510 @@ export default function Fast27bPage() {
     dispatch({ type: "SET_VIEW", payload: "agent" });
   };
 
-  const openChat = () => {
-    dispatch({ type: "SET_CHAT_ENGINE", payload: "fast27b" });
-    dispatch({ type: "SET_VIEW", payload: "chat" });
-  };
-
   const tabs = [
     { id: "overview", label: "概览", icon: Info },
     { id: "performance", label: "性能", icon: Activity },
-    { id: "api", label: "API", icon: Code2 },
   ] as const;
 
-  return (
-    <div className="fast27b-workspace h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
-      <div className="mx-auto max-w-5xl space-y-4 pb-6">
-        <PageHeader
-          icon={Cpu}
-          title="fast-27b"
-          description="Heretic · DFlash2 / Swift · MTP，启动、监测与接入集中管理。"
-          className="mb-4"
-        />
+  const variants: Array<{ id: Fast27bModelVariant; label: string }> = [
+    { id: "heretic", label: "Heretic" },
+    { id: "saluki", label: "Saluki" },
+  ];
+  const modelTitle = selectedModel === "saluki" ? "Saluki 27B" : "Heretic 27B";
+  const modelSpec = selectedModel === "saluki" ? "MTP" : "DFlash2";
+  const presetExists = (variant: Fast27bModelVariant) =>
+    status
+      ? status.model_presets.find((preset) => preset.id === variant)?.exists !== false
+      : true;
+  const panel = "rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] p-5";
 
-        <Fast27bModelSwitch
-          selected={selectedModel}
-          onChange={(model) => void handleSelectModel(model)}
-          disabled={busy || settingsDirty || !status || !desktop}
-          switching={switchingModel}
-          available={status ? Object.fromEntries(status.model_presets.map((preset) => [preset.id, preset.exists])) : undefined}
-        />
-        <div className="fast27b-tabs" role="tablist" aria-label="fast-27b 工作台视图">
+  return (
+    <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-5xl space-y-4 pb-6">
+        {/* 页头：变体切换收成标题右侧的小胶囊，不再单独占一整行 */}
+        <div className="workspace-page-header flex min-w-0 items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="eyebrow mb-2 flex items-center gap-2">
+              <Cpu className="h-3.5 w-3.5" />
+              工作台 / NiNfer
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="page-title">NiNfer</h1>
+              <div
+                role="group"
+                aria-label="切换 NiNfer 模型变体"
+                className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] p-0.5"
+              >
+                {variants.map(({ id, label }) => {
+                  const active = !fastView && selectedModel === id;
+                  const exists = presetExists(id);
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      aria-pressed={active}
+                      disabled={busy || settingsDirty || !status || !desktop || !exists}
+                      onClick={() => {
+                        setFastView(false);
+                        void handleSelectModel(id);
+                      }}
+                      title={
+                        !exists
+                          ? "模型文件缺失，请展开高级配置检查路径"
+                          : `切换到 ${label} 27B（${id === "saluki" ? "MTP" : "DFlash2"}）`
+                      }
+                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[length:var(--font-eyebrow)] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        active
+                          ? "bg-[var(--surface-raised)] text-[var(--accent)] shadow-[var(--shadow-card)]"
+                          : "text-secondary-custom hover:text-primary-custom"
+                      }`}
+                    >
+                      {switchingModel && active && <RefreshCw className="h-2.5 w-2.5 animate-spin" />}
+                      {label}
+                    </button>
+                  );
+                })}
+                {/* Fast：预留位，后续接入 9B 小模型；现在只打开一块空页面，不碰引擎。
+                    再点一次可退出——引擎变体按钮在引擎未就绪时是禁用的，
+                    只靠「点变体退出」会让用户卡在 Fast 页出不来。 */}
+                <button
+                  type="button"
+                  aria-pressed={fastView}
+                  onClick={() => setFastView((current) => !current)}
+                  title={fastView
+                    ? "返回 NiNfer 引擎视图"
+                    : "Fast · 预留位（后续接入 9B 小模型），当前为空页面"}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[length:var(--font-eyebrow)] transition-colors ${
+                    fastView
+                      ? "bg-[var(--surface-raised)] text-[var(--accent)] shadow-[var(--shadow-card)]"
+                      : "text-secondary-custom hover:text-primary-custom"
+                  }`}
+                >
+                  Fast
+                </button>
+              </div>
+            </div>
+            <p className="mt-0.5 text-xs leading-5 text-secondary-custom">
+              {fastView
+                ? "Fast 通道预留中：后续接入 9B 小模型，当前界面留白。"
+                : "Heretic · DFlash2 / Saluki · MTP 双变体，启动、监测与接入集中管理。"}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="NiNfer 视图">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
-              id={`fast27b-tab-${id}`}
               type="button"
               role="tab"
-              aria-selected={activeTab === id}
-              aria-controls={`fast27b-panel-${id}`}
-              tabIndex={activeTab === id ? 0 : -1}
+              id={`ninfer-tab-${id}`}
+              aria-selected={!fastView && activeTab === id}
+              disabled={fastView}
               onClick={() => setActiveTab(id)}
-              onKeyDown={(event) => {
-                const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-                if (!direction && event.key !== "Home" && event.key !== "End") return;
-                event.preventDefault();
-                const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (tabs.findIndex((tab) => tab.id === id) + direction + tabs.length) % tabs.length;
-                setActiveTab(tabs[index].id);
-                document.getElementById(`fast27b-tab-${tabs[index].id}`)?.focus();
-              }}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                !fastView && activeTab === id
+                  ? "bg-[var(--surface-selected)] text-primary-custom"
+                  : "text-secondary-custom hover:bg-[var(--surface-hover)]"
+              }`}
             >
-              <Icon className="h-4 w-4" />{label}
+              <Icon className="h-3.5 w-3.5" />
+              {label}
             </button>
           ))}
         </div>
 
-        {activeTab === "overview" && <div id="fast27b-panel-overview" role="tabpanel" aria-labelledby="fast27b-tab-overview" className="space-y-4">
-        <section
-          aria-label="模型与运行状态"
-          className="fast27b-launch-panel rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] p-5"
-        >
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            {runningBadge}
-            <fieldset
-              disabled={busy || !desktop || !status}
-              className="flex items-center gap-2 text-xs text-secondary-custom disabled:opacity-50"
-            >
-              <span>{engineEnabled ? "引擎已启用" : "引擎已停用"}</span>
-              <ToggleSwitch
-                checked={engineEnabled}
-                onChange={(next) => void handleToggleEnabled(next)}
-                label="启用 fast-27b 引擎"
-              />
-            </fieldset>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-[length:var(--font-subtitle)] font-semibold text-primary-custom">{selectedModel === "heretic" ? "Heretic" : "Swift"} 27B</div>
-            <div className="flex flex-wrap gap-2">
-              {settingsDirty && (
-                <button
-                  onClick={() => void handleSaveConfig()}
-                  disabled={busy || !desktop}
-                  className={secondaryButton}
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  {saving ? "正在保存…" : "保存配置"}
-                </button>
-              )}
-              {!running ? (
-                <button
-                  onClick={() => void handleStart()}
-                  disabled={
-                    busy ||
-                    settingsDirty ||
-                    !engineEnabled ||
-                    !resourcesReady ||
-                    !desktop
-                  }
-                  className={primaryButton}
-                  title={
-                    settingsDirty
-                      ? "请先保存模型和配置"
-                      : !resourcesReady
-                        ? "请展开高级配置，检查引擎与模型路径"
-                        : "启动所选模型"
-                  }
-                >
-                  {starting ? (
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5" />
-                  )}
-                  {starting ? "正在启动…" : "启动引擎"}
-                </button>
-              ) : (
-                <button
-                  onClick={() => void handleStop()}
-                  disabled={busy}
-                  className={secondaryButton}
-                >
-                  {stopping ? (
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Square className="h-3.5 w-3.5" />
-                  )}
-                  {stopping ? "正在停止…" : "停止引擎"}
-                </button>
-              )}
-              {needsRestart && (
-                <button
-                  onClick={() => void handleRestart()}
-                  disabled={busy || settingsDirty || !desktop}
-                  className={`${secondaryButton} text-[var(--state-danger)]`}
-                >
-                  <RefreshCw
-                    className={`h-3.5 w-3.5 ${restarting ? "animate-spin" : ""}`}
-                  />
-                  重启恢复
-                </button>
-              )}
-            </div>
-          </div>
-          <p
-            id="fast27b-model-hint"
-            className="mt-2 text-[length:var(--font-eyebrow)] text-secondary-custom"
-          >
-            {running
-              ? "点击顶部切换按钮可重载到另一个模型，当前进行中的请求会中断。"
-              : settingsDirty
-                ? "有未保存修改，保存后即可启动。"
-                : "Heretic 使用 DFlash2，Swift 使用 MTP；默认草稿 4 token，视觉常驻，推理参数参照 start-heretic-best.bat。"}
-          </p>
-          <div className="fast27b-profile-tags" aria-label="当前推理配置">
-            <span>{selectedModel === "heretic" ? "DFlash2" : "MTP"} · 草稿 {draftTokens} token</span>
-            <span>k8v4 · 主机 KV 16 GiB</span>
-            <span>视觉常驻 · 单并发</span>
-            <span>思考 high · 预算 {Number(thinkingBudget).toLocaleString()}</span>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-[var(--border)] pt-3 text-[length:var(--font-eyebrow)] text-secondary-custom">
-            <span className="mono-font">
-              API · {status?.lan ? "0.0.0.0" : "127.0.0.1"}:
-              {status?.port ?? port}
-            </span>
-            <span>
-              上下文 · {(status?.context_window ?? 262144).toLocaleString()}
-            </span>
-            {devicePoolTokens !== null && (
-              <span>
-                设备 KV 池 · {devicePoolTokens.toLocaleString()} token
-              </span>
-            )}
-          </div>
-          {status && !resourcesReady && (
-            <p
-              role="alert"
-              className="mt-3 text-xs text-[var(--state-warning)]"
-            >
-              {!status.engine_exists ? "引擎文件缺失。" : "所选模型文件缺失。"}
-              <button
-                onClick={() => setConfigOpen(true)}
-                className="ml-1 underline underline-offset-2"
-              >
-                检查高级配置
-              </button>
-            </p>
-          )}
-          {engineAlert && <div className="mt-3">{engineAlert}</div>}
-        </section>
-
-        <section
-          aria-label="接入与对话"
-          className="grid divide-y divide-[var(--border)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] md:grid-cols-2 md:divide-x md:divide-y-0"
-        >
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div className="min-w-0">
-              <h2 className="text-xs font-semibold text-primary-custom">DSH</h2>
-              <p
-                className="mt-1 truncate text-[length:var(--font-eyebrow)] text-secondary-custom"
-                title={boundModel ?? "接入后设为默认模型"}
-              >
-                {boundModel ? `已接入 · ${boundModel}` : "智能体默认模型"}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() =>
-                  void (boundModel ? handleUnbind() : handleBind())
-                }
-                disabled={
-                  busy ||
-                  !desktop ||
-                  (!boundModel && (!apiReady || !engineEnabled))
-                }
-                className={secondaryButton}
-                title="接入会替换 DSH 当前默认模型，与模型页共用同一提供方槽位"
-              >
-                {binding ? (
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                ) : boundModel ? (
-                  <X className="h-3.5 w-3.5" />
-                ) : (
-                  <Check className="h-3.5 w-3.5" />
-                )}
-                {boundModel ? "解除" : "接入 DSH"}
-              </button>
-              <button
-                onClick={() => void handleOpenDshWeb()}
-                disabled={busy || !desktop}
-                className={secondaryButton}
-                title="打开 DSH 网页；未运行时会先自动启动"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                打开
-              </button>
-            </div>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div>
-              <h2 className="text-xs font-semibold text-primary-custom">
-                WebUI
-              </h2>
-              <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
-                直接与当前模型对话
-              </p>
-            </div>
-            <button
-              onClick={openWebui}
-              disabled={busy || !apiReady || !desktop}
-              className={secondaryButton}
-              title={
-                apiReady ? "打开应用内 WebUI" : "请先启动引擎并等待 API 就绪"
-              }
-            >
-              <Globe className="h-3.5 w-3.5" />
-              打开 WebUI
-            </button>
-          </div>
-        </section>
-
-        <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} compact />
-        </div>}
-
-        {activeTab === "performance" && <div id="fast27b-panel-performance" role="tabpanel" aria-labelledby="fast27b-tab-performance">
-          <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} />
-        </div>}
-        {activeTab === "api" && <div id="fast27b-panel-api" role="tabpanel" aria-labelledby="fast27b-tab-api">
-          <Fast27bConnection status={status} desktop={desktop} onOpenChat={openChat} />
-        </div>}
-
-        {(progressMessage || runtimeMessage || actionMessage) && (
+        {/* Fast 预留位：空页面，不放任何假数据（后续接入 9B 小模型时在这里填）。 */}
+        {fastView ? (
           <div
-            role="status"
-            aria-live="polite"
-            className="space-y-1 rounded-lg bg-[var(--surface-muted)] px-3 py-2 text-xs text-secondary-custom"
+            className="flex min-h-[320px] flex-col items-center justify-center gap-2 rounded-[var(--radius-panel)] border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center"
+            aria-label="Fast 通道"
           >
-            {progressMessage && (
-              <p className="flex items-center gap-2">
-                <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--accent)]" />
-                {progressMessage}
-              </p>
-            )}
-            {!progressMessage && runtimeMessage && (
-              <p className="flex items-start gap-2">
-                <Info className="h-3.5 w-3.5 shrink-0" />
-                {runtimeMessage}
-              </p>
-            )}
-            {actionMessage && <p>{actionMessage}</p>}
-          </div>
-        )}
-
-        <section className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
-          <button
-            type="button"
-            onClick={() => setConfigOpen((open) => !open)}
-            aria-expanded={configOpen}
-            aria-controls="fast27b-config"
-            className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)]"
-          >
-            <ChevronDown
-              className={`h-3.5 w-3.5 transition-transform ${configOpen ? "rotate-180" : ""}`}
-            />
-            <span className="font-medium text-primary-custom">高级配置</span>
-            <span className="ml-auto text-[length:var(--font-eyebrow)]">
-              {settingsDirty ? "有未保存修改" : "路径、参数与 API key"}
+            <span className="text-[length:var(--font-subtitle)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-tertiary)]">
+              Fast
             </span>
-          </button>
-          {configOpen && (
-            <div
-              id="fast27b-config"
-              className="space-y-3 border-t border-[var(--border)] p-4"
-            >
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block text-xs">
-                  <span className="mb-1 block text-secondary-custom">
-                    引擎路径（ninfer-serve-86.exe）
-                  </span>
-                  <input
-                    value={enginePath}
-                    onChange={(event) => {
-                      setEnginePath(event.target.value);
-                      markDirty();
-                    }}
-                    spellCheck={false}
-                    disabled={busy}
-                    className={`${editorField} mono-font`}
+            <span className="text-xs leading-5 text-[var(--text-tertiary)]">
+              通道预留中 · 后续接入 9B 小模型
+            </span>
+          </div>
+        ) : (
+          <>
+        {activeTab === "overview" && (
+          <div className="space-y-4">
+            <section aria-label="运行状态" className={panel}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                {runningBadge}
+                <fieldset
+                  disabled={busy || !desktop || !status}
+                  className="flex items-center gap-2 text-xs text-secondary-custom disabled:opacity-50"
+                >
+                  <span>{engineEnabled ? "已启用" : "已停用"}</span>
+                  <ToggleSwitch
+                    checked={engineEnabled}
+                    onChange={(next) => void handleToggleEnabled(next)}
+                    label="启用 NiNfer 引擎"
                   />
-                </label>
-                {(["heretic", "swift"] as const).map((model) => (
-                  <label key={model} className="block text-xs">
-                    <span className="mb-1 block text-secondary-custom">
-                      {model === "heretic" ? "Heretic" : "Swift"} 模型文件（.ninfer）
-                    </span>
+                </fieldset>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[length:var(--font-subtitle)] font-semibold text-primary-custom">
+                    {modelTitle}
+                  </div>
+                  <div className="mt-0.5 text-xs text-[var(--text-tertiary)]">
+                    {modelSpec} · 草稿 {draftTokens} token · 上下文{" "}
+                    {(status?.context_window_effective ?? status?.context_window ?? 262144).toLocaleString()}
+                    {status?.pid ? ` · PID ${status.pid}` : ""}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {settingsDirty && (
+                    <button onClick={() => void handleSaveConfig()} disabled={busy || !desktop} className={secondaryButton}>
+                      <Save className="h-3.5 w-3.5" />
+                      {saving ? "正在保存…" : "保存配置"}
+                    </button>
+                  )}
+                  {!running ? (
+                    <button
+                      onClick={() => void handleStart()}
+                      disabled={busy || settingsDirty || !engineEnabled || !resourcesReady || !desktop}
+                      className={primaryButton}
+                      title={
+                        settingsDirty
+                          ? "请先保存模型和配置"
+                          : !resourcesReady
+                            ? "请展开高级配置，检查引擎与模型路径"
+                            : "启动所选模型"
+                      }
+                    >
+                      {starting ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                      {starting ? "正在启动…" : "启动"}
+                    </button>
+                  ) : (
+                    <>
+                      <button onClick={() => void handleStop()} disabled={busy} className={secondaryButton}>
+                        {stopping ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+                        {stopping ? "正在停止…" : "停止"}
+                      </button>
+                      {needsRestart && (
+                        <button onClick={() => void handleRestart()} disabled={busy || settingsDirty || !desktop} className={`${secondaryButton} text-[var(--state-danger)]`}>
+                          <RefreshCw className={`h-3.5 w-3.5 ${restarting ? "animate-spin" : ""}`} />
+                          重启恢复
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {loading ? (
+                <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-xs">
+                  <WorkingBadge
+                    label="正在加载模型"
+                    startedAt={loadStartedAt}
+                    className="font-medium text-primary-custom"
+                  />
+                  <div className="mt-1.5 leading-5 text-[var(--text-tertiary)]">
+                    {progressMessage ?? "首次加载 27B 权重需要一两分钟，就绪后状态会变成「运行中 · API 就绪」。"}
+                  </div>
+                </div>
+              ) : (
+                progressMessage && (
+                  <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-secondary-custom">
+                    {progressMessage}
+                  </div>
+                )
+              )}
+
+              {engineAlert && <div className="mt-3">{engineAlert}</div>}
+
+              {status && !resourcesReady && (
+                <p role="alert" className="mt-3 text-xs text-[var(--state-warning)]">
+                  {!status.engine_exists ? "引擎文件缺失。" : "所选模型文件缺失。"}
+                  <button onClick={() => setConfigOpen(true)} className="ml-1 underline underline-offset-2">
+                    检查高级配置
+                  </button>
+                </p>
+              )}
+            </section>
+
+            <section aria-label="接入信息" className={panel}>
+              <div className="mb-3 text-xs font-medium text-secondary-custom">接入信息</div>
+              <dl className="grid gap-2 sm:grid-cols-2">
+                {[
+                  { key: "base_url", label: "Base URL", value: apiBaseUrl },
+                  { key: "model", label: "模型 ID", value: apiModelId },
+                  { key: "port", label: "端口", value: status?.port ? String(status.port) : port },
+                  { key: "api_key", label: "API Key", value: status?.api_key ?? "—" },
+                ].map((item) => (
+                  <div
+                    key={item.key}
+                    className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5"
+                  >
+                    <div className="min-w-0">
+                      <dt className="text-[11px] text-[var(--text-tertiary)]">{item.label}</dt>
+                      <dd className="truncate text-xs text-primary-custom mono-font" title={item.value}>
+                        {item.value}
+                      </dd>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopy(item.value, item.key)}
+                      disabled={!item.value || item.value === "—"}
+                      className="flex-shrink-0 rounded p-1 text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-30"
+                      title="复制"
+                    >
+                      {copied === item.key ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-3 text-[11px] leading-5 text-[var(--text-tertiary)]">
+                NiNfer 是 OpenAI 兼容后端，可直接在对话页切到它；草稿长度、上下文等启动参数见下方「高级配置」，保存后下次启动生效。{status?.lan ? " 已开放局域网：其他设备把 127.0.0.1 换成本机局域网 IP。" : " 当前仅本机可访问。"}
+              </p>
+            </section>
+
+            <section
+              aria-label="接入与对话"
+              className="grid divide-y divide-[var(--border)] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] md:grid-cols-2 md:divide-x md:divide-y-0"
+            >
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <h2 className="text-xs font-semibold text-primary-custom">DSH</h2>
+                  <p
+                    className="mt-1 truncate text-[length:var(--font-eyebrow)] text-secondary-custom"
+                    title={boundModel ?? "接入后设为默认模型"}
+                  >
+                    {boundModel ? `已接入 · ${boundModel}` : "智能体默认模型"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => void (boundModel ? handleUnbind() : handleBind())}
+                    disabled={busy || !desktop || (!boundModel && (!apiReady || !engineEnabled))}
+                    className={secondaryButton}
+                    title="接入会替换 DSH 当前默认模型，与模型页共用同一提供方槽位"
+                  >
+                    {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : boundModel ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+                    {boundModel ? "解除" : "接入 DSH"}
+                  </button>
+                  <button
+                    onClick={() => void handleOpenDshWeb()}
+                    disabled={busy || !desktop}
+                    className={secondaryButton}
+                    title="打开 DSH 网页；未运行时会先自动启动"
+                  >
+                    {openingDsh ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                    打开
+                  </button>
+                </div>
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div>
+                  <h2 className="text-xs font-semibold text-primary-custom">WebUI</h2>
+                  <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
+                    直接与当前模型对话
+                  </p>
+                </div>
+                <button
+                  onClick={openWebui}
+                  disabled={busy || !apiReady || !desktop}
+                  className={secondaryButton}
+                  title={apiReady ? "打开应用内 WebUI" : "请先启动引擎并等待 API 就绪"}
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                  打开 WebUI
+                </button>
+              </div>
+            </section>
+
+            <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} compact />
+
+            {(actionMessage || (!loading && runtimeMessage)) && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-secondary-custom"
+              >
+                {actionMessage ?? runtimeMessage}
+              </div>
+            )}
+
+            <section className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)]">
+              <button
+                type="button"
+                onClick={() => setConfigOpen((open) => !open)}
+                aria-expanded={configOpen}
+                aria-controls="ninfer-config"
+                className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)]"
+              >
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${configOpen ? "rotate-180" : ""}`} />
+                <span className="font-medium text-primary-custom">高级配置</span>
+                <span className="ml-auto text-[length:var(--font-eyebrow)]">
+                  {settingsDirty ? "有未保存修改" : "路径、端口与 API key"}
+                </span>
+              </button>
+              {configOpen && (
+                <div id="ninfer-config" className="space-y-3 border-t border-[var(--border)] p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs">
+                      <span className="mb-1 block text-secondary-custom">引擎路径（ninfer-serve-86.exe）</span>
+                      <input
+                        value={enginePath}
+                        onChange={(event) => {
+                          setEnginePath(event.target.value);
+                          markDirty();
+                        }}
+                        spellCheck={false}
+                        disabled={busy}
+                        className={`${editorField} mono-font`}
+                      />
+                    </label>
+                    {(["heretic", "saluki"] as const).map((model) => (
+                      <label key={model} className="block text-xs">
+                        <span className="mb-1 block text-secondary-custom">
+                          {model === "heretic" ? "Heretic" : "Saluki"} 模型文件（.ninfer）
+                        </span>
+                        <input
+                          value={modelPaths[model]}
+                          onChange={(event) => {
+                            setModelPaths((previous) => ({ ...previous, [model]: event.target.value }));
+                            markDirty();
+                          }}
+                          spellCheck={false}
+                          disabled={running || busy}
+                          className={`${editorField} mono-font`}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {fields.map((field) => (
+                      <label key={field.label} className="block text-xs">
+                        <span className="mb-1 block text-secondary-custom">{field.label}</span>
+                        <input
+                          type="number"
+                          min={field.min}
+                          max={field.max}
+                          step={1}
+                          value={field.value}
+                          onChange={(event) => {
+                            field.update(event.target.value);
+                            markDirty();
+                          }}
+                          disabled={busy}
+                          className={editorField}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[length:var(--font-eyebrow)] text-secondary-custom">
+                    默认输出上限与思考预算沿用上次保存的值，不在这里暴露；保存后于下次启动生效。
+                  </p>
+                  <label className="block text-xs">
+                    <span className="mb-1 block text-secondary-custom">API key（本地明文鉴权）</span>
                     <input
-                      value={modelPaths[model]}
+                      value={apiKey}
                       onChange={(event) => {
-                        setModelPaths((previous) => ({ ...previous, [model]: event.target.value }));
+                        setApiKey(event.target.value);
                         markDirty();
                       }}
                       spellCheck={false}
-                      disabled={running || busy}
+                      disabled={busy}
                       className={`${editorField} mono-font`}
                     />
                   </label>
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {fields.map((field) => (
-                  <label key={field.label} className="block text-xs">
-                    <span className="mb-1 block text-secondary-custom">
-                      {field.label}
-                    </span>
-                    <input
-                      type="number"
-                      min={field.min}
-                      max={field.max}
-                      step={1}
-                      value={field.value}
-                      onChange={(event) => {
-                        field.update(event.target.value);
-                        markDirty();
-                      }}
-                      disabled={busy}
-                      className={editorField}
-                    />
-                  </label>
-                ))}
-              </div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[length:var(--font-eyebrow)] text-secondary-custom">默认输出上限为 0 时由引擎自定；思考预算为 0 时不限制。保存后于下次启动生效。</p>
-                  <button type="button" onClick={applyBatPreset} disabled={busy || running || !desktop} className={secondaryButton}>应用 bat 参数</button>
-                </div>
-                <details className="rounded-[var(--radius-lg)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-eyebrow)] text-secondary-custom">
-                  <summary className="cursor-pointer font-medium text-primary-custom">查看固定参数与 KV 环境变量</summary>
-                  <p className="mono-font mt-2 break-words leading-relaxed">--kv-capacity auto · --kv-headroom-mib 128 · --kv-dtype k8v4 · --host-kv-mib 16384 · --prefill-chunk 1024 · --lm-head-draft · --ngram-draft-tokens 0 · --vision --vision-residency resident · --default-reasoning-effort high · --max-concurrency 1 · --presence-penalty 0 · --max-shared-prefixes 0 · --gdn-state-fp16</p>
-                  <p className="mono-font mt-2 break-words leading-relaxed">NINFER_KV_WINDOW=16384 · NINFER_KV_RETRIEVE=8192 · NINFER_KV_RING=1 · NINFER_HOST_PAGEABLE=1 · NINFER_KV_REUSE_HOSTBACKED=1</p>
-                  <p className="mt-2">已有非空 NINFER_* 环境值优先；API 监听与鉴权使用本页保存的配置。</p>
-                </details>
-              <label className="block text-xs">
-                <span className="mb-1 block text-secondary-custom">
-                  API key（本地明文鉴权）
-                </span>
-                <input
-                  value={apiKey}
-                  onChange={(event) => {
-                    setApiKey(event.target.value);
-                    markDirty();
-                  }}
-                  spellCheck={false}
-                  disabled={busy}
-                  className={`${editorField} mono-font`}
-                />
-              </label>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <fieldset
-                  disabled={busy}
-                  className="flex items-center gap-3 text-xs text-secondary-custom"
-                >
-                  <ToggleSwitch
-                    checked={lan}
-                    onChange={(next) => {
-                      setLan(next);
-                      markDirty();
-                    }}
-                    label="对局域网开放 API"
-                  />
-                  <span>对局域网开放 API</span>
-                </fieldset>
-                <button
-                  onClick={() => void handleSaveConfig()}
-                  disabled={busy || !settingsDirty || !desktop}
-                  className={primaryButton}
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  {saving ? "正在保存…" : "保存配置"}
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
-          <button
-            type="button"
-            onClick={() => setLogsOpen((open) => !open)}
-            aria-expanded={logsOpen}
-            aria-controls="fast27b-logs"
-            className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)]"
-          >
-            <ChevronDown
-              className={`h-3.5 w-3.5 transition-transform ${logsOpen ? "rotate-180" : ""}`}
-            />
-            <span className="font-medium text-primary-custom">运行日志</span>
-            <span className="ml-auto text-[length:var(--font-eyebrow)]">{fast27bLogs.length} 行</span>
-          </button>
-          {logsOpen && (
-            <div
-              id="fast27b-logs"
-              className="border-t border-[var(--border)] p-3"
-            >
-              <div className="mb-2 flex flex-wrap justify-end gap-2">
-                <button
-                  onClick={() => setLogsLive((live) => !live)}
-                  className={secondaryButton}
-                >
-                  {logsLive ? (
-                    <Pause className="h-3 w-3" />
-                  ) : (
-                    <Play className="h-3 w-3" />
-                  )}
-                  {logsLive ? "暂停刷新" : "恢复刷新"}
-                </button>
-                <button
-                  onClick={() => void handleCopyLogs()}
-                  disabled={!fast27bLogs.length}
-                  className={secondaryButton}
-                >
-                  {logCopied ? (
-                    <Check className="h-3 w-3" />
-                  ) : (
-                    <Copy className="h-3 w-3" />
-                  )}
-                  {logCopied ? "已复制" : "复制"}
-                </button>
-                <button
-                  onClick={handleExportLogs}
-                  disabled={!fast27bLogs.length}
-                  className={secondaryButton}
-                >
-                  <Download className="h-3 w-3" />
-                  导出
-                </button>
-                <button
-                  onClick={() => void handleClearLogs()}
-                  disabled={!fast27bLogs.length}
-                  className={secondaryButton}
-                >
-                  <Trash2 className="h-3 w-3" />
-                  清空
-                </button>
-              </div>
-              <div
-                ref={logViewportRef}
-                className="mono-font h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-[1.7]"
-              >
-                {!renderedLogs.length ? (
-                  <div className="flex h-full items-center justify-center gap-2 text-secondary-custom">
-                    <Terminal className="h-4 w-4 opacity-50" />
-                    启动后显示引擎日志
-                  </div>
-                ) : (
-                  renderedLogs.map((line, index) => (
-                    <div
-                      key={`${fast27bLogs.length - renderedLogs.length + index}`}
-                      className={`whitespace-pre-wrap break-all ${TONE_CLASS[classifyLogLine(line)]}`}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <fieldset disabled={busy} className="flex items-center gap-3 text-xs text-secondary-custom">
+                      <ToggleSwitch
+                        checked={lan}
+                        onChange={(next) => {
+                          setLan(next);
+                          markDirty();
+                        }}
+                        label="对局域网开放 API"
+                      />
+                      <span>对局域网开放 API</span>
+                    </fieldset>
+                    <button
+                      onClick={() => void handleSaveConfig()}
+                      disabled={busy || !settingsDirty || !desktop}
+                      className={primaryButton}
                     >
-                      {line || " "}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </section>
+                      <Save className="h-3.5 w-3.5" />
+                      {saving ? "正在保存…" : "保存配置"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)]">
+              <button
+                type="button"
+                onClick={() => setLogsOpen((open) => !open)}
+                aria-expanded={logsOpen}
+                aria-controls="ninfer-logs"
+                className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)]"
+              >
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${logsOpen ? "rotate-180" : ""}`} />
+                <span className="font-medium text-primary-custom">运行日志</span>
+                <span className="ml-auto text-[length:var(--font-eyebrow)]">{fast27bLogs.length} 行</span>
+              </button>
+              {logsOpen && (
+                <div id="ninfer-logs" className="border-t border-[var(--border)] p-3">
+                  <div className="mb-2 flex flex-wrap justify-end gap-2">
+                    <button onClick={() => setLogsLive((live) => !live)} className={secondaryButton}>
+                      {logsLive ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+                      {logsLive ? "暂停刷新" : "恢复刷新"}
+                    </button>
+                    <button onClick={() => void handleCopyLogs()} disabled={!fast27bLogs.length} className={secondaryButton}>
+                      {logCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                      {logCopied ? "已复制" : "复制"}
+                    </button>
+                    <button onClick={handleExportLogs} disabled={!fast27bLogs.length} className={secondaryButton}>
+                      <Download className="h-3 w-3" />
+                      导出
+                    </button>
+                    <button onClick={() => void handleClearLogs()} disabled={!fast27bLogs.length} className={secondaryButton}>
+                      <Trash2 className="h-3 w-3" />
+                      清空
+                    </button>
+                  </div>
+                  <div
+                    ref={logViewportRef}
+                    className="mono-font h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-[1.7]"
+                  >
+                    {!renderedLogs.length ? (
+                      <div className="flex h-full items-center justify-center gap-2 text-secondary-custom">
+                        <Terminal className="h-4 w-4 opacity-50" />
+                        启动后显示引擎日志
+                      </div>
+                    ) : (
+                      renderedLogs.map((line, index) => (
+                        <div
+                          key={`${fast27bLogs.length - renderedLogs.length + index}`}
+                          className={`whitespace-pre-wrap break-all ${TONE_CLASS[classifyLogLine(line)]}`}
+                        >
+                          {line || " "}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {activeTab === "performance" && (
+          <div id="ninfer-panel-performance" role="tabpanel" aria-labelledby="ninfer-tab-performance">
+            <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} />
+          </div>
+        )}
+          </>
+        )}
 
         <ConfirmDialog
           open={pendingConfirm !== null}

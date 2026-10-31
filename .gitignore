@@ -78,3 +78,6 @@ app/src/.mimosa/
 app/test-results/
 reasonix.toml
 reason/
+
+# 本地协作工具记录
+.workbuddy/

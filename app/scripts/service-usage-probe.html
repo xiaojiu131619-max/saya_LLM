@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>API 数据模块探针</title></head>
+<body>
+<div id="root"></div>
+<script type="module">
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import ServiceUsageCard from '/src/features/apiStatus/ServiceUsageCard.tsx';
+import {
+  fast27bServiceUsage,
+  llamaServiceUsage,
+} from '/src/lib/serviceUsage.ts';
+import '/src/index.css';
+
+const h = React.createElement;
+const now = Date.now();
+const metric = (id, offsetMs, overrides = {}) => ({
+  id, request_id: 1, model: 'saluki',
+  started_at: now - offsetMs - 2600, finished_at: now - offsetMs,
+  outcome: 'success', prompt_tokens: 4200, output_tokens: 512, ttft_ms: 640,
+  total_ms: 2600, decode_tps: 118, prefill_tps: 2840, cache_tokens: 3600,
+  draft_accepted: 380, draft_proposed: 512, tool_calls: null, error: null,
+  ...overrides,
+});
+// 混合真实口径：成功（普通 / 工具调用）+ 失败 + 取消，时间散布在过去数小时。
+const snapshot = {
+  collected_at: now,
+  active_requests: 1,
+  requests: [
+    metric('a', 2 * 3600e3),
+    metric('b', 5 * 3600e3, { tool_calls: 3, prompt_tokens: 15300, output_tokens: 964, total_ms: 9800, decode_tps: 121 }),
+    metric('c', 9 * 3600e3, { prompt_tokens: 660, output_tokens: 88, total_ms: 900, decode_tps: 96, ttft_ms: 220 }),
+    metric('d', 12 * 3600e3, { outcome: 'failed', error: '引擎 done 未报告有效完成原因', prompt_tokens: null, output_tokens: null, total_ms: null }),
+    metric('e', 20 * 3600e3, { outcome: 'cancelled' }),
+    metric('f', 26 * 3600e3),
+  ],
+};
+const engineStats = fast27bServiceUsage(snapshot, {
+  title: 'Underdog Saluki 27B 1.0 IQ2 mix',
+  subtitle: 'fast-27b 引擎',
+});
+const llamaStats = llamaServiceUsage({
+  modelName: 'Qwen3.6 32B', promptTokens: 152340, completionTokens: 21876,
+  totalTokens: 174216, responseCount: 46, totalTokensPerSec: 1780,
+  totalFirstTokenDelay: 19.4, totalGenTime: 511, lastUsedAt: now - 600e3, dailyTokens: {},
+}, { title: 'Qwen3.6 32B', subtitle: 'Q4_K_M 中等' });
+
+function Probe() {
+  const [report, setReport] = React.useState('等待检查');
+  React.useEffect(() => {
+    const sections = [...document.querySelectorAll('section[aria-label="API 用量统计"]')];
+    const tiles = sections[0]?.querySelectorAll('.grid > div') ?? [];
+    const bars = sections[0]?.querySelectorAll('[title]') ?? [];
+    setReport(JSON.stringify({
+      sections: sections.length,
+      header: sections[0]?.querySelector('h2')?.textContent,
+      updatedAt: sections[0]?.querySelector('time')?.textContent,
+      tileCount: tiles.length,
+      barCount: bars.length,
+      hasCollapse: Boolean(sections[0]?.querySelector('button[aria-expanded]')),
+      llamaHeader: sections[1]?.querySelector('h2')?.textContent,
+      emptyState: sections[2]?.textContent.includes('暂无运行数据'),
+      overflowX: document.documentElement.scrollWidth > innerWidth,
+    }));
+  }, []);
+  return h('main', { className: 'min-h-screen overflow-y-auto bg-[var(--app-bg)] px-6 py-6 text-[var(--text-primary)]' },
+    h('output', { id: 'result', className: 'block break-words font-mono text-xs' }, report),
+    h('div', { className: 'mx-auto grid w-full max-w-[860px] gap-4' },
+      h(ServiceUsageCard, { stats: engineStats, note: '统计最近 24 小时完成的请求，覆盖对话、dsh 与外部 API 调用。' }),
+      h(ServiceUsageCard, { stats: llamaStats, note: '统计当前主模型在本会话的累计用量，来自 llama.cpp 响应。' }),
+      h(ServiceUsageCard, { stats: null })));
+}
+createRoot(document.getElementById('root')).render(h(Probe));
+</script>
+</body>
+</html>

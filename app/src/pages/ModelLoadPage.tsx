@@ -1,15 +1,16 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Boxes, Layers } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { checkDesktopEngine, getDesktopServerLogs, getDesktopVramSnapshot, getServerApiKey, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
-import type { AutoTuneConfig, AutoTuneProgress, AutoTuneResult, TuneRecord } from '@/lib/desktop';
-import { cancelAutoTune, saveTuneResult, startAutoTune } from '@/lib/desktop';
+import { buildServerConfig } from '@/lib/serverConfig';
+import { autoTuneManager, ensureAutoTuneRuntime, assertNoAutoTune, subscribeAutoTuneRecords } from '@/lib/autoTuneRuntime';
+import { autoTuneBusy } from '@/lib/autoTuneTask';
 import { computeVramCalibration } from '@/lib/vramCalibration';
 import { predictVramUsage } from '@/lib/vramEstimate';
 import { assessVramMeasurement, modelVramSignature, parseVramBuffers, summarizeVramSamples, vramMeasurementConfig, type VramSnapshot } from '@/lib/vramMeasurement';
 import { saveModelRunRecord, getModelRunRecords, type ModelRunRecord } from '@/lib/desktop';
 import type { ModelInfo, ModelLoadConfig } from '@/types';
-import { RECOMMENDED_CTX_LENGTH, maxGpuLayers, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
+import { RECOMMENDED_CTX_LENGTH, recommendedGpuLayers, recommendedReasoningBudget } from '@/lib/modelDefaults';
 import ModelLoadView from '@/features/model/ModelLoadView';
 import { suggestedApiName } from '@/lib/modelIdentity';
 
@@ -59,9 +60,12 @@ export default function ModelLoadPage() {
   const [loadProgressPercent, setLoadProgressPercent] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const cancelLoadRef = useRef<(() => void) | null>(null);
-  const [autoTuneRunning, setAutoTuneRunning] = useState(false);
-  const [autoTuneLog, setAutoTuneLog] = useState<string[]>([]);
-  const [autoTuneApplied, setAutoTuneApplied] = useState(false);
+  const autoTuneTask = useSyncExternalStore(autoTuneManager.subscribe, autoTuneManager.getSnapshot);
+  const autoTuneRunning = autoTuneBusy(autoTuneTask);
+  const ownTuneTask = autoTuneTask?.modelId === model?.id ? autoTuneTask : null;
+  const autoTuneLog = ownTuneTask?.log ?? (autoTuneRunning && autoTuneTask
+    ? [`${autoTuneTask.modelName} 正在自动调参；可在此停止全局任务。`] : []);
+  const autoTuneApplied = ownTuneTask?.application === 'applied';
   // API 调用名草稿：输入过程中不落库，失焦/回车才算「输入结束」并保存。
   const [apiNameDraft, setApiNameDraft] = useState<string | null>(null);
   const [logoMessage, setLogoMessage] = useState<string | null>(null);
@@ -76,9 +80,13 @@ export default function ModelLoadPage() {
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
+  const recordsRequestRef = useRef(0);
   const refreshRunRecords = useCallback(() => {
+    const request = ++recordsRequestRef.current;
     if (!modelId) return;
-    void getModelRunRecords(modelId).then((records) => setRunRecords(records)).catch(() => undefined);
+    void getModelRunRecords(modelId).then((records) => {
+      if (request === recordsRequestRef.current) setRunRecords(records);
+    }).catch(() => undefined);
   }, [modelId]);
   const gpuName = state.systemStats.gpuName;
   const vramTotal = state.systemStats.vramTotal;
@@ -87,40 +95,13 @@ export default function ModelLoadPage() {
     [model, runRecords, gpuName, vramTotal, kernelVersion],
   );
 
-  // 调参自动应用：事件监听闭包只建一次，通过 ref 拿到最新的应用函数与
-  // 调参开始时的模型，避免中途切换模型后把参数套错对象。
-  const autoTuneModelRef = useRef<ModelInfo | null>(null);
-  const applyTuneRef = useRef<(record: TuneRecord, target?: ModelInfo) => void>(() => {});
-
-  // 自动调参进度事件监听（组件生命周期内常驻）。
-  useEffect(() => {
-    if (!isDesktopRuntime()) return undefined;
-    const unlisteners: Array<() => void> = [];
-    void listenDesktopEvent<AutoTuneProgress>('autotune:progress', (progress) => {
-      setAutoTuneLog((log) => [...log.slice(-59), progress.message]);
-    }).then((unlisten) => unlisteners.push(unlisten));
-    void listenDesktopEvent<AutoTuneResult>('autotune:done', (result) => {
-      setAutoTuneRunning(false);
-      setAutoTuneLog((log) => [...log, `调参完成，最佳：ngl=${result.best.ngl} ctx=${result.best.ctx} kv=${result.best.kv} ts=${result.best.ts.toFixed(1)}`]);
-      // 调参结束自动应用最优参数（针对开始调参时的那个模型）。
-      const tuned = autoTuneModelRef.current;
-      if (tuned) applyTuneRef.current(result.best, tuned);
-    }).then((unlisten) => unlisteners.push(unlisten));
-    void listenDesktopEvent<{ error: string }>('autotune:error', (payload) => {
-      setAutoTuneLog((log) => [...log, `自动调参失败：${payload.error}`]);
-      setAutoTuneRunning(false);
-    }).then((unlisten) => unlisteners.push(unlisten));
-    void listenDesktopEvent<{ message?: string }>('autotune:cancelled', () => {
-      setAutoTuneRunning(false);
-      setAutoTuneLog((log) => [...log, '调参已停止。']);
-    }).then((unlisten) => unlisteners.push(unlisten));
-    return () => unlisteners.forEach((unlisten) => unlisten());
-  }, []);
-
-  // 进入页面时读取本模型的运行记录；应用调参结果后也会刷新。
   useEffect(() => {
     refreshRunRecords();
-  }, [refreshRunRecords]);
+    const unsubscribe = subscribeAutoTuneRecords((savedModelId) => {
+      if (savedModelId === modelId) refreshRunRecords();
+    });
+    return () => { recordsRequestRef.current += 1; unsubscribe(); };
+  }, [modelId, refreshRunRecords]);
 
   // 头像库：点击头像弹出内置 logo 库选择，不再支持上传图片。
   // 必须声明在下面 `if (!model)` 提前返回之前：Hook 调用顺序不能依赖条件，
@@ -150,6 +131,11 @@ export default function ModelLoadPage() {
     setLogoMessage('已恢复默认品牌图标。');
   };
 
+  // 主题色：与头像同一个弹窗里改，直接写模型自身颜色（不再需要「设置 → 模型主题」页）。
+  const handleChangeColor = (color: string) => {
+    dispatch({ type: 'SET_MODEL_THEME_COLOR', payload: { modelId: model.id, color } });
+  };
+
   const updateConfig = (key: string, value: unknown) => {
     dispatch({
       type: 'UPDATE_MODEL_CONFIG',
@@ -158,6 +144,8 @@ export default function ModelLoadPage() {
   };
 
   const handleLoad = async () => {
+    try { await ensureAutoTuneRuntime(); assertNoAutoTune(); }
+    catch (error) { setLoadError(String(error)); return; }
     if (isDesktopRuntime() && model.filePath) {
       const unlisteners: Array<() => void> = [];
       cancelLoadRef.current = null;
@@ -286,8 +274,7 @@ export default function ModelLoadPage() {
           dispatch({ type: 'REMEMBER_MODEL_LAUNCH_CONFIG', payload: { modelId: model.id, config: launchConfig } });
         }
         dispatch({ type: 'MARK_MODEL_RECENTLY_USED', payload: { modelId: model.id } });
-        dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: model.id, status: 'loaded' } });
-        dispatch({ type: 'SET_ACTIVE_MODEL', payload: model.id });
+        dispatch({ type: 'ACTIVATE_MODEL', payload: model.id });
         dispatch({ type: 'SET_SERVER_RUNNING', payload: true });
         dispatch({ type: 'SET_VIEW', payload: 'chat' });
       } catch (error) {
@@ -299,6 +286,7 @@ export default function ModelLoadPage() {
         }
         const message = String(error instanceof Error ? error.message : error);
         setLoadError(message);
+        dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
         dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: model.id, status: 'error' } });
       } finally {
         unlisteners.forEach((unlisten) => unlisten());
@@ -328,92 +316,28 @@ export default function ModelLoadPage() {
   };
 
   const startAutoTuneRun = async () => {
-    if (!isDesktopRuntime() || autoTuneRunning || isLoading) return;
-    setAutoTuneRunning(true);
-    setAutoTuneLog([]);
-    setAutoTuneApplied(false);
-    autoTuneModelRef.current = model;
+    if (!isDesktopRuntime() || autoTuneRunning || isLoading || state.models.some((item) => item.status === 'loading')) return;
     try {
-      const tuneConfig: AutoTuneConfig = {
-        executable_path: 'resources/llama-server.exe',
-        model_path: model.filePath ?? '',
-        port: state.serverPort,
-        // 自动调参以该值作为 ngl 起点（后端直接用 total_layers 当 -ngl 传），
-        // 必须给含输出层的满档值，否则调参始终跑在少一层的最慢配置上。
-        total_layers: maxGpuLayers(model.blockCount),
-        expert_count: Math.max(0, model.expertCount ?? 0),
-        max_ctx: Math.max(512, model.ctxLength || RECOMMENDED_CTX_LENGTH),
-        batch_size: config.batchSize,
-        flash_attn: config.fastAttention,
-        kv_offload: config.kvCache,
-        mmap: config.mmap,
-        mlock: config.mlock,
-        is_moe: model.modelType === 'moe',
-        sort_mode: 'ts',
-      };
-      await startAutoTune(tuneConfig);
+      await ensureAutoTuneRuntime();
+      const baseline = buildServerConfig(model, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools);
+      await autoTuneManager.start({
+        config: {
+          run_id: crypto.randomUUID(), model_id: model.id, baseline,
+          block_count: Math.max(0, model.blockCount ?? 0),
+          max_ctx: model.ctxLength || RECOMMENDED_CTX_LENGTH,
+          is_moe: model.modelType === 'moe', sort_mode: 'ts',
+        },
+        modelName: model.name, modelPath: model.filePath ?? '', modelSignature: modelVramSignature(model), loadConfig: { ...model.loadConfig },
+      });
     } catch (error) {
-      setAutoTuneLog((log) => [...log, `自动调参启动失败：${String(error)}`]);
-      setAutoTuneRunning(false);
+      setLoadError(`自动调参启动失败：${String(error)}`);
     }
   };
 
   const stopAutoTuneRun = async () => {
-    if (!autoTuneRunning) return;
-    setAutoTuneLog((log) => [...log, '正在停止调参...']);
-    try {
-      await cancelAutoTune();
-    } catch {
-      // 取消命令失败时等待后端事件兜底
-    }
-    setAutoTuneRunning(false);
+    try { await autoTuneManager.cancel(); }
+    catch (error) { setLoadError(`停止请求失败，请重试停止：${String(error)}`); }
   };
-
-  const applyTuneRecord = (record: TuneRecord, target: ModelInfo = model) => {
-    const next: Partial<ModelLoadConfig> = {
-      gpuLayers: record.ngl,
-      ctxLength: record.ctx,
-      moeCpuLayers: record.ncmoe,
-      cacheTypeKEnabled: record.kv !== 'f16',
-      cacheTypeK: record.kv,
-      cacheTypeVEnabled: record.kv !== 'f16',
-      cacheTypeV: record.kv,
-    };
-    dispatch({
-      type: 'UPDATE_MODEL_CONFIG',
-      payload: { modelId: target.id, config: next },
-    });
-    setAutoTuneApplied(true);
-    if (isDesktopRuntime()) {
-      void saveTuneResult({
-        model_name: target.name,
-        model_path: target.filePath ?? '',
-        ngl: record.ngl,
-        ctx: record.ctx,
-        kv: record.kv,
-        ncmoe: record.ncmoe,
-        ts: record.ts,
-        vram_percent: record.vram_percent,
-        sort_mode: 'ts',
-        timestamp: Math.floor(Date.now() / 1000),
-      }).catch(() => undefined);
-      // 调参结果同时写入独立运行记录，供后续推荐与调参对比。
-      void saveModelRunRecord({
-        model_id: target.id,
-        model_name: target.name,
-        kind: 'autotune',
-        timestamp: Math.floor(Date.now() / 1000),
-        ngl: record.ngl,
-        ctx: record.ctx,
-        kv: record.kv,
-        ncmoe: record.ncmoe > 0 ? record.ncmoe : null,
-        tokens_per_sec: record.ts,
-        note: `自动调参 · 显存 ${record.vram_percent.toFixed(0)}%`,
-      }).catch(() => undefined);
-      refreshRunRecords();
-    }
-  };
-  applyTuneRef.current = applyTuneRecord;
 
   const config = model.loadConfig;
   const vramPrediction = predictVramUsage(
@@ -451,7 +375,7 @@ export default function ModelLoadPage() {
           <button
             type="button"
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'embedding' })}
-            className="mt-5 inline-flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+            className="mt-5 inline-flex h-9 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
           >
             <Boxes className="h-4 w-4" />
             前往向量服务
@@ -475,10 +399,13 @@ export default function ModelLoadPage() {
       loadPercent={loadProgressPercent}
       statusMessage={logoMessage}
       autoTuneRunning={autoTuneRunning}
+      autoTuneStopping={autoTuneTask?.status === 'stopping'}
+      autoTuneApplying={autoTuneTask?.application === 'pending'}
+      autoTuneBlocked={state.models.some((item) => item.status === 'loading')}
       autoTuneLog={autoTuneLog}
       autoTuneApplied={autoTuneApplied}
       runRecords={runRecords}
-      onClearLog={() => setAutoTuneLog([])}
+      onClearLog={() => autoTuneManager.clearLog()}
       onChangeConfig={updateConfig}
       onLoad={() => void handleLoad()}
       onStop={() => void handleStopLoading()}
@@ -496,6 +423,7 @@ export default function ModelLoadPage() {
       logoLibraryOpen={logoLibraryOpen}
       onChangeLogo={handleChangeLogo}
       onSelectLogo={handleSelectLibraryLogo}
+      onChangeColor={handleChangeColor}
       onClearLogo={handleClearLogo}
       onCloseLogo={() => setLogoLibraryOpen(false)}
     />

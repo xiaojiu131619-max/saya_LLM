@@ -178,6 +178,21 @@
     html, body, .glass-panel, .glass-panel-strong { transition: none !important; }
   }
 
+  /* 设置 → 界面与外观 → 减少动画。
+     等价于系统级 prefers-reduced-motion，但由用户手动控制（系统未开时也能单独关掉）。
+     只压缩时长/延迟/循环次数，不删除动画本身，避免元素卡在中间态。
+     例外：.animate-spin 这类加载指示器保留转动，否则用户看不出「还在转」还是「卡死了」。 */
+  html.reduce-motion *:not(.animate-spin),
+  html.reduce-motion *::before,
+  html.reduce-motion *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
   * {
     scrollbar-width: thin;
     scrollbar-color: rgba(128, 128, 128, 0.4) transparent;
@@ -426,10 +441,9 @@
   .model-toolbar-controls { grid-template-columns: auto minmax(0, 1fr); }
   .model-toolbar-view-controls { grid-template-columns: minmax(0, 1fr) auto auto; }
 
-  /* 多列磁贴模式：独立方块卡片，带间距，Win10 磁贴质感。
-     auto-fill 固定列宽，让磁贴接近 1:1，不会随窗口变宽被拉成横条。 */
+  /* 列宽随实际内容区收缩，极窄窗口也不产生横向溢出。 */
   .model-grid--multi {
-    grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 215px), 1fr));
     gap: 0.625rem;
   }
 
@@ -702,6 +716,79 @@
            transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]
            disabled:cursor-not-allowed disabled:opacity-60;
   }
+
+  /* 侧边栏会话行标题：悬停时「导出/删除」按钮浮在行右侧，标题尾部用遮罩淡出，避免文字和图标叠字。
+     78px/68px 与按钮尺寸对应——两个 h-9 w-9 按钮 + 间距共 74px，距行右边 4px，
+     扣掉标题区自身 10px 内边距后，正好盖住标题最右侧的 68px。 */
+  .group:hover .session-title-mask,
+  .group:focus-within .session-title-mask {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 78px), transparent calc(100% - 68px));
+    mask-image: linear-gradient(to right, #000 calc(100% - 78px), transparent calc(100% - 68px));
+  }
+
+  /* =============================================================
+     侧边栏底部运行状态卡（ctx / 显存 / 内存 / GPU）
+     - 宽度适配用容器查询，因为侧边栏宽度由用户拖动决定，与窗口宽度无关；
+     - 默认 2×2；窄于 240px 时切成 1×4 单列（每项一行，进度条压到 1px）。
+     ============================================================= */
+  .runtime-status-card {
+    container-type: inline-size;
+    min-width: 0;
+  }
+  .runtime-status-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 14px;
+    min-width: 0;
+  }
+  .runtime-status-cell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 6px;
+    row-gap: 3px;
+    align-items: baseline;
+    min-width: 0;
+  }
+  .runtime-status-label {
+    font-size: var(--font-eyebrow);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .runtime-status-value {
+    font-size: var(--font-eyebrow);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+  }
+  .runtime-status-bar {
+    grid-column: 1 / -1;
+    display: block;
+    height: 3px;
+    overflow: hidden;
+    border-radius: 9999px;
+    background: rgba(128, 128, 128, 0.16);
+  }
+  .runtime-status-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 9999px;
+    transition: width 240ms ease-out;
+  }
+
+  /* 窄侧边栏：四项各占一行，进度条变细，避免标签与数值挤成两行。
+     阈值按「卡片实际宽度」定：侧边栏 288px（默认）时卡片约 239px 仍应保持 2×2，
+     侧边栏拖到 200px 时卡片约 167px 才切单列——所以断点取 200，而不是侧边栏本身的 260。 */
+  @container (max-width: 200px) {
+    .runtime-status-grid {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+    }
+    .runtime-status-bar {
+      height: 1.5px;
+    }
+  }
 }
 
 @layer utilities {
@@ -719,27 +806,93 @@
     from { opacity: 0; transform: translateY(-6px) scale(0.96); }
     to { opacity: 1; transform: translateY(0) scale(1); }
   }
-  @keyframes anim-panel-in {
-    from { opacity: 0; transform: translateY(8px) scale(0.98); }
-    to { opacity: 1; transform: translateY(0) scale(1); }
+  /* 设置区块入场：与原先 framer-motion 的 y:20 / 0.4s / easeOutExpo 曲线保持一致。
+     元素默认可见，动画只负责淡入——动画没跑不会导致内容消失。 */
+  @keyframes anim-section-in {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
   }
-
   .anim-fade-in { animation: anim-fade-in 0.18s ease both; }
   .anim-fade-rise { animation: anim-fade-rise 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
   .anim-card-rise { animation: anim-fade-rise 0.18s cubic-bezier(0.22, 1, 0.36, 1) both; }
   .anim-pop-in { animation: anim-pop-in 0.15s cubic-bezier(0.22, 1, 0.36, 1) both; }
-  .anim-panel-in { animation: anim-panel-in 0.16s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .anim-section-in { animation: anim-section-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-  .hover-rise { transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1); }
-  .hover-rise:hover { transform: translateY(-1px); }
-  .hover-rise:active { transform: scale(0.98); }
-  .hover-rise-lg:hover { transform: translateY(-2px); }
-  .hover-rise-lg:active { transform: scale(0.996); }
+  /* ===== 给 framer-motion 元素用的「入场兜底」动画 =====
+     这些元素仍需 AnimatePresence 提供 exit，因此不能删掉 motion 组件；
+     但把 initial 换成 initial={false}（直接以终态挂载），入场交给 CSS。
+     这样即使 JS 动画不推进，元素也是可见的，只是少一段入场效果。
+     注意 fill-mode 必须是 none：带 both/forwards 时动画终态会一直覆盖内联样式，
+     framer 后续的 exit 动画就再也改不动 opacity 了。 */
+  @keyframes anim-enter-fade { from { opacity: 0; } }
+  @keyframes anim-enter-pop { from { opacity: 0; transform: translateY(6px) scale(0.98); } }
+  @keyframes anim-enter-dialog { from { opacity: 0; transform: scale(0.92); } }
+  @keyframes anim-enter-rise { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes anim-enter-panel { from { opacity: 0; transform: translateY(20px); } }
+  @keyframes anim-enter-slide-right { from { opacity: 0; transform: translateX(28px); } }
+
+  .anim-enter-fade { animation: anim-enter-fade 0.16s ease-out; }
+  .anim-enter-pop { animation: anim-enter-pop 0.14s cubic-bezier(0.16, 1, 0.3, 1); }
+  .anim-enter-dialog { animation: anim-enter-dialog 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+  .anim-enter-rise { animation: anim-enter-rise 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+  .anim-enter-panel { animation: anim-enter-panel 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+  .anim-enter-slide-right { animation: anim-enter-slide-right 0.18s ease-out; }
+
+  /* 已移除 hover-rise / hover-rise-lg：卡片磁贴化改造后全仓 0 引用，
+     浮起反馈统一由“边框变色 + 阴影”承担，避免两套位移语义并存。
+     已移除 anim-panel-in：同样 0 引用（.anim-pop-in 已覆盖其入场形态）。 */
 
   @media (prefers-reduced-motion: reduce) {
-    .anim-fade-in, .anim-fade-rise, .anim-card-rise, .anim-pop-in, .anim-panel-in {
+    .anim-fade-in, .anim-fade-rise, .anim-card-rise, .anim-pop-in, .anim-section-in,
+    .anim-enter-fade, .anim-enter-pop, .anim-enter-dialog, .anim-enter-rise, .anim-enter-panel {
       animation: none !important;
     }
-    .hover-rise, .hover-rise-lg { transition: none !important; }
   }
+}
+
+/* 「工作中」点阵：3×3 小方点顺序亮起，配计时用。
+   截图里的形态是方形点阵呼吸，不要做成圆点旋转——圆点是加载器的语言，
+   这里的语义是「在干活，已经干了多久」。 */
+@layer utilities {
+  .work-dots {
+    display: inline-grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5px;
+    width: 11px;
+    height: 11px;
+    flex-shrink: 0;
+    color: currentColor;
+  }
+  .work-dots i {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 1px;
+    background: currentColor;
+    animation: work-dot-pulse 1.2s ease-in-out infinite;
+    animation-delay: calc(var(--i) * 90ms);
+    opacity: 0.3;
+  }
+  @keyframes work-dot-pulse {
+    0%, 60%, 100% { opacity: 0.25; }
+    30% { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .work-dots i { animation: none !important; opacity: 0.7; }
+  }
+}
+
+/* =============================================================
+   MCP 服务器区块：横竖排按容器实际宽度切换，而非视口断点。
+   「工具」页双栏时每栏只有 ~500-700px，视口却已越过 sm/lg 断点，
+   Tailwind 的 sm:flex-row / lg:flex-row 会误判「够宽」，把说明文字
+   与服务器信息列挤成窄条，按钮组右侧留出大片空白。
+   本段置于所有 @layer 之外，保证覆盖 utilities 层的同名属性。
+   ============================================================= */
+.mcp-section { container-type: inline-size; }
+@container (max-width: 559px) {
+  /* 双类选择器提升优先级：实测 Tailwind utilities 在产物中位于本文件末尾规则之后，
+     单类选择器会输给 sm:flex-row / lg:flex-row 的同名属性。 */
+  .mcp-section .mcp-header-row { flex-direction: column; align-items: stretch; }
+  .mcp-section .mcp-entry-row { flex-direction: column; align-items: stretch; }
 }

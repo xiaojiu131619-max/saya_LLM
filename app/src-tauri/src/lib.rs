@@ -17,12 +17,13 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// 真正退出：先停止 llama-server、fast-27b、dsh 与 MCP 旁路进程，再退出进程。
+/// 真正退出：先停止 llama-server、fast-27b、智慧模型、dsh 与 MCP 旁路进程，再退出进程。
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
     services::embedding_manager::stop_embedding_on_exit();
     services::fast27b_manager::stop_fast27b_on_exit();
+    services::strata_manager::stop_strata_on_exit();
     services::webui_bridge::stop();
     services::dsh_manager::stop_dsh_on_exit();
     commands::mcp::disconnect_all_on_exit();
@@ -104,6 +105,7 @@ pub fn run() {
             commands::benchmark::start_benchmark,
             commands::benchmark::start_auto_tune,
             commands::benchmark::cancel_auto_tune,
+            commands::benchmark::get_auto_tune_status,
             commands::updater::check_for_update,
             commands::updater::list_recent_releases,
             commands::updater::download_and_update,
@@ -141,6 +143,19 @@ pub fn run() {
             commands::fast27b::fast27b_bridge_ensure,
             commands::fast27b::fast27b_bridge_status,
             commands::fast27b::fast27b_bridge_stop,
+            commands::strata::strata_start,
+            commands::strata::strata_stop,
+            commands::strata::strata_restart,
+            commands::strata::strata_get_status,
+            commands::strata::strata_get_logs,
+            commands::strata::strata_clear_logs,
+            commands::strata::strata_get_config,
+            commands::strata::strata_save_config,
+            commands::strata::strata_set_enabled,
+            commands::strata::strata_get_metrics,
+            commands::strata::strata_clear_metrics,
+            commands::strata::strata_bind_dsh,
+            commands::strata::strata_unbind_dsh,
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,
             commands::mcp::delete_mcp_server,
@@ -148,6 +163,9 @@ pub fn run() {
             commands::mcp::connect_mcp_server,
             commands::mcp::disconnect_mcp_server,
             commands::mcp::call_mcp_tool,
+            commands::storage::get_storage_paths,
+            commands::storage::set_storage_dir,
+            commands::storage::write_archive_file,
             show_main_window,
         ])
         .setup(move |app| {
@@ -236,6 +254,7 @@ pub fn run() {
                             let _ = services::process_manager::stop_server();
                             services::embedding_manager::stop_embedding_on_exit();
                             services::fast27b_manager::stop_fast27b_on_exit();
+                            services::strata_manager::stop_strata_on_exit();
                             services::webui_bridge::stop();
                             commands::mcp::disconnect_all_on_exit();
                             // 允许窗口正常关闭，之后进程会退出。
@@ -248,6 +267,7 @@ pub fn run() {
                         let _ = services::process_manager::stop_server();
                         services::embedding_manager::stop_embedding_on_exit();
                         services::fast27b_manager::stop_fast27b_on_exit();
+                        services::strata_manager::stop_strata_on_exit();
                         services::webui_bridge::stop();
                         commands::mcp::disconnect_all_on_exit();
                     }

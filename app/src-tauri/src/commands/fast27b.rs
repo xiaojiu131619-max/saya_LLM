@@ -18,6 +18,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::models::app_state::{AppState, Fast27bConfig, Fast27bModel};
+use crate::services::backend_gate::{self, Backend};
 use crate::services::dsh_config as dsh_config_service;
 use crate::services::{dsh_manager, fast27b_manager, fast27b_metrics, webui_bridge};
 
@@ -38,7 +39,10 @@ fn options_from_config(config: &Fast27bConfig) -> fast27b_manager::Fast27bStartO
         port: config.port,
         lan: config.lan,
         api_key: config.api_key.clone(),
-        context_window: config.context_window,
+        // 与 build_args 的收口一致，避免环境变量窗口按未收口的上下文计算。
+        context_window: config
+            .context_window
+            .min(config.selected_model().max_context_window()),
         draft_tokens: config.draft_tokens,
         default_max_tokens: config.default_max_tokens,
         default_thinking_budget: config.default_thinking_budget,
@@ -51,6 +55,17 @@ pub fn fast27b_start(state: State<'_, AppState>, app: AppHandle) -> Result<(), S
     let config = fast27b_config_from_state(&state);
     let options = options_from_config(&config);
     config.validate_thinking_budget()?;
+    // 先确认引擎与权重都在，再停别的后端：路径写错不该把主模型/Strata 一起带走。
+    fast27b_manager::validate_options(&options)?;
+    // 互斥闸门：先停掉主模型与 Strata，三个后端不能同时占显存。
+    let stopped = backend_gate::ensure_exclusive(Backend::Fast27b, &app)?;
+    if !stopped.is_empty() {
+        app.emit(
+            "backend:exclusive",
+            serde_json::json!({ "target": "NiNfer", "stopped": stopped }),
+        )
+        .ok();
+    }
     // 引擎一起来就把官方 webui 的同源桥拉起来：用户随后点「打开 WebUI」直接可用。
     if let Err(err) = webui_bridge::ensure(
         config.bridge_port,
@@ -164,7 +179,7 @@ pub async fn fast27b_restart(state: State<'_, AppState>, app: AppHandle) -> Resu
     .map_err(|e| format!("fast27b 重启任务异常：{e}"))?
 }
 
-/// 一键选择 Heretic / Swift；先校验目标资源再保存，运行中通过现有重启/就绪事件重载。
+/// 一键选择 Heretic / Saluki；先校验目标资源再保存，运行中通过现有重启/就绪事件重载。
 #[tauri::command]
 pub async fn fast27b_select_model(
     state: State<'_, AppState>,
@@ -193,18 +208,27 @@ pub async fn fast27b_select_model(
     Ok(())
 }
 
-/// 停止 fast27b 引擎（Job Object 整树回收），并广播 fast27b:stopped。
-#[tauri::command]
-pub fn fast27b_stop(app: AppHandle) -> Result<(), String> {
+/// 命令层停止 fast27b 引擎（Job Object 整树回收），并广播 fast27b:stopped。
+///
+/// `backend_gate` 与命令都走这里：网页桥必须跟着停，否则端口继续被占用并指向
+/// 已死的上游；事件也只在真正停成功后才发，避免前端把「停失败」当已停止。
+pub(crate) fn stop_fast27b_with_app(app: &AppHandle) -> Result<(), String> {
     let result = fast27b_manager::stop_fast27b();
     // 引擎停了，网页桥也没有上游了，一并回收（下次启动引擎会重新拉起）。
     webui_bridge::stop();
-    app.emit(
-        "fast27b:stopped",
-        serde_json::json!({ "message": "fast27b 已停止。" }),
-    )
-    .ok();
+    if result.is_ok() {
+        app.emit(
+            "fast27b:stopped",
+            serde_json::json!({ "message": "fast27b 已停止。" }),
+        )
+        .ok();
+    }
     result
+}
+
+#[tauri::command]
+pub fn fast27b_stop(app: AppHandle) -> Result<(), String> {
+    stop_fast27b_with_app(&app)
 }
 
 /// 可选模型及其本地资源状态。
@@ -236,8 +260,11 @@ pub struct Fast27bStatus {
     pub model_exists: bool,
     /// 配置的 API Key（明文；本地工具，用户明确要求可见）。
     pub api_key: String,
-    /// 配置的上下文窗口。
+    /// 配置的上下文窗口（用户保存值）。
     pub context_window: u32,
+    /// 实际下发给引擎的上下文窗口：按所选模型的实测上限收口后的值。
+    /// 开环后上下文与设备池解耦，这里通常等于用户保存值（两模型上限都是 262144）。
+    pub context_window_effective: u32,
     /// 配置的 DFlash2 / MTP 草稿长度。
     pub draft_tokens: u32,
     /// 配置的引擎默认输出上限（`--default-max-tokens`）；0 = 未设，由引擎自身默认决定。
@@ -281,7 +308,7 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
         engine_path: config.engine_path.clone(),
         model_path: config.model_path.clone(),
         selected_model: config.selected_model(),
-        model_presets: [Fast27bModel::Heretic, Fast27bModel::Swift]
+        model_presets: [Fast27bModel::Heretic, Fast27bModel::Saluki]
             .into_iter()
             .map(|id| {
                 let model_path = config.model_path_for(id);
@@ -300,6 +327,9 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
             && std::path::Path::new(&config.model_path).exists(),
         api_key: config.api_key.clone(),
         context_window: config.context_window,
+        context_window_effective: config
+            .context_window
+            .min(config.selected_model().max_context_window()),
         draft_tokens: config.draft_tokens,
         default_max_tokens: config.default_max_tokens,
         default_thinking_budget: config.default_thinking_budget,
@@ -403,7 +433,8 @@ pub async fn fast27b_bind_dsh(
 ) -> Result<serde_json::Value, String> {
     let config = fast27b_config_from_state(&state);
     let base_url = format!("http://127.0.0.1:{}", config.port);
-    let model_id = String::from("qwen3.8-27b");
+    // 绑定名与引擎 `--model-id` 同源（/v1/models 回报同值），否则 dsh 发起的请求会 404。
+    let model_id = String::from(config.selected_model().model_id());
 
     // 1. fast27b 必须在线（带鉴权探活），避免把一个死端点写进 dsh 默认模型。
     app.emit(

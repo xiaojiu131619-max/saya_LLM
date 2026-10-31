@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
   ChevronRight,
+  Database,
   FolderPlus,
-  FolderX,
   Globe2,
+  Keyboard,
   Monitor,
   MonitorSmartphone,
   Moon,
@@ -13,31 +14,33 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import ToggleSwitch from '@/components/ToggleSwitch';
+import BrandLogo from '@/components/BrandLogo';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
 import PageHeader from '@/components/PageHeader';
 import type { ThemeMode } from '@/types';
-import {
-  addDesktopModelDir,
-  clearModelRunRecords,
-  getDesktopConfig,
-  isDesktopRuntime,
-  pickModelDirectory,
-  removeDesktopModelDir,
-  scanDesktopModels,
-  setCloseToTray,
-  setDesktopProxyUrl,
-  toFrontendModel,
-} from '@/lib/desktop';
+import { getDesktopConfig, isDesktopRuntime, setCloseToTray, setDesktopProxyUrl } from '@/lib/desktop';
 
-// 主题模式三选段控件：浅色 / 深色 / 跟随系统。
-function ThemeModeSelector({ value, onChange }: { value: ThemeMode; onChange: (mode: ThemeMode) => void }) {
-  const options: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
-    { value: 'light', label: '浅色', icon: Sun },
-    { value: 'dark', label: '深色', icon: Moon },
-    { value: 'system', label: '跟随系统', icon: MonitorSmartphone },
-  ];
+/**
+ * 通用分段选择器：2~3 个互斥选项。
+ * 外观与 ThemeModeSelector 原先的内联实现保持一致，避免同页出现两套控件语言。
+ */
+function SegmentedControl<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string; icon?: typeof Sun }>;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+}) {
   return (
-    <div className="flex items-center gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-0.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="flex items-center gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-0.5 dark:border-white/[0.08] dark:bg-white/[0.04]"
+    >
       {options.map((option) => {
         const Icon = option.icon;
         const active = value === option.value;
@@ -53,7 +56,7 @@ function ThemeModeSelector({ value, onChange }: { value: ThemeMode; onChange: (m
                 : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] dark:text-[var(--text-secondary)] dark:hover:text-[var(--text-primary)]'
             }`}
           >
-            <Icon className="h-3.5 w-3.5" />
+            {Icon && <Icon className="h-3.5 w-3.5" />}
             <span>{option.label}</span>
           </button>
         );
@@ -62,10 +65,25 @@ function ThemeModeSelector({ value, onChange }: { value: ThemeMode; onChange: (m
   );
 }
 
+// 主题模式三选段控件：浅色 / 深色 / 跟随系统。
+function ThemeModeSelector({ value, onChange }: { value: ThemeMode; onChange: (mode: ThemeMode) => void }) {
+  return (
+    <SegmentedControl
+      value={value}
+      ariaLabel="主题模式"
+      onChange={onChange}
+      options={[
+        { value: 'light', label: '浅色', icon: Sun },
+        { value: 'dark', label: '深色', icon: Moon },
+        { value: 'system', label: '跟随系统', icon: MonitorSmartphone },
+      ]}
+    />
+  );
+}
+
 export default function SettingsPage() {
   const { state, dispatch } = useApp();
-  const [scanMessage, setScanMessage] = useState<string | null>(null);
-  // 软件代理（对核心更新检查/下载与 dsh 安装下载生效）。空 = 直连。
+  // 软件代理（对核心更新检查与下载生效）。空 = 直连。
   const [proxyInput, setProxyInput] = useState('');
   const [proxyMessage, setProxyMessage] = useState<string | null>(null);
 
@@ -80,57 +98,6 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, []);
-
-  const refreshLocalModels = async () => {
-    if (!isDesktopRuntime()) {
-      setScanMessage('请在 Tauri 桌面版中使用本地模型扫描。');
-      return;
-    }
-
-    setScanMessage('正在扫描 GGUF 模型...');
-    try {
-      const models = (await scanDesktopModels(true)).map(toFrontendModel);
-      dispatch({ type: 'UPSERT_MODELS', payload: models });
-      dispatch({ type: 'PRUNE_USAGE', payload: models.map((model) => model.id) });
-      // 已删除模型的独立运行记录也一并清掉。
-      const keepIds = new Set(models.map((model) => model.id));
-      void Promise.all(
-        Object.keys(state.usageByModel)
-          .filter((id) => !keepIds.has(id) && !id.startsWith('api-'))
-          .map((id) => clearModelRunRecords(id).catch(() => undefined)),
-      );
-      const message = models.length > 0 ? `已发现 ${models.length} 个本地 GGUF 模型。` : '没有发现 GGUF 文件。';
-      dispatch({ type: 'SET_APP_STATUS', payload: message });
-      setScanMessage(message);
-    } catch (error) {
-      setScanMessage(`扫描失败：${String(error)}`);
-    }
-  };
-
-  const handleAddModelDir = async () => {
-    if (!isDesktopRuntime()) {
-      setScanMessage('请在 Tauri 桌面版中选择本地目录。');
-      return;
-    }
-
-    const selected = await pickModelDirectory();
-    if (!selected) return;
-
-    const dirs = await addDesktopModelDir(selected);
-    dispatch({ type: 'SET_MODEL_DIRS', payload: dirs });
-    await refreshLocalModels();
-  };
-
-  const handleRemoveModelDir = async (dir: string) => {
-    if (!isDesktopRuntime()) {
-      setScanMessage('请在 Tauri 桌面版中管理本地目录。');
-      return;
-    }
-
-    const dirs = await removeDesktopModelDir(dir);
-    dispatch({ type: 'SET_MODEL_DIRS', payload: dirs });
-    await refreshLocalModels();
-  };
 
   const handleCloseToTrayChange = async (enabled: boolean) => {
     dispatch({ type: 'SET_CLOSE_TO_TRAY', payload: enabled });
@@ -147,7 +114,7 @@ export default function SettingsPage() {
     try {
       await setDesktopProxyUrl(value || null);
       setProxyMessage(value
-        ? '软件代理已保存，对核心更新检查/下载与 dsh 安装下载立即生效。'
+        ? '软件代理已保存，对核心更新检查与下载立即生效。'
         : '软件代理已清除，恢复直连。');
     } catch (error) {
       setProxyMessage(`软件代理保存失败：${String(error)}`);
@@ -157,11 +124,14 @@ export default function SettingsPage() {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="mx-auto mb-6 max-w-2xl">
-          <PageHeader icon={SlidersHorizontal} title="软件设置" description="配置 Agent LLM 启动器和模型运行参数" />
+        <div className="mx-auto mb-6 max-w-[1360px]">
+          <PageHeader icon={SlidersHorizontal} title="软件设置" description="配置拾壹启动器和模型运行参数" />
         </div>
 
-        <div className="mx-auto max-w-2xl pb-12">
+        <div className="mx-auto max-w-[1360px] pb-12">
+        {/* 双列：左列是日常交互相关（外观 / 输入 / 窗口），右列是运行与维护（模型 / 代理 / 数据）。 */}
+        <div className="grid items-start gap-x-8 lg:grid-cols-2">
+          <div className="min-w-0">
           <SettingSection title="界面与外观" icon={Palette} delay={0}>
             <SettingRow
               label="主题模式"
@@ -194,43 +164,67 @@ export default function SettingsPage() {
                 label="毛玻璃效果"
               />
             </SettingRow>
+            <div className="border-t border-[var(--border-subtle)]" />
+            <SettingRow
+              label="减少动画"
+              description="关闭界面过渡与入场动画，操作瞬间完成。适合晕动敏感或远程桌面场景；加载指示器仍会转动，不会让人误以为卡死。"
+            >
+              <ToggleSwitch
+                checked={state.reduceMotion}
+                onChange={(v) => dispatch({ type: 'SET_REDUCE_MOTION', payload: v })}
+                label="减少动画"
+              />
+            </SettingRow>
           </SettingSection>
 
+          <SettingSection title="对话与输入" icon={Keyboard} delay={0.03}>
+            <SettingRow
+              label="发送快捷键"
+              description={state.enterToSend
+                ? 'Enter 直接发送，Shift+Enter 换行。适合一问一答的短提示词。'
+                : 'Enter 换行，Ctrl/⌘+Enter 发送。适合需要分段书写的长提示词。'}
+            >
+              <SegmentedControl
+                value={state.enterToSend ? 'enter' : 'modifier'}
+                ariaLabel="发送快捷键"
+                onChange={(v) => dispatch({ type: 'SET_ENTER_TO_SEND', payload: v === 'enter' })}
+                options={[
+                  { value: 'enter', label: 'Enter 发送' },
+                  { value: 'modifier', label: 'Ctrl+Enter 发送' },
+                ]}
+              />
+            </SettingRow>
+          </SettingSection>
+
+          </div>
+
+          <div className="min-w-0">
           <SettingSection title="本地模型运行" icon={FolderPlus} delay={0.05}>
+            {/* 模型目录的增删与三个可配置目录统一收到「数据管理」页：
+                这里只做只读摘要 + 跳转，避免同一件事在设置里有两套入口。 */}
             <SettingRow
               label="模型目录"
-              description={state.modelDirs.length > 0 ? `已配置 ${state.modelDirs.length} 个模型目录` : '选择包含 .gguf 文件的本地目录'}
+              description={state.modelDirs.length > 0
+                ? `已配置 ${state.modelDirs.length} 个模型目录；增删与引擎/日志/归档目录都在数据管理页。`
+                : '尚未配置模型目录，请到数据管理页添加包含 .gguf 文件的目录。'}
             >
               <button
-                onClick={handleAddModelDir}
+                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'data' })}
                 className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
               >
-                选择目录 <ChevronRight className="w-3.5 h-3.5" />
+                前往数据管理 <ChevronRight className="w-3.5 h-3.5" />
               </button>
             </SettingRow>
             {state.modelDirs.length > 0 && (
               <>
                 <div className="border-t border-[var(--border-subtle)]" />
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {state.modelDirs.map((dir) => (
-                    <div key={dir} className="flex items-center justify-between gap-3 text-xs text-secondary-custom">
-                      <span className="truncate">{dir}</span>
-                      <button
-                        onClick={() => void handleRemoveModelDir(dir)}
-                        className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md px-2 text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:hover:bg-[var(--surface-raised)]"
-                      >
-                        <FolderX className="w-3.5 h-3.5" />
-                        移除
-                      </button>
+                    <div key={dir} className="truncate rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)]" title={dir}>
+                      {dir}
                     </div>
                   ))}
                 </div>
-              </>
-            )}
-            {scanMessage && (
-              <>
-                <div className="border-t border-[var(--border-subtle)]" />
-                <p className="text-xs text-secondary-custom">{scanMessage}</p>
               </>
             )}
           </SettingSection>
@@ -238,7 +232,7 @@ export default function SettingsPage() {
           <SettingSection title="网络代理" icon={Globe2} delay={0.12}>
             <SettingRow
               label="软件代理"
-              description="核心更新检查/下载与 dsh 安装下载不走系统代理；挂了梯子但下载仍慢时，填入本机代理端口（如 http://127.0.0.1:7890）。留空为直连。"
+              description="核心更新检查与下载不走系统代理；挂了梯子但下载仍慢时，填入本机代理端口（如 http://127.0.0.1:7890）。留空为直连。"
             >
               <div className="flex items-center gap-2">
                 <input
@@ -250,7 +244,7 @@ export default function SettingsPage() {
                 />
                 <button
                   onClick={() => void handleSaveProxy()}
-                  className="flex h-9 flex-shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+                  className="flex h-9 flex-shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
                 >
                   保存
                 </button>
@@ -274,13 +268,45 @@ export default function SettingsPage() {
             </SettingRow>
           </SettingSection>
 
+          <SettingSection title="数据与维护" icon={Database} delay={0.16}>
+            {/* 清除与重置类动作全部收进「数据管理」页（对话/统计/缓存/配置/出厂重置），
+                这里只保留一个跳转入口，避免两处各有一套按钮。 */}
+            <SettingRow
+              label="数据管理"
+              description="模型目录、引擎目录、日志目录、归档目录，以及对话历史/使用统计/缓存的清除与出厂重置。"
+            >
+              <button
+                type="button"
+                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'data' })}
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
+              >
+                前往数据管理 <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </SettingRow>
+            <div className="border-t border-[var(--border-subtle)]" />
+            <SettingRow
+              label="核心更新"
+              description="检查 llama.cpp 内核与运行组件的可用版本，并管理下载。"
+            >
+              <button
+                type="button"
+                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'kernel' })}
+                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
+              >
+                前往更新 <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </SettingRow>
+          </SettingSection>
+          </div>
+        </div>
+
           {/* 关于 */}
           <div className="border-b border-[var(--border-subtle)] py-6">
             <div className="text-center">
-              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-[var(--accent)]">
-                <span className="text-xl font-bold text-white">L</span>
+              <div className="mx-auto mb-3">
+                <BrandLogo size={44} variant="mark" />
               </div>
-              <h3 className="text-base font-semibold text-primary-custom mb-1">Agent LLM</h3>
+              <h3 className="text-base font-semibold text-primary-custom mb-1">拾壹</h3>
               <p className="text-xs text-secondary-custom mb-3">v{__APP_VERSION__} · 本地大模型管理启动器</p>
               <div className="flex items-center justify-center gap-4 text-xs text-secondary-custom">
                 <span>React 19</span>

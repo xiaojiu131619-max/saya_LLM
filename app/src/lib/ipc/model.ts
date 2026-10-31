@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { ModelMemoryLayout, VideoSupportLevel } from '@/types';
+import type { ModelLoadConfig, ModelMemoryLayout, VideoSupportLevel } from '@/types';
 import { isDesktopRuntime } from '../desktopRuntime';
 
 /**
@@ -84,18 +84,63 @@ export interface DesktopModelInfo {
 
 export type AutoTuneSortMode = 'ts' | 'ctx';
 
-export interface AutoTuneConfig {
+export interface ServerConfig {
   executable_path: string;
   model_path: string;
+  model_alias: string | null;
   port: number;
-  total_layers: number;
-  expert_count: number;
-  max_ctx: number;
+  host: string;
+  api_key: string | null;
+  ngl: number;
+  n_ctx: number;
   batch_size: number;
+  ubatch_size: number;
+  threads: number;
+  parallel: number;
   flash_attn: boolean;
   kv_offload: boolean;
+  kv_unified: boolean;
   mmap: boolean;
   mlock: boolean;
+  no_warmup: boolean;
+  cache_type_k: string;
+  cache_type_v: string;
+  cache_type_k_enabled: boolean;
+  cache_type_v_enabled: boolean;
+  rope_freq_base: number | null;
+  rope_freq_scale: number | null;
+  seed: number | null;
+  chat_template: string | null;
+  mmproj_path: string | null;
+  mtp_draft_path: string | null;
+  dspark_draft_path: string | null;
+  dflash_draft_path: string | null;
+  spec_draft_n_max: number | null;
+  spec_type: string | null;
+  ncmoe: number;
+  tools: string | null;
+  reasoning_budget: number;
+  /** 向量/重排专用：传 --embeddings 限定服务只提供向量用途。 */
+  embedding?: boolean;
+  /** --pooling 取值（none/mean/cls/last/rank）；null = 用模型默认。 */
+  pooling?: string | null;
+  /** 启用重排端点 --rerank。 */
+  rerank?: boolean;
+  /** --embd-normalize 归一化方式；null = 内核默认 2。 */
+  embd_normalize?: number | null;
+  device: string | null;
+  main_gpu: number | null;
+  retry_cpu_fallback: boolean;
+  no_cuda: boolean;
+}
+
+
+export interface AutoTuneConfig {
+  run_id: string;
+  model_id: string;
+  baseline: ServerConfig;
+  block_count: number;
+  max_ctx: number;
   is_moe: boolean;
   sort_mode: AutoTuneSortMode;
 }
@@ -106,23 +151,71 @@ export interface TuneRecord {
   ncmoe: number;
   ctx: number;
   kv: string;
+  cache_type_k: string;
+  cache_type_v: string;
+  cache_type_k_enabled: boolean;
+  cache_type_v_enabled: boolean;
+  samples?: number;
+  ts_stddev?: number;
+  ttft_stddev_ms?: number;
+  cold_ttft_ms?: number;
+  warmup_ttft_ms?: number;
+  measurement_phase?: string;
   vram_used_gb: number;
   vram_total_gb: number;
   vram_percent: number;
   ts: number;
   first_token_ms: number;
   fits: boolean;
+  vram_available: boolean;
 }
 
 export interface AutoTuneProgress {
+  run_id: string;
+  model_id: string;
   phase: string;
   message: string;
   record?: TuneRecord | null;
 }
 
 export interface AutoTuneResult {
+  run_id: string;
+  model_id: string;
   best: TuneRecord;
   records: TuneRecord[];
+  failures?: TuneFailure[];
+}
+
+export interface AutoTuneTerminalRecords {
+  records: TuneRecord[];
+  failures: TuneFailure[];
+}
+export interface TuneFailure {
+  kind: 'oom' | 'unsupported' | 'fatal' | 'cancelled';
+  message: string;
+  server_error?: unknown;
+  candidate?: unknown;
+}
+export interface AutoTuneError extends AutoTuneTerminalRecords { run_id: string; model_id: string; error: string }
+export interface AutoTuneCancelled extends AutoTuneTerminalRecords { run_id: string; model_id: string; message: string }
+export type AutoTuneStatusName = 'running' | 'stopping' | 'done' | 'error' | 'cancelled';
+export interface AutoTuneStatus extends AutoTuneTerminalRecords {
+  run_id: string;
+  model_id: string;
+  status: AutoTuneStatusName;
+  result?: AutoTuneResult;
+  error?: string;
+}
+
+export interface AutoTuneExperiment {
+  version: 1;
+  config: AutoTuneConfig;
+  load_config: ModelLoadConfig;
+  status: AutoTuneStatusName;
+  records: TuneRecord[];
+  best?: TuneRecord;
+  failures?: TuneFailure[];
+  error?: string;
 }
 
 export interface TuneHistoryEntry {
@@ -194,6 +287,7 @@ export interface ModelRunRecord {
   vram_gb?: number | null;
   vram_predicted_gb?: number | null;
   vram_measurement?: ModelVramMeasurement | null;
+  autotune?: AutoTuneExperiment | null;
   note?: string | null;
 }
 
@@ -236,9 +330,14 @@ export async function startAutoTune(config: AutoTuneConfig) {
 
 // 请求停止正在运行的自动调参：后端置位取消标记并停掉测量中的 llama-server，
 // 调参任务会在当前测量点结束后发出 autotune:cancelled 事件。
-export async function cancelAutoTune() {
+export async function cancelAutoTune(runId: string) {
   if (!isDesktopRuntime()) return;
-  await invoke('cancel_auto_tune');
+  await invoke('cancel_auto_tune', { runId });
+}
+
+export async function getAutoTuneStatus() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<AutoTuneStatus | null>('get_auto_tune_status');
 }
 
 export async function saveTuneResult(entry: TuneHistoryEntry) {

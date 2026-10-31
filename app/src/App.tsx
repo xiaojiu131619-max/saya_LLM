@@ -1,4 +1,5 @@
 ﻿import { Component, useEffect, type ErrorInfo, type ReactNode } from 'react';
+import { MotionConfig } from 'framer-motion';
 import { AppProvider, useApp } from '@/context/AppContext';
 import WorkspaceShell from '@/features/workspace/WorkspaceShell';
 import LlamaNativePreviewPage from '@/pages/LlamaNativePreviewPage';
@@ -12,7 +13,27 @@ function AppContent() {
     document.documentElement.classList.toggle('dark', state.theme === 'dark');
   }, [state.theme]);
 
-  return showLlamaNativePreview ? <LlamaNativePreviewPage /> : <WorkspaceShell />;
+  useEffect(() => {
+    const preventExternalNavigation = (event: DragEvent) => {
+      if (!event.dataTransfer || event.defaultPrevented) return;
+      if (!Array.from(event.dataTransfer.types).some((type) => ['Files', 'text/uri-list', 'text/html'].includes(type))) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'none';
+    };
+    window.addEventListener('dragover', preventExternalNavigation);
+    window.addEventListener('drop', preventExternalNavigation);
+    return () => {
+      window.removeEventListener('dragover', preventExternalNavigation);
+      window.removeEventListener('drop', preventExternalNavigation);
+    };
+  }, []);
+
+  // 「减少动画」开关对 framer-motion 生效：always = 直接跳到终态，user = 跟随系统设置。
+  return (
+    <MotionConfig reducedMotion={state.reduceMotion ? 'always' : 'user'}>
+      {showLlamaNativePreview ? <LlamaNativePreviewPage /> : <WorkspaceShell />}
+    </MotionConfig>
+  );
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
@@ -33,7 +54,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: bo
         <div className="w-full max-w-md border-b border-[var(--border-subtle)] py-5 text-center">
           <h1 className="text-lg font-semibold">界面加载失败</h1>
           <p className="mt-2 text-sm text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">请重新加载界面；若问题持续，请查看服务日志。</p>
-          <button type="button" onClick={() => window.location.reload()} className="mt-4 h-10 rounded-md bg-[var(--accent)] px-4 text-sm font-semibold text-white hover:bg-[var(--accent-hover)]">
+          <button type="button" onClick={() => window.location.reload()} className="mt-4 h-10 rounded-md bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]">
             重新加载
           </button>
         </div>

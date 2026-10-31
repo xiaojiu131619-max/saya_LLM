@@ -1,4 +1,5 @@
 pub mod auto_updater;
+pub mod backend_gate;
 pub mod benchmark;
 pub mod dsh_config;
 pub mod dsh_installer;
@@ -15,5 +16,8 @@ pub mod mcp_http;
 pub mod memory_monitor;
 pub mod model_scanner;
 pub mod process_manager;
+pub mod storage_paths;
+pub mod strata_manager;
+pub mod strata_metrics;
 pub mod webui_assets;
 pub mod webui_bridge;

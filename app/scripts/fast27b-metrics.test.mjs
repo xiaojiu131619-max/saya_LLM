@@ -45,13 +45,13 @@ test('按草稿提议与题面 token 加权计算接受率和缓存率', () => {
   assert.equal(summary.draftRate, 16);
 });
 test('模型过滤、24小时滚动窗口与终态去重', () => {
-  const rows = [metric('a'), metric('a'), metric('swift', { model: 'swift' }),
+  const rows = [metric('a'), metric('a'), metric('saluki', { model: 'saluki' }),
     metric('old', { finished_at: now - 25 * 3600000 }), metric('future', { finished_at: now + 1 })];
   const all = fast27bPerformanceData(rows, now, 24);
   assert.equal(all.requests.length, 2);
   assert.equal(all.groups[0].summary.succeeded, 1);
   assert.equal(all.groups[1].summary.succeeded, 1);
-  assert.equal(fast27bPerformanceData(rows, now, 24, 'swift').requests.length, 1);
+  assert.equal(fast27bPerformanceData(rows, now, 24, 'saluki').requests.length, 1);
 });
 test('时间桶只聚合有样本的时段，当前桶包含刚结束请求', () => {
   const data = fast27bPerformanceData([

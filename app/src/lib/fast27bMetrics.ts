@@ -105,7 +105,7 @@ export function fast27bPerformanceData(
   return {
     requests: filtered,
     summary: summarizeFast27bRequests(filtered),
-    groups: (['heretic', 'swift'] as const).map((variant) => ({
+    groups: (['heretic', 'saluki'] as const).map((variant) => ({
       model: variant,
       summary: summarizeFast27bRequests(filtered.filter((request) => request.model === variant)),
     })),

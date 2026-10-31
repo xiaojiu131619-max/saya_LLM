@@ -1,8 +1,8 @@
 # Agent LLM
 
-Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动器。它围绕 llama.cpp 的 `llama-server` 提供从「内核管理 → 模型管理 → 对话 → 对外 API」的完整本地链路：扫描本地 GGUF 模型、参数化加载推理服务、流式对话、多模态输入，并把推理能力以 OpenAI / Anthropic 兼容接口开放给局域网。
+Agent LLM（界面显示名「拾壹」）是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动器。它围绕 llama.cpp 的 `llama-server` 提供从「内核管理 → 模型管理 → 对话 → 对外 API」的完整本地链路：扫描本地 GGUF 模型、参数化加载推理服务、流式对话、多模态输入，并把推理能力以 OpenAI / Anthropic 兼容接口开放给局域网。除主模型外，还托管 NiNfer 与 Strata 两条引擎后端。
 
-当前版本：**0.3.1**（[更新日志](CHANGELOG.md) / [下载最新版](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest)）
+当前版本：**0.4.0**（[更新日志](CHANGELOG.md) / [下载最新版](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest)）
 
 ## 功能总览
 
@@ -40,10 +40,17 @@ Agent LLM 是一个基于 Tauri 2 + React 19 的 Windows 本地大模型启动�
 - 本地模型一键接入：把当前加载的 llama-server 模型写为 dsh 默认提供方（真实对话校验），浏览器打开 dsh Web UI 即可用本地模型跑智能体任务
 - 安全边界：仅在显式开启后运行，默认只连本机模型，退出应用自动回收进程树；dsh 为上游实验性版本，页面内置风险提示
 
+### 智慧模型（Strata）
+- 托管 Python 网关与 `strata.exe` 内核，90 GiB 级 MoE 权重加载进度、`/health` 就绪状态可见
+- 与主模型、NiNfer 显存互斥：启动任一个前自动停掉另外两个，对话后端按「谁在跑」自动选择
+- 请求性能面板（首字延迟、decode TPS、上下文缓存）、日志环形缓冲、一键接入 dsh、内置 WebUI 入口
+
 ### 其他
-- 使用统计：token 用量、日历热力图、模型占比（设置中心）
+- 使用统计：token 用量、年 / 月 / 日热力图、模型与来源占比、按来源（主模型 / 对外 API / 引擎）拆分
 - 深色 / 浅色 / 跟随系统主题，系统强调色同步，Win11 Mica / Win10 毛玻璃窗口材质
-- 数据管理：模型扫描缓存清理、dsh 会话记录与安装仓库缓存清理、配置重置、出厂重置
+- 会话搜索（标题模糊匹配 + 正文检索）、Markdown / 纯文本 / JSON 导出、归档全部对话
+- 数据管理：模型 / 引擎 / 日志 / 归档目录可配置，对话历史、使用统计、扫描缓存、界面偏好与配置分级清除
+- 设置 → 工具：原生 llama.cpp 工具开关 + MCP 服务器（stdio / HTTP / SSE）
 
 ## 快速开始
 

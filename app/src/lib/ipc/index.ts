@@ -11,4 +11,6 @@ export * from './system';
 export * from './kernel';
 export * from './dsh';
 export * from './fast27b';
+export * from './strata';
 export * from './mcp';
+export * from './storage';

@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'embedding' | 'fast27b';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata';
 export type ThemeType = 'dark' | 'light';
 // 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
 export type ThemeMode = 'system' | ThemeType;
@@ -333,6 +333,8 @@ export interface Message {
   stats?: MessageStats;
   /** 本轮模型发起、且应用已执行完成的工具调用（用于气泡内展示）。 */
   toolActivity?: ToolActivity[];
+  /** 交付护栏的警告（本轮回答可能不完整）；不存在 = 判定通过。 */
+  warnings?: string[];
 }
 
 /** 一次 MCP 工具调用在界面上的记录。 */
@@ -399,9 +401,9 @@ export interface SystemStats {
 
 export interface AppState {
   currentView: ViewType;
-  /** 对话后端：main = 主 llama-server；fast27b = fast-27b 引擎（自带 OpenAI API）。 */
+  /** 对话后端：main = 主 llama-server；fast27b = NiNfer 引擎（自带 OpenAI API）。 */
   chatEngine: ChatEngineId;
-  /** Agent 页 WebUI 标签的后端：主模型 / fast-27b（fast-27b 由同源桥提供官方页面）。 */
+  /** Agent 页 WebUI 标签的后端：主模型 / NiNfer（NiNfer 由同源桥提供官方页面）。 */
   webuiEngine: WebUiEngineId;
   /** Agent 页当前标签（dsh / WebUI 之间互相跳转用）。 */
   agentTab: AgentTabId;
@@ -412,8 +414,18 @@ export interface AppState {
   syncSystemAccent: boolean;
   // 毛玻璃模式：窗口与主要表面采用半透明亚克力质感。
   acrylicMode: boolean;
+  // 减少界面动画：用户手动开关，等价于强制 prefers-reduced-motion。
+  // CSS 过渡与 framer-motion 动画都会被降级为瞬时完成，不影响功能逻辑。
+  reduceMotion: boolean;
+  // 发送快捷键偏好：true = Enter 发送、Shift+Enter 换行；
+  // false = Ctrl/⌘+Enter 发送、Enter 换行（便于输入多行提示词）。
+  enterToSend: boolean;
   sidebarCollapsed: boolean;
+  /** 聊天侧边栏展开时的宽度（px），用户拖动分隔条调整后持久化。 */
+  sidebarWidth: number;
   models: ModelInfo[];
+  /** 自动调参的原子配置应用回执，仅本次应用进程使用，不持久化授权。 */
+  autoTuneApplication?: { runId: string; applied: boolean };
   sortBy: SortType;
   gridColumns: GridColumnType;
   activeModelId: string | null;
@@ -438,11 +450,11 @@ export interface AppState {
   mcpServers: McpServerEntry[];
 }
 
-/** 自带对话的后端选择：主模型或 fast-27b 引擎。 */
-export type ChatEngineId = 'main' | 'fast27b';
+/** 自带对话的后端选择：主模型或 NiNfer 引擎。 */
+export type ChatEngineId = 'main' | 'fast27b' | 'strata';
 
-/** WebUI 标签的后端选择：主模型 / fast-27b（fast-27b 走应用提供的同源桥）。 */
-export type WebUiEngineId = 'main' | 'fast27b';
+/** WebUI 标签的后端选择：主模型 / NiNfer（NiNfer 走应用提供的同源桥）。 */
+export type WebUiEngineId = 'main' | 'fast27b' | 'strata';
 
-/** Agent 页标签（跨面板跳转用；放在全局状态里，fast-27b 面板按钮可直接切到 WebUI 标签）。 */
-export type AgentTabId = 'dsh' | 'webui';
+/** Agent 页标签（跨面板跳转用；放在全局状态里，NiNfer 面板按钮可直接切到 WebUI 标签）。 */
+export type AgentTabId = 'shiyi' | 'webui';

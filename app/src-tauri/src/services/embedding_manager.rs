@@ -55,8 +55,10 @@ mod job_guard {
         MaximumWorkingSetSize: usize,
         ActiveProcessLimit: u32,
         Affinity: usize,
-        ChildProcessCount: u32,
-        Reserved: [u32; 2],
+        // 必须是 PriorityClass / SchedulingClass（各 u32），
+        // 多 4 字节会让 SetInformationJobObject 报 ERROR_BAD_LENGTH。
+        PriorityClass: u32,
+        SchedulingClass: u32,
     }
 
     #[repr(C)]
@@ -68,6 +70,9 @@ mod job_guard {
         PeakProcessMemoryUsed: usize,
         PeakJobMemoryUsed: usize,
     }
+
+    #[cfg(target_pointer_width = "64")]
+    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
 
     extern "system" {
         fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { Message, ToolActivity } from '@/types';
 import { useApp } from '@/context/AppContext';
+import { judgeDelivery } from '@/features/chat/deliveryGuard';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
 import { isDesktopRuntime, partialMetricsFromError, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
@@ -33,6 +35,10 @@ interface ChatBubbleProps {
   sessionModelColor?: string;
   /** 该条消息为止的本地会话累计水位（估算），与侧边栏服务状态同口径。 */
   sessionCtx?: { used: number; total: number };
+  /** 会话内搜索词：命中处会高亮。空 = 不搜索。 */
+  searchQuery?: string;
+  /** 本条消息是否为当前搜索跳转的目标（给出更醒目的描边）。 */
+  searchActive?: boolean;
   onEditAndResend?: (messageId: string, content: string) => Promise<void> | void;
 }
 
@@ -109,7 +115,7 @@ function outputOnlyContent(content: string) {
     .trim();
 }
 
-export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, sessionCtx, onEditAndResend }: ChatBubbleProps) {
+export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, sessionCtx, searchQuery, searchActive, onEditAndResend }: ChatBubbleProps) {
   const { state, dispatch } = useApp();
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
@@ -222,6 +228,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
     });
 
     let streamedContent = '';
+    let reasoningChars = 0;
     try {
       const metrics = await streamChatCompletion({
         port: activeModel.serverPort ?? state.serverPort,
@@ -245,10 +252,27 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           });
         },
         onReasoningDelta: (reasoningContent) => {
+          reasoningChars = reasoningContent.length;
           dispatch({
             type: 'UPDATE_MESSAGE',
             payload: { modelId, sessionId, messageId: assistantMsgId, reasoningContent },
           });
+        },
+      });
+
+      // 重新生成同样要过交付护栏：这条路径没有工具循环，工具名留空。
+      const verdict = judgeDelivery({
+        content: streamedContent,
+        finishReason: metrics.finishReason,
+        reasoningChars,
+      });
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: {
+          modelId,
+          sessionId,
+          messageId: assistantMsgId,
+          warnings: verdict.ok ? [] : [verdict.detail],
         },
       });
 
@@ -324,11 +348,10 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   if (isUser) {
     return (
       <motion.article
-        initial={{ opacity: 0, x: 16 }}
+        initial={false}
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 10 }}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-        className="group grid w-full justify-items-end gap-1.5 pb-8"
+        className="anim-enter-fade group grid w-full min-w-0 grid-cols-[minmax(0,1fr)] justify-items-end gap-1.5 pb-8"
       >
         <div className="flex max-w-[80%] items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
           <strong className="font-medium text-[var(--text-primary)] dark:text-[var(--text-secondary)]">你</strong>
@@ -367,7 +390,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
                 type="button"
                 onClick={() => void submitEdit(draftContent)}
                 disabled={savingEdit || !draftContent.trim()}
-                className="h-8 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-body)] font-semibold text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                className="h-8 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-body)] font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
               >
                 {savingEdit ? '发送中' : '保存并发送'}
               </button>
@@ -396,11 +419,10 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
 
   return (
     <motion.article
-      initial={{ opacity: 0, y: 10 }}
+      initial={false}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
-      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-      className="group grid w-full min-w-0 gap-2.5 pb-8 text-[var(--text-primary)]"
+      className="anim-enter-fade group grid w-full min-w-0 grid-cols-[minmax(0,1fr)] gap-2.5 pb-8 text-[var(--text-primary)]"
     >
       <div className="flex min-w-0 items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
         <strong className="truncate font-semibold text-[var(--text-primary)]" style={displayModelColor ? { color: displayModelColor } : undefined}>{assistantName(displayModelName)}</strong>
@@ -417,23 +439,20 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       )}
 
       {/* 列宽跟随消息列（768/896px），字号与行高由 MarkdownRenderer 的 prose-body 决定；
-          外层不再声明字号，否则会与内层打架（历史上这里写 15.5px 是死声明）。 */}
-      <div className="min-w-0 text-[var(--text-primary)]">
-        <MarkdownRenderer content={message.content} />
-        {message.isStreaming && (
-          <div className="mt-3 flex w-fit items-center gap-2 py-1 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
-            <span className="relative flex h-4 w-4 items-center justify-center">
-              <span className="absolute h-4 w-4 rounded-full border-2 border-[var(--border)] dark:border-white/[0.14]" />
-              <motion.span
-                className="absolute h-4 w-4 rounded-full border-2 border-transparent border-t-[var(--accent)] border-r-[var(--accent)] dark:border-t-[var(--accent)] dark:border-r-[var(--accent)]"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
-              />
-            </span>
-            <span>输出中</span>
-          </div>
-        )}
+          外层不再声明字号，否则会与内层打架（历史上这里写 15.5px 是死声明）。
+          搜索命中时给整段加一层淡描边，并把命中字背景点亮（见 MarkdownRenderer 的 searchQuery）。 */}
+      <div className={`min-w-0 text-[var(--text-primary)] ${searchActive ? 'rounded-[var(--radius-field)] ring-1 ring-[var(--accent)]/45 ring-offset-2 ring-offset-[var(--app-bg)]' : ''}`}>
+        <MarkdownRenderer content={message.content} searchQuery={searchQuery} />
       </div>
+
+      {!message.isStreaming && message.warnings && message.warnings.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--state-warning)]">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          <div className="min-w-0">
+            {message.warnings.map((w) => <p key={w}>{w}</p>)}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-0.5 text-[var(--text-tertiary)] opacity-60 transition-opacity group-hover:opacity-100 dark:text-[var(--text-secondary)]">
         <ActionButton icon={copied ? Check : Copy} label={copied ? '已复制' : '复制'} onClick={() => void handleCopy()} />
@@ -444,7 +463,17 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
       </div>
 
       {message.isStreaming ? (
+        // 生成中的动画只留在这一行：点阵 + 「输出中」+ 实时耗时，与完成后的统计行同位，
+        // 不再在正文下方另起一行转圈（两处重复指示会把视线从正文拉走）。
         <div className="flex max-w-full flex-wrap items-center gap-1.5 text-[length:var(--font-caption)] text-[var(--text-tertiary)] dark:text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-2 px-1 py-0.5 font-medium text-[var(--accent)]">
+            <span className="work-dots" aria-hidden="true">
+              {Array.from({ length: 9 }, (_, index) => (
+                <i key={index} style={{ ['--i' as string]: index }} />
+              ))}
+            </span>
+            <span>输出中</span>
+          </span>
           <Metric icon={Clock} label={`已用 ${formatDuration(streamingElapsed)}`} />
         </div>
       ) : (
@@ -453,7 +482,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           {/* 终止 / 出错的回复拿不到完整统计：整行保留，缺的值一律 -- 占位，不再隐藏整行。 */}
           <Metric icon={Gauge} label={formatSessionCtxUsage(sessionCtx)} />
           <Metric icon={Zap} label={stats && stats.outputTokens > 0 ? `${stats.outputTokens.toLocaleString()} tok` : '-- tok'} />
-          <Metric icon={Clock} label={stats && stats.firstTokenDelay > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : '--s TTFT'} />
+          <Metric icon={Clock} label={stats && stats.genTime > 0 ? `${stats.firstTokenDelay.toFixed(2)}s TTFT` : '--s TTFT'} />
           <Metric icon={Clock} label={`${formatMetric(stats ? stats.tokensPerSec : 0, ' tok/s')}`} />
           <Metric icon={Clock} label={stats && stats.genTime > 0 ? `生成耗时 ${formatSecondsShort(stats.genTime)}` : '生成耗时 --m--s'} />
         </div>
@@ -467,7 +496,7 @@ function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
   const pendingCount = activities.filter((item) => item.pending).length;
 
   return (
-    <div className="rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+    <div className="min-w-0 max-w-full rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
       <div className="mb-2 flex items-center gap-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
         {pendingCount > 0
           ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
@@ -499,10 +528,10 @@ function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
                 )}
                 <span className="min-w-0 flex-1">
                   <span className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="mono-font text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">
+                    <span className="mono-font min-w-0 max-w-full break-words text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)] [overflow-wrap:anywhere]">
                       {item.tool}
                     </span>
-                    <span className="rounded-[var(--radius-sm)] bg-black/[0.05] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:bg-white/[0.07]">
+                    <span className="min-w-0 max-w-full break-words rounded-[var(--radius-sm)] bg-black/[0.05] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:bg-white/[0.07]">
                       {item.server}
                     </span>
                     {item.pending && (

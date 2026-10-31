@@ -8,6 +8,7 @@ import type { VramPrediction } from '@/lib/vramEstimate';
 import { RECOMMENDED_CTX_LENGTH, maxGpuLayers } from '@/lib/modelDefaults';
 import ModelFamilyLogo from '@/components/ModelFamilyLogo';
 import { MODEL_LOGO_LIBRARY, LOBEHUB_CUSTOM_PREFIX } from '@/lib/modelLogo';
+import { getThemeDefaultColor } from '@/lib/modelTheme';
 
 interface ModelLoadViewProps {
   model: ModelInfo;
@@ -22,6 +23,9 @@ interface ModelLoadViewProps {
   loadPercent: number;
   statusMessage: string | null;
   autoTuneRunning: boolean;
+  autoTuneStopping: boolean;
+  autoTuneApplying: boolean;
+  autoTuneBlocked: boolean;
   autoTuneLog: string[];
   autoTuneApplied: boolean;
   runRecords: ModelRunRecord[];
@@ -39,8 +43,38 @@ interface ModelLoadViewProps {
   logoLibraryOpen: boolean;
   onChangeLogo: () => void;
   onSelectLogo: (value: string) => void;
+  /** 在同一个面板里改模型主题色（合并了原「设置 → 模型主题」的调色能力）。 */
+  onChangeColor: (color: string) => void;
   onClearLogo: () => void;
   onCloseLogo: () => void;
+}
+
+/** 预设主题色：一行常用色 + 系统强调色，点击即取；也能用取色器自由选。 */
+const PRESET_MODEL_COLORS = [
+  '#0078D4', // Fluent 蓝
+  '#0EA5E9', // 天青
+  '#10B981', // 绿
+  '#84CC16', // 草绿
+  '#F59E0B', // 琥珀
+  '#F97316', // 橙
+  '#EF4444', // 红
+  '#EC4899', // 玫红
+  '#A855F7', // 紫
+  '#6366F1', // 靛蓝
+  '#14B8A6', // 青
+  '#78716C', // 石灰
+];
+
+/** 模型的默认主题色（用户没改过时用它，「恢复默认」也回到这里）。 */
+function defaultModelColor(model: ModelInfo) {
+  return getThemeDefaultColor(model);
+}
+
+/** 去掉已有的半透明后缀，取纯色（面板的色盘只接受 #RRGGBB）。 */
+function solidHex(color: string | undefined, fallback = '#0078D4') {
+  if (!color) return fallback;
+  const match = color.trim().match(/^#([0-9a-f]{6})/i);
+  return match ? `#${match[1]}` : fallback;
 }
 
 function formatNumber(value?: number) {
@@ -121,7 +155,15 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
         <div className="model-load-page mx-auto">
           <ModelLoadCompactHeader {...props} />
           {props.logoLibraryOpen && (
-            <LogoLibraryDialog selected={model.customLogo} onSelect={props.onSelectLogo} onClear={props.onClearLogo} onClose={props.onCloseLogo} />
+            <LogoLibraryDialog
+              selected={model.customLogo}
+              color={model.themeColorSolid}
+              colorDefault={defaultModelColor(model)}
+              onSelect={props.onSelectLogo}
+              onColorChange={props.onChangeColor}
+              onClear={props.onClearLogo}
+              onClose={props.onCloseLogo}
+            />
           )}
           {activeTab === 'params' ? (
             <div>
@@ -450,7 +492,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
   );
 }
 
-function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit, onChangeLogo, isLoading, loadMessage, loadError, loadPercent, statusMessage, autoTuneRunning, onLoad, onStop, onAutoTune, onStopAutoTune, onReset }: ModelLoadViewProps) {
+function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit, onChangeLogo, isLoading, loadMessage, loadError, loadPercent, statusMessage, autoTuneRunning, autoTuneStopping, autoTuneApplying, autoTuneBlocked, onLoad, onStop, onAutoTune, onStopAutoTune, onReset }: ModelLoadViewProps) {
   const calibrated = (calibration?.samples ?? 0) > 0;
   const calibrationTitle = calibrated
     ? `按 ${calibration?.samples} 次同模型、同设备和同参数实测分项校准；${calibration?.confidence === 'measured' ? '样本较稳定' : '样本有限'}${calibration?.rejected ? `；排除 ${calibration.rejected} 条不匹配或异常记录` : ''}`
@@ -532,7 +574,7 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
           ))}
         </div>
         <div className="model-load-compact-actions">
-          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={isLoading} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="实测搜索 ngl / ctx / KV，完成后自动应用最佳参数">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneRunning ? '停止调参' : '自动调参'}</button>
+          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="使用完整加载基线，实测搜索 ngl / ctx / ncmoe / 独立 K/V；整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
           <button type="button" onClick={onReset} disabled={isLoading || autoTuneRunning} className={`${buttonClass} text-[var(--text-secondary)]`}><RotateCcw className="h-3.5 w-3.5" />重置</button>
           <button type="button" onClick={isLoading ? onStop : onLoad} disabled={autoTuneRunning} className={`inline-flex h-8 min-w-24 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors disabled:opacity-50 ${isLoading ? 'border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)]' : 'bg-[var(--accent)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]'}`}>{isLoading ? <Square className="h-3 w-3 fill-current" /> : <Play className="h-3.5 w-3.5" />}{isLoading ? '停止加载' : model.status === 'loaded' ? '重新加载' : '加载模型'}</button>
         </div>
@@ -652,7 +694,7 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
           <span className="text-xs font-normal text-[var(--text-tertiary)]">{records.length} 条 · 含调参与启动实测</span>
         )}
         {running && (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-white shadow-sm">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-[var(--text-on-accent)] shadow-sm">
             <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
             调参搜索中…
           </span>
@@ -762,67 +804,151 @@ function ParamSection({ title, icon: Icon, children }: {
   );
 }
 
-// 头像库弹窗：内置品牌 logo 网格，点选即用；不支持上传图片。
-function LogoLibraryDialog({ selected, onSelect, onClear, onClose }: {
+// 头像与主题色弹窗：左侧选头像（内置品牌 logo 网格，不支持上传图片），
+// 右侧调主题色（预选色 + 取色器 + 恢复默认）。合并了原「设置 → 模型主题」的能力。
+function LogoLibraryDialog({ selected, color, colorDefault, onSelect, onColorChange, onClear, onClose }: {
   selected?: string;
+  color: string;
+  colorDefault: string;
   onSelect: (customLogo: string) => void;
+  onColorChange: (color: string) => void;
   onClear: () => void;
   onClose: () => void;
 }) {
   const isUsingLibrary = Boolean(selected?.startsWith(LOBEHUB_CUSTOM_PREFIX));
+  const currentColor = solidHex(color);
+  const defaultColor = solidHex(colorDefault);
   return (
     <div
       className="fixed inset-0 z-[80] grid place-items-center bg-black/40 p-6"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="模型头像与主题色"
     >
       <div
-        className="max-h-[80vh] w-[min(640px,92vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl dark:border-white/[0.10] dark:bg-[#2b2b2b]"
+        className="max-h-[86vh] w-[min(760px,94vw)] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] shadow-2xl dark:border-white/[0.10] dark:bg-[#2b2b2b]"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
           <div>
-            <div className="text-sm font-semibold text-primary-custom">选择头像</div>
-            <div className="mt-0.5 text-xs text-secondary-custom">点击任意品牌图标即可应用；右键头像可恢复默认。</div>
+            <div className="text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">头像与主题色</div>
+            <div className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">点图标即应用；主题色会同步到模型卡片、对话头像与使用统计。</div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-2 py-1 text-xs text-secondary-custom hover:bg-[var(--surface-muted)] hover:text-primary-custom dark:hover:bg-white/[0.08]"
+            className="rounded-[var(--radius-field)] px-2 py-1 text-[length:var(--font-caption)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
           >
             关闭
           </button>
         </div>
-        <div className="grid max-h-[56vh] grid-cols-4 gap-2 overflow-y-auto p-4 sm:grid-cols-6 md:grid-cols-8">
-          {MODEL_LOGO_LIBRARY.map((entry) => {
-            const value = `${LOBEHUB_CUSTOM_PREFIX}${entry.key}`;
-            const active = selected === value;
-            return (
+
+        <div className="grid max-h-[68vh] gap-0 overflow-y-auto min-[720px]:grid-cols-[minmax(0,1fr)_220px]">
+          {/* 左：头像库 */}
+          <div className="min-w-0 border-b border-[var(--border-subtle)] p-4 min-[720px]:border-b-0 min-[720px]:border-r">
+            <div className="mb-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">头像</div>
+            <div className="grid grid-cols-5 gap-2 sm:grid-cols-6 md:grid-cols-8">
+              {MODEL_LOGO_LIBRARY.map((entry) => {
+                const value = `${LOBEHUB_CUSTOM_PREFIX}${entry.key}`;
+                const active = selected === value;
+                return (
+                  <button
+                    key={entry.key}
+                    type="button"
+                    onClick={() => onSelect(value)}
+                    className={`flex flex-col items-center gap-1.5 rounded-[var(--radius-field)] border px-1 py-2 transition-colors ${
+                      active
+                        ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+                        : 'border-[var(--border)] hover:bg-[var(--surface-muted)]'
+                    }`}
+                    title={entry.label}
+                  >
+                    <ModelFamilyLogo customSrc={value} size={22} tone={currentColor} fallback={entry.label[0]} />
+                    <span className="w-full truncate text-center text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">{entry.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-2.5">
+              <span className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+                当前：{selected ? (isUsingLibrary ? '品牌图标' : '自定义图片') : '默认品牌图标'}
+              </span>
               <button
-                key={entry.key}
                 type="button"
-                onClick={() => onSelect(value)}
-                className={`flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2.5 transition-colors ${
-                  active
-                    ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
-                    : 'border-[var(--border)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:hover:bg-white/[0.06]'
-                }`}
-                title={entry.label}
+                onClick={onClear}
+                className="rounded-[var(--radius-field)] border border-[var(--border)] px-2.5 py-1 text-[length:var(--font-caption)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
               >
-                <ModelFamilyLogo customSrc={value} size={24} tone="var(--accent)" fallback={entry.label[0]} />
-                <span className="w-full truncate text-center text-[10px] text-secondary-custom">{entry.label}</span>
+                恢复默认图标
               </button>
-            );
-          })}
-        </div>
-        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] px-4 py-2.5">
-          <span className="text-xs text-secondary-custom">当前：{selected ? (isUsingLibrary ? '品牌图标' : '自定义图片') : '默认品牌图标'}</span>
-          <button
-            type="button"
-            onClick={() => { onClear(); onClose(); }}
-            className="rounded-md border border-[var(--border)] px-2.5 py-1 text-xs text-secondary-custom transition-colors hover:bg-[var(--surface-muted)] hover:text-primary-custom dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
-          >
-            恢复默认
-          </button>
+            </div>
+          </div>
+
+          {/* 右：主题色 */}
+          <div className="p-4">
+            <div className="mb-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">主题色</div>
+            {/* 预览：用当前色画一个头像方块，颜色变化立刻可见 */}
+            <div className="mb-3 flex items-center gap-2.5">
+              <span
+                className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-[var(--radius-field)]"
+                style={{ background: `${currentColor}1f`, color: currentColor }}
+              >
+                <ModelFamilyLogo
+                  family={undefined}
+                  architecture={undefined}
+                  name={undefined}
+                  size={20}
+                  customSrc={selected}
+                  tone={currentColor}
+                  fallback={<span className="text-[length:var(--font-caption)] font-semibold">Aa</span>}
+                />
+              </span>
+              <div className="min-w-0">
+                <div className="mono-font truncate text-[length:var(--font-caption)] text-[var(--text-primary)]">{currentColor.toUpperCase()}</div>
+                <button
+                  type="button"
+                  onClick={() => onColorChange(defaultColor)}
+                  className="text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] underline-offset-2 hover:text-[var(--accent)] hover:underline"
+                >
+                  恢复默认色
+                </button>
+              </div>
+              <label
+                className="ml-auto grid h-9 w-9 flex-shrink-0 cursor-pointer place-items-center rounded-[var(--radius-field)] border border-[var(--border)]"
+                title="打开取色器自由选色"
+                style={{ background: `conic-gradient(from 0deg, #f87171, #fbbf24, #34d399, #38bdf8, #a78bfa, #f472b6, #f87171)` }}
+              >
+                <input
+                  type="color"
+                  aria-label="模型主题色"
+                  value={currentColor}
+                  onChange={(event) => onColorChange(event.target.value)}
+                  className="h-0 w-0 opacity-0"
+                />
+                <span className="sr-only">选择主题色</span>
+              </label>
+            </div>
+
+            <div className="mb-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">预选色</div>
+            <div className="grid grid-cols-6 gap-1.5">
+              {PRESET_MODEL_COLORS.map((preset) => {
+                const active = preset.toLowerCase() === currentColor.toLowerCase();
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => onColorChange(preset)}
+                    title={preset}
+                    aria-pressed={active}
+                    className={`h-7 w-full rounded-[var(--radius-sm)] border transition-transform hover:scale-105 ${
+                      active ? 'border-[var(--text-primary)] ring-1 ring-[var(--text-primary)]/40' : 'border-black/[0.08] dark:border-white/[0.12]'
+                    }`}
+                    style={{ background: preset }}
+                  />
+                );
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

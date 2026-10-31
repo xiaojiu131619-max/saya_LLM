@@ -73,10 +73,9 @@ pub(crate) fn resource_dir() -> PathBuf {
 
 /// 版本化核心根目录：每次更新安装到 `kernels/<版本>_<安装时间>/`，
 /// 始终保留最近两个（最新 + 上一个），更早的在安装成功后自动清理。
+/// 目录位置由「数据管理 → 引擎目录」决定，未配置时用资源目录下的 kernels。
 fn kernels_dir() -> PathBuf {
-    let k = resource_dir().join("kernels");
-    fs::create_dir_all(&k).ok();
-    k
+    crate::services::storage_paths::engine_dir()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,12 +197,7 @@ fn migrate_legacy_runtime(resources: &Path) {
     }
 }
 
-fn parse_nvcc_cuda_version(output: &std::process::Output) -> Option<String> {
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn parse_nvcc_cuda_version_from_text(combined: &str) -> Option<String> {
     for line in combined.lines() {
         if line.contains("release") {
             if let Some(pos) = line.find("release") {
@@ -224,12 +218,7 @@ fn parse_nvcc_cuda_version(output: &std::process::Output) -> Option<String> {
     None
 }
 
-fn parse_nvidia_smi_cuda_version(output: &std::process::Output) -> Option<String> {
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn parse_nvidia_smi_cuda_version_from_text(combined: &str) -> Option<String> {
     if let Some(pos) = combined.find("CUDA Version:") {
         let rest = combined[pos + "CUDA Version:".len()..].trim();
         let version: String = rest
@@ -245,17 +234,20 @@ fn parse_nvidia_smi_cuda_version(output: &std::process::Output) -> Option<String
 
 /// Detect installed NVIDIA CUDA support from driver first, then toolkit.
 /// Returns version string like "13.3", "12.4", etc.
+///
+/// 这两条命令必须带 CREATE_NO_WINDOW：核心更新页每次进入都会做内核检查，
+/// 漏掉标志会让 nvidia-smi / nvcc 各自弹一个黑色控制台窗口一闪而过，
+/// 用户看到的就是「点核心更新有个黑框弹出来」。
 pub fn detect_cuda_version() -> Option<String> {
-    if let Ok(output) = Command::new("nvidia-smi").output() {
-        if let Some(version) = parse_nvidia_smi_cuda_version(&output) {
+    let mut smi = Command::new("nvidia-smi");
+    if let Some(text) = command_text(&mut smi) {
+        if let Some(version) = parse_nvidia_smi_cuda_version_from_text(&text) {
             return Some(version);
         }
     }
-    Command::new("nvcc")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| parse_nvcc_cuda_version(&output))
+    let mut nvcc = Command::new("nvcc");
+    nvcc.arg("--version");
+    command_text(&mut nvcc).and_then(|text| parse_nvcc_cuda_version_from_text(&text))
 }
 
 fn command_text(command: &mut Command) -> Option<String> {

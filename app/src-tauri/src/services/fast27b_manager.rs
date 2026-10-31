@@ -3,7 +3,7 @@
 //! 与 dsh_manager / embedding_manager 同一套进程管理规范：
 //! - 启动：`ninfer-serve-86.exe <model> --host --port --api-key ...`（推理参数对齐
 //!   start-heretic-best.bat 调用的 fastllm-ui.mjs，保留应用的鉴权与网络配置；
-//!   5 个 NINFER_* 环境变量继承非空宿主值，否则使用脚本默认值）；
+//!   7 个 NINFER_* 环境变量继承非空宿主值，否则使用脚本默认值）；
 //! - 进程树：Job Object（KILL_ON_JOB_CLOSE）整树回收，应用退出时联动 stop_fast27b；
 //! - 健康：轮询 `GET /v1/models`（必须带 Bearer api-key，200 即就绪）；
 //! - 日志：stdout/stderr 双读线程 → 环形缓冲 + `fast27b:log` 事件。
@@ -73,12 +73,19 @@ impl Fast27bStartOptions {
     }
 
     /// 推理参数对齐 D:\Projects\fast-llm\launch\fastllm-ui.mjs 的 engineArgv：
-    /// Heretic 使用 DFlash2，Swift 使用 MTP；两者都显式关闭 ngram 草稿。
+    /// Heretic 使用 DFlash2，Saluki 使用 MTP；两者都显式关闭 ngram 草稿。
     /// ctx、草稿长度与输出/思考额度原样来自配置，环境变量由启动函数独立组装。
     ///
+    /// 只有「模型能力」类参数按模型区分（`--max-context` 上限、`--vision-residency`、
+    /// `--lm-head-draft`）；用户保存的参数本身不被改写。
     /// 应用侧保留 `--host` / `--port` / `--api-key` 与 `--cors`，供局域网、Tauri
     /// 自带对话和同源桥继续使用当前网络拓扑。
     fn build_args(&self) -> Vec<String> {
+        // Saluki 在 12G 卡上开不到 262144（实测 65536 就掉到 48 tok/s），
+        // 直接按模型上限收口，避免用户沿用 Heretic 的配置时启动即 FATAL。
+        let context_window = self
+            .context_window
+            .min(self.model_variant.max_context_window());
         let mut args = vec![
             self.model_path.to_string_lossy().to_string(),
             "--host".to_string(),
@@ -86,9 +93,9 @@ impl Fast27bStartOptions {
             "--port".to_string(),
             self.port.to_string(),
             "--model-id".to_string(),
-            "qwen3.8-27b".to_string(),
+            self.model_variant.model_id().to_string(),
             "--max-context".to_string(),
-            self.context_window.to_string(),
+            context_window.to_string(),
             "--kv-capacity".to_string(),
             "auto".to_string(),
             "--kv-headroom-mib".to_string(),
@@ -103,13 +110,27 @@ impl Fast27bStartOptions {
             self.model_variant.spec().to_string(),
             "--draft-tokens".to_string(),
             self.draft_tokens.to_string(),
-            "--lm-head-draft".to_string(),
+        ];
+        // Saluki 带 --lm-head-draft 在 48K 下预留不足直接起不来，且 32K 实测更慢。
+        if self.model_variant.uses_lm_head_draft() {
+            args.push("--lm-head-draft".to_string());
+        }
+        args.extend([
             "--ngram-draft-tokens".to_string(),
             "0".to_string(),
             "--vision".to_string(),
             "--vision-residency".to_string(),
-            "resident".to_string(),
-        ];
+            self.model_variant.vision_residency().to_string(),
+        ]);
+        // 2026-10-24 对齐 fastllm-ui.mjs：media 预留从默认 cache 1024 + live 2048 MiB
+        // 压到 256 + 1024，设备 KV 池从 ≈42,496 提到 ≈78k（10-23 观测 agent prompt 已到 59k）。
+        // 图片仍可用（单张 prepared payload ≈百 MiB 级）；要更大池子就删掉 --vision。
+        args.extend([
+            "--media-cache-mib".to_string(),
+            "256".to_string(),
+            "--media-live-mib".to_string(),
+            "1024".to_string(),
+        ]);
         // 兼容已保存的 0：输出上限交回引擎默认，不能迁移覆写用户的排障基线。
         if self.default_max_tokens != 0 {
             args.extend([
@@ -117,14 +138,28 @@ impl Fast27bStartOptions {
                 self.default_max_tokens.to_string(),
             ]);
         }
+        // 推理力度按模型对齐启动器：mjs 给 Heretic 传 high；Saluki 的 bat 不传
+        // （交回引擎默认），应用保持同口径。
+        if let Some(effort) = self.model_variant.default_reasoning_effort() {
+            args.extend([
+                "--default-reasoning-effort".to_string(),
+                effort.to_string(),
+            ]);
+        }
         args.extend([
-            "--default-reasoning-effort".to_string(),
-            "high".to_string(),
             "--max-concurrency".to_string(),
             "1".to_string(),
             "--presence-penalty".to_string(),
             "0".to_string(),
         ]);
+        // 与 fast-llm 的 start-heretic-best.bat 对齐：Heretic 思考通道补 1.0 惩罚。
+        // Saluki 不带——实测这一步会让 decode 从 112.5 掉到 92.3。
+        if let Some(penalty) = self.model_variant.thinking_presence_penalty() {
+            args.extend([
+                "--thinking-presence-penalty".to_string(),
+                penalty.to_string(),
+            ]);
+        }
         // 当前引擎拒绝 --default-thinking-budget 0；省略该参数才表示关闭预算限制。
         if self.default_thinking_budget != 0 {
             args.extend([
@@ -136,6 +171,17 @@ impl Fast27bStartOptions {
             "--max-shared-prefixes".to_string(),
             "0".to_string(),
             "--gdn-state-fp16".to_string(),
+        ]);
+        // 2026-10-24 对齐 fastllm-ui.mjs 的 B01 零编译止血（hub/已知问题-初期版本.md §六）：
+        // 超池 + 大输出租约（客户端 max_tokens 高达 128,000）⇒ 引擎预留整个输出预算
+        // ⇒ 预留不变量 ⇒ worker crash / 静默退出。lease-growth 把租约改成 4096-token
+        // 窗口按需增长（池撑不住就 finish_reason=length）；recover-invariant-failures
+        // 把不变量失败降级成「只废当前请求」，引擎不再死。
+        args.extend([
+            "--kv-lease-growth".to_string(),
+            "--recover-invariant-failures".to_string(),
+        ]);
+        args.extend([
             "--api-key".to_string(),
             self.api_key.clone(),
             "--cors".to_string(),
@@ -145,15 +191,35 @@ impl Fast27bStartOptions {
 }
 
 /// 与 fastllm-ui.mjs 一致：非空宿主值原样继承（包括 "0"），仅缺失或空串取默认值。
+///
+/// 窗口默认值按 fast-llm 2026-10-20 的口径取 40,960，但必须守住引擎的硬约束
+/// `NINFER_KV_WINDOW ≤ --max-context`；上下文较小时按 `context - 8192`（向下取整到 64）
+/// 收口，保证池页数仍小于逻辑页数、环语义成立。
+/// 缺任何一个开关都是「静默答错」而非启动失败（hub/docs/05 第 3 条）。
 fn engine_kv_environment(
+    context_window: u32,
     inherited: impl Fn(&str) -> Option<OsString>,
 ) -> Vec<(&'static str, OsString)> {
+    let window = context_window
+        .saturating_sub(8192)
+        .min(40960)
+        .max(8192)
+        .min(context_window)
+        / 64
+        * 64;
     [
-        ("NINFER_KV_WINDOW", "16384"),
-        ("NINFER_KV_RETRIEVE", "8192"),
-        ("NINFER_KV_RING", "1"),
-        ("NINFER_HOST_PAGEABLE", "1"),
-        ("NINFER_KV_REUSE_HOSTBACKED", "1"),
+        ("NINFER_KV_WINDOW", window.to_string()),
+        ("NINFER_KV_RETRIEVE", "8192".to_string()),
+        ("NINFER_KV_RING", "1".to_string()),
+        ("NINFER_HOST_PAGEABLE", "1".to_string()),
+        ("NINFER_KV_REUSE_HOSTBACKED", "1".to_string()),
+        // 2026-10-24 对齐 fastllm-ui.mjs：worker 崩溃时干净退出（本二进制已核有此开关），
+        // 让应用的「进程退出」事件与失效识别接管，而不是留下 /v1/models 照样 200 的假健康实例。
+        ("NINFER_EXIT_ON_WORKER_CRASH", "1".to_string()),
+        // B17 / D-07①：KVMem score sink 从默认 4096 提到 16384 token，把提示最前面的
+        // 工具 schema 段钉成常驻（工具 ≈15-25k token 时此前落在 harvest/检索中段
+        // ⇒ 模型吐坏的工具标记）。判据：tool markup WARN 频次应下降。
+        ("NINFER_TERNARY_KVMEM_SCORE_SINK", "16384".to_string()),
     ]
     .into_iter()
     .map(|(key, default)| {
@@ -174,12 +240,14 @@ fn engine_search_path(engine_dir: &Path, inherited: Option<OsString>) -> Result<
     std::env::join_paths(paths).map_err(|error| format!("无法组装引擎 PATH：{}", error))
 }
 
-/// 当前运行配置（探活与 dsh 绑定取 endpoint 用）。
+/// 当前运行配置（探活、dsh 绑定取 endpoint 与状态页模型名用）。
 #[derive(Debug, Clone)]
 struct ActiveConfig {
     port: u16,
     host: &'static str,
     api_key: String,
+    /// 本次启动下发的 `--model-id`（按所选模型能力区分）。
+    model_id: &'static str,
 }
 
 /// 引擎内部分页 KV 的容量读数（解析自 `capacity | KV … tokens…` 启动行）。
@@ -282,8 +350,10 @@ mod job_guard {
         MaximumWorkingSetSize: usize,
         ActiveProcessLimit: u32,
         Affinity: usize,
-        ChildProcessCount: u32,
-        Reserved: [u32; 2],
+        // 必须是 PriorityClass / SchedulingClass（各 u32），
+        // 多 4 字节会让 SetInformationJobObject 报 ERROR_BAD_LENGTH。
+        PriorityClass: u32,
+        SchedulingClass: u32,
     }
 
     #[repr(C)]
@@ -295,6 +365,9 @@ mod job_guard {
         PeakProcessMemoryUsed: usize,
         PeakJobMemoryUsed: usize,
     }
+
+    #[cfg(target_pointer_width = "64")]
+    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
 
     extern "system" {
         fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
@@ -359,9 +432,14 @@ mod job_guard {
 // 日志缓冲
 // ---------------------------------------------------------------------------
 
-/// 日志文件（与环形缓冲同步落盘，应用外可排查；路径：AgentLLM 数据目录）。
+/// 日志文件（与环形缓冲同步落盘，应用外可排查；目录由「数据管理 → 日志目录」决定，
+/// 未配置时落在应用数据目录的 fast27b 子目录）。
 fn log_file_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("AgentLLM").join("fast27b").join("engine.log"))
+    Some(
+        crate::services::storage_paths::log_dir()
+            .join("fast27b")
+            .join("engine.log"),
+    )
 }
 
 /// 追加一行到 fast27b 日志环形缓冲（启动/停止等非进程动作也写入，保证日志面板完整可见），
@@ -1036,7 +1114,9 @@ fn start_fast27b_locked(
         engine_search_path(&engine_dir, std::env::var_os("PATH"))?,
     );
     // 主机 KV 策略继承非空宿主环境；没有值时才补脚本默认值，不覆盖用户的排障基线。
-    command.envs(engine_kv_environment(|key| std::env::var_os(key)));
+    command.envs(engine_kv_environment(options.context_window, |key| {
+        std::env::var_os(key)
+    }));
 
     let mut child = command
         .spawn()
@@ -1060,6 +1140,7 @@ fn start_fast27b_locked(
         port: options.port,
         host: options.host(),
         api_key: options.api_key.clone(),
+        model_id: options.model_variant.model_id(),
     };
     if let Ok(mut guard) = FAST27B_ACTIVE.lock() {
         *guard = Some(active);
@@ -1353,7 +1434,7 @@ pub fn runtime_status() -> Fast27bRuntimeStatus {
             (
                 Some(config.port),
                 Some(config.host == "0.0.0.0"),
-                Some("qwen3.8-27b".to_string()),
+                Some(config.model_id.to_string()),
                 ready,
             )
         }
@@ -1710,7 +1791,7 @@ mod tests {
         assert!(joined.contains("--ngram-draft-tokens 0"));
         assert!(joined.contains("--default-thinking-budget 8192"));
         assert!(joined.contains("--vision"));
-        assert!(joined.contains("--vision-residency resident"));
+        assert!(joined.contains("--vision-residency overlay"));
         assert!(joined.contains("--presence-penalty 0"));
         assert!(joined.contains("--max-concurrency 1"));
         assert!(joined.contains("--max-shared-prefixes 0"));
@@ -1718,6 +1799,11 @@ mod tests {
         assert!(joined.contains("--default-reasoning-effort high"));
         // 默认输出上限跟随配置。
         assert!(joined.contains("--default-max-tokens 32768"));
+        // 2026-10-24 对齐 fastllm-ui.mjs：media 预留压缩换 KV 池，B01 止血开关防 worker 打死。
+        assert!(joined.contains("--media-cache-mib 256"));
+        assert!(joined.contains("--media-live-mib 1024"));
+        assert!(joined.contains("--kv-lease-growth"));
+        assert!(joined.contains("--recover-invariant-failures"));
         assert!(joined.contains("--api-key"));
         // --cors 是应用侧增补参数（自带对话跨域用），必须存在。
         assert!(joined.contains("--cors"));
@@ -1742,9 +1828,10 @@ mod tests {
             .contains("--host 0.0.0.0"));
     }
 
-    /// 两模型仅草稿方案不同，ctx/draft/output/budget 及网络参数均来自保存配置。
+    /// 两个模型的草稿方案与视觉驻留方式不同，用户保存的 ctx/draft/output/budget/网络参数不变；
+    /// 开环后两个模型都保留模型原生 262,144；设备池只常驻窗口，其余在主机层。
     #[test]
-    fn swift_uses_mtp_without_changing_user_parameters() {
+    fn saluki_uses_mtp_without_changing_user_parameters() {
         let config = crate::models::app_state::Fast27bConfig {
             context_window: 65536,
             draft_tokens: 2,
@@ -1766,12 +1853,12 @@ mod tests {
             default_max_tokens: config.default_max_tokens,
             default_thinking_budget: config.default_thinking_budget,
         };
-        let swift = Fast27bStartOptions {
-            model_variant: Fast27bModel::Swift,
+        let saluki = Fast27bStartOptions {
+            model_variant: Fast27bModel::Saluki,
             ..heretic.clone()
         };
         let original = heretic.build_args();
-        let switched = swift.build_args();
+        let switched = saluki.build_args();
         let spec_index = original.iter().position(|arg| arg == "--spec").unwrap();
         assert_eq!(
             original.get(spec_index + 1).map(String::as_str),
@@ -1783,31 +1870,65 @@ mod tests {
             Some("mtp")
         );
         assert!(switched.iter().any(|arg| arg == "--draft-tokens"));
-        assert!(switched.iter().any(|arg| arg == "--lm-head-draft"));
+        // Saluki 不带 --lm-head-draft：48K 下预留不足起不来，32K 实测也更慢。
+        assert!(original.iter().any(|arg| arg == "--lm-head-draft"));
+        assert!(!switched.iter().any(|arg| arg == "--lm-head-draft"));
+        for args in [&original, &switched] {
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.as_str() == "--vision-residency")
+                    .count(),
+                1
+            );
+        }
+        // 视觉驻留两者一致（都走 overlay，与 fast-llm 对齐）。
+        assert!(original.join(" ").contains("--vision-residency overlay"));
+        assert!(switched.join(" ").contains("--vision-residency overlay"));
+        // Heretic 保留思考通道惩罚，Saluki 不带（实测 -18% decode）。
+        assert!(original.join(" ").contains("--thinking-presence-penalty 1.0"));
+        assert!(!switched
+            .iter()
+            .any(|arg| arg == "--thinking-presence-penalty"));
+        // 模型 id 与推理力度也按模型对齐启动器：Saluki 用 start-saluki-best.bat 的
+        // underdog-saluki-27b 且不传 --default-reasoning-effort（交回引擎默认）。
+        let model_id_at = original.iter().position(|arg| arg == "--model-id").unwrap();
         assert_eq!(
-            original
-                .iter()
-                .filter(|arg| arg.as_str() == "--vision-residency")
-                .count(),
-            1
+            original.get(model_id_at + 1).map(String::as_str),
+            Some("qwen3.8-27b")
         );
+        let model_id_at = switched.iter().position(|arg| arg == "--model-id").unwrap();
         assert_eq!(
-            switched
-                .iter()
-                .filter(|arg| arg.as_str() == "--vision-residency")
-                .count(),
-            1
+            switched.get(model_id_at + 1).map(String::as_str),
+            Some("underdog-saluki-27b")
         );
-        assert!(original.join(" ").contains("--vision-residency resident"));
-        assert!(switched.join(" ").contains("--vision-residency resident"));
-        let mut common = switched.clone();
-        let spec = common.iter().position(|arg| arg == "--spec").unwrap();
-        common[spec + 1] = "dflash2".to_string();
-        assert_eq!(common, original);
-        for args in [original, switched] {
+        assert!(original.join(" ").contains("--default-reasoning-effort high"));
+        assert!(!switched.iter().any(|arg| arg == "--default-reasoning-effort"));
+        // 除模型能力参数外，两边 argv 必须逐项相同。
+        fn normalize(args: &[String], spec: &str, residency: &str, ctx: &str) -> Vec<String> {
+            let mut out = Vec::with_capacity(args.len());
+            let mut index = 0;
+            while index < args.len() {
+                let arg = args[index].as_str();
+                match arg {
+                    "--spec" => { out.push(arg.into()); out.push(spec.into()); index += 2; }
+                    "--vision-residency" => { out.push(arg.into()); out.push(residency.into()); index += 2; }
+                    "--max-context" => { out.push(arg.into()); out.push(ctx.into()); index += 2; }
+                    "--model-id" => { out.push(arg.into()); out.push("MODEL-ID".into()); index += 2; }
+                    "--lm-head-draft" => { index += 1; }
+                    "--thinking-presence-penalty" => { index += 2; }
+                    "--default-reasoning-effort" => { index += 2; }
+                    _ => { out.push(arg.into()); index += 1; }
+                }
+            }
+            out
+        }
+        assert_eq!(
+            normalize(&original, "dflash2", "overlay", "CTX"),
+            normalize(&switched, "dflash2", "overlay", "CTX")
+        );
+        for args in [&original, &switched] {
             let joined = args.join(" ");
             for expected in [
-                "--max-context 65536",
                 "--draft-tokens 2",
                 "--default-max-tokens 12000",
                 "--default-thinking-budget 4096",
@@ -1820,20 +1941,35 @@ mod tests {
                 assert!(joined.contains(expected), "缺少已保存参数 {expected}");
             }
         }
+        // 开环后设备池与上下文解耦，两个模型都不再收口上下文。
+        assert!(original.join(" ").contains("--max-context 65536"));
+        assert!(switched.join(" ").contains("--max-context 65536"));
     }
 
     #[test]
     fn kv_environment_inherits_nonempty_values_without_mutating_host() {
-        let defaults = engine_kv_environment(|_| None);
-        assert_eq!(defaults.len(), 5);
-        assert_eq!(defaults[0].1, OsString::from("16384"));
+        // fast-llm 2026-10-20 的窗口口径是 40,960；上下文更小时按 context-8192 收口。
+        let defaults = engine_kv_environment(262144, |_| None);
+        assert_eq!(defaults.len(), 7);
+        assert_eq!(defaults[0].1, OsString::from("40960"));
         assert_eq!(defaults[1].1, OsString::from("8192"));
-        assert!(defaults[2..].iter().all(|(_, value)| value == "1"));
-        let inherited = engine_kv_environment(|key| match key {
+        assert!(defaults[2..5].iter().all(|(_, value)| value == "1"));
+        // 2026-10-24 对齐：崩溃干净退出 + 工具 schema 常驻 sink。
+        assert_eq!(defaults[5].0, "NINFER_EXIT_ON_WORKER_CRASH");
+        assert_eq!(defaults[5].1, OsString::from("1"));
+        assert_eq!(defaults[6].0, "NINFER_TERNARY_KVMEM_SCORE_SINK");
+        assert_eq!(defaults[6].1, OsString::from("16384"));
+        // 242K 以上也只取窗口上限 40,960。
+        assert_eq!(engine_kv_environment(49152, |_| None)[0].1, OsString::from("40960"));
+        // 更小的上下文按 context-8192 向下取整到 64，守住 window <= max-context。
+        assert_eq!(engine_kv_environment(32768, |_| None)[0].1, OsString::from("24576"));
+        assert_eq!(engine_kv_environment(8192, |_| None)[0].1, OsString::from("8192"));
+        let inherited = engine_kv_environment(262144, |key| match key {
             "NINFER_KV_WINDOW" => Some(OsString::from("4096")),
             "NINFER_KV_RETRIEVE" => Some(OsString::new()),
             "NINFER_KV_RING" => Some(OsString::from("0")),
             "NINFER_HOST_PAGEABLE" => Some(OsString::from(" ")),
+            "NINFER_TERNARY_KVMEM_SCORE_SINK" => Some(OsString::from("8192")),
             _ => None,
         });
         assert_eq!(inherited[0].1, OsString::from("4096"));
@@ -1841,6 +1977,8 @@ mod tests {
         assert_eq!(inherited[2].1, OsString::from("0"));
         assert_eq!(inherited[3].1, OsString::from(" "));
         assert_eq!(inherited[4].1, OsString::from("1"));
+        assert_eq!(inherited[5].1, OsString::from("1"));
+        assert_eq!(inherited[6].1, OsString::from("8192"));
     }
 
     #[test]

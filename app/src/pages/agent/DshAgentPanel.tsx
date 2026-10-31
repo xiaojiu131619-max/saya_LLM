@@ -498,7 +498,7 @@ export default function DshAgentPanel() {
                 <button
                   onClick={handleStop}
                   disabled={stopping}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                 >
                   {stopping ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
                   关闭 dsh
@@ -512,7 +512,7 @@ export default function DshAgentPanel() {
                       ? '请先安装 dsh'
                       : '开启 dsh 旁路进程（Web UI 就绪后可打开界面）'
                   }
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                 >
                   {starting ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                   开启 dsh
@@ -620,7 +620,7 @@ export default function DshAgentPanel() {
                   onClick={handleBind}
                   disabled={binding || starting || stopping || installing || !modelApiReady || !isDesktopRuntime()}
                   title={!modelApiReady ? '请先在「模型」页加载模型' : '把当前加载的模型接入 dsh'}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
                 >
                   {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
                   接入当前加载的模型

@@ -242,11 +242,11 @@ export default function LlamaLogsPage() {
               {!pinnedBottom && rendered.length > 0 && (
                 <motion.button
                   type="button"
-                  initial={{ opacity: 0, y: 8 }}
+                  initial={false}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 8 }}
                   onClick={jumpToBottom}
-                  className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-[var(--surface-raised)]/95 px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] shadow-lg backdrop-blur transition-colors hover:bg-[var(--surface-hover)]"
+                  className="anim-enter-rise absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-[var(--surface-raised)]/95 px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] shadow-lg backdrop-blur transition-colors hover:bg-[var(--surface-hover)]"
                 >
                   <ArrowDown className="h-3.5 w-3.5" />
                   回到最新

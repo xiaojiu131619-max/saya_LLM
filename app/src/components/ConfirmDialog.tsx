@@ -96,20 +96,20 @@ function ConfirmDialogContent({
   return (
     <motion.div
       ref={overlayRef}
-      initial={{ opacity: 0 }}
+      initial={false}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-white/70 dark:bg-black/75 p-4"
+      className="anim-enter-fade fixed inset-0 z-[120] flex items-center justify-center bg-white/70 dark:bg-black/75 p-4"
       onClick={(event) => {
         if (event.target === overlayRef.current && !busy) onCancel();
       }}
     >
       <motion.div
-        initial={{ scale: 0.92, opacity: 0 }}
+        initial={false}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.92, opacity: 0 }}
         transition={{ type: 'spring', stiffness: 320, damping: 26 }}
-        className={`glass-panel-strong w-full max-w-md overflow-hidden border ${styles.border}`}
+        className={`anim-enter-dialog glass-panel-strong w-full max-w-md overflow-hidden border ${styles.border}`}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"

@@ -199,6 +199,12 @@ pub fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), 
     }
     let json = serde_json::to_string_pretty(&sanitized_config).map_err(|e| e.to_string())?;
     std::fs::write(get_config_path(), json).map_err(|e| e.to_string())?;
+    // 三个目录可能随本次保存改动，全局镜像必须跟上，否则内核解析仍读旧位置。
+    crate::services::storage_paths::apply_config(
+        sanitized_config.engine_dir.clone(),
+        sanitized_config.log_dir.clone(),
+        sanitized_config.archive_dir.clone(),
+    );
     let mut guard = state.config.lock().map_err(|e| e.to_string())?;
     *guard = sanitized_config;
     Ok(())
@@ -290,6 +296,12 @@ pub fn init_config() -> (AppState, Option<String>) {
     let (config, pending_key) = load_config_from_disk();
     // 把已保存的自编译核心路径同步到全局镜像，供启动早期的内核解析使用。
     auto_updater::set_kernel_override(config.kernel_override_path.clone());
+    // 引擎 / 日志 / 归档三个目录同样要在任何引擎与内核解析之前就位。
+    crate::services::storage_paths::apply_config(
+        config.engine_dir.clone(),
+        config.log_dir.clone(),
+        config.archive_dir.clone(),
+    );
     eprintln!("[perf] load_config took {:?}", t0.elapsed());
     (AppState::new(config), pending_key)
 }
@@ -429,6 +441,8 @@ pub fn reset_app_config(state: State<'_, AppState>) -> Result<(), String> {
     drop(guard);
     // 出厂重置后自编译核心路径同步清空，回退内置核心。
     auto_updater::set_kernel_override(None);
+    // 三个可配置目录也回到默认位置。
+    crate::services::storage_paths::apply_config(None, None, None);
 
     Ok(())
 }

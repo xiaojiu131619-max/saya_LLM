@@ -47,17 +47,12 @@ pub enum SortMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoTuneConfig {
-    pub executable_path: String,
-    pub model_path: String,
-    pub port: u16,
-    pub total_layers: u32,
-    pub expert_count: u32,
+    pub run_id: String,
+    pub model_id: String,
+    pub baseline: crate::models::server_config::ServerConfig,
+    /// MoE CPU 专家卸载按重复层数计，不是每层专家数。
+    pub block_count: u32,
     pub max_ctx: u64,
-    pub batch_size: u32,
-    pub flash_attn: bool,
-    pub kv_offload: bool,
-    pub mmap: bool,
-    pub mlock: bool,
     pub is_moe: bool,
     pub sort_mode: SortMode,
 }
@@ -75,10 +70,23 @@ pub struct TuneRecord {
     pub ts: f64,
     pub first_token_ms: f64,
     pub fits: bool,
+    pub cache_type_k: String,
+    pub cache_type_v: String,
+    pub cache_type_k_enabled: bool,
+    pub cache_type_v_enabled: bool,
+    pub samples: u32,
+    pub ts_stddev: f64,
+    pub ttft_stddev_ms: f64,
+    pub cold_ttft_ms: f64,
+    pub warmup_ttft_ms: f64,
+    pub measurement_phase: String,
+    pub vram_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoTuneProgress {
+    pub run_id: String,
+    pub model_id: String,
     pub phase: String,
     pub message: String,
     pub record: Option<TuneRecord>,
@@ -86,6 +94,38 @@ pub struct AutoTuneProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoTuneResult {
+    pub run_id: String,
+    pub model_id: String,
     pub best: TuneRecord,
     pub records: Vec<TuneRecord>,
+    pub failures: Vec<TuneFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    Oom,
+    Unsupported,
+    Fatal,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuneFailure {
+    pub kind: FailureKind,
+    pub message: String,
+    /// 原始结构化 ServerError，保留 error_type/title/details/suggestions。
+    pub server_error: Option<serde_json::Value>,
+    pub candidate: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTuneStatus {
+    pub run_id: String,
+    pub model_id: String,
+    pub status: String,
+    pub result: Option<AutoTuneResult>,
+    pub error: Option<String>,
+    pub records: Vec<TuneRecord>,
+    pub failures: Vec<TuneFailure>,
 }

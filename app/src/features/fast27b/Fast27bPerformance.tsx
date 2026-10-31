@@ -11,7 +11,7 @@ const tooltipStyle = {
   borderRadius: 'var(--radius-lg)', color: 'var(--text-primary)', fontSize: 'var(--font-caption)',
 };
 const axisStyle = { fill: 'var(--text-tertiary)', fontSize: 'var(--font-eyebrow)', fontFamily: 'var(--font-mono)' };
-const modelLabels = { heretic: 'Heretic 27B', swift: 'Swift 27B' };
+const modelLabels = { heretic: 'Heretic 27B', saluki: 'Saluki 27B' };
 
 function timeLabel(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });

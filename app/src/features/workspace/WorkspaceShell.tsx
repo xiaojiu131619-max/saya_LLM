@@ -3,8 +3,15 @@ import { isTauri } from '@tauri-apps/api/core';
 import { Minus, Square, X } from 'lucide-react';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { useApp } from '@/context/AppContext';
+import BrandLogo from '@/components/BrandLogo';
 import type { ViewType } from '@/types';
 import EnvCheckDialog from './EnvCheckDialog';
+import { useAutoChatEngine } from '@/hooks/useAutoChatEngine';
+
+/** 应用显示名（只改界面标题，仓库与 productName 不动）。 */
+export const APP_DISPLAY_NAME = '拾壹';
+/** 标题栏字标的首字（窗口小图标与侧边栏占位共用）。 */
+export const APP_BRAND_MARK = '拾';
 
 // 工作区按需懒加载：首屏只加载默认的模型工作区，
 // 聊天页（含 highlight.js 等）与设置页在切换时再下载，缩短首屏可交互时间。
@@ -16,14 +23,16 @@ type WorkspaceMode = 'model' | 'chat' | 'settings';
 
 function workspaceMode(view: ViewType): WorkspaceMode {
   if (view === 'chat') return 'chat';
-  // apiStatus / agent / embedding / fast27b 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
-  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs' || view === 'agent' || view === 'embedding' || view === 'fast27b') return 'model';
+  // apiStatus / agent / embedding / fast27b / strata 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
+  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs' || view === 'agent' || view === 'embedding' || view === 'fast27b' || view === 'strata') return 'model';
   return 'settings';
 }
 
 export default function WorkspaceShell() {
   const { state } = useApp();
   const activeMode = workspaceMode(state.currentView);
+  // 对话后端全局自动选择：放在外壳层，切页面时不会重置，也不会因对话页卸载而停摆。
+  useAutoChatEngine();
 
   const renderWorkspace = () => {
     switch (activeMode) {
@@ -76,13 +85,11 @@ function WindowTitleBar() {
     <header
       data-tauri-drag-region
       onDoubleClick={appWindow ? handleToggleMaximize : undefined}
-      className="titlebar flex h-10 flex-shrink-0 items-center pl-4 text-[var(--text-primary)] dark:text-[var(--text-primary)]"
+      className="titlebar flex h-10 flex-shrink-0 items-center pl-3 text-[var(--text-primary)] dark:text-[var(--text-primary)]"
     >
       <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2">
-        <div className="grid h-5 w-5 flex-shrink-0 place-items-center rounded-md bg-[var(--border)] text-[10px] font-semibold text-[var(--accent)] dark:bg-white/[0.07] dark:text-[var(--accent)]">
-          晓
-        </div>
-        <div className="min-w-0 truncate text-xs font-semibold">Agent LLM</div>
+        {/* 品牌标识放在标题栏：拾壹字标 + 名称，替代原来的「晓 / Agent LLM」。 */}
+        <BrandLogo size={18} variant="lockup" />
       </div>
       {appWindow && <nav className="flex h-full flex-shrink-0 items-stretch">
         <WindowControlButton label="最小化" onClick={handleMinimize}>

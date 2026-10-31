@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::models::ping_result::PingResult;
 use crate::models::server_config::ServerConfig;
+use crate::services::backend_gate::{self, Backend};
 use crate::services::embedding_manager;
 use crate::services::process_manager;
 
@@ -24,32 +25,75 @@ fn normalize_server_access(mut config: ServerConfig) -> ServerConfig {
     config
 }
 
+type NormalLoad = (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>, std::sync::Arc<std::sync::Mutex<Option<crate::services::benchmark::LifecycleGuard>>>);
+static NORMAL_LOAD: once_cell::sync::Lazy<std::sync::Mutex<Option<NormalLoad>>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+fn join_normal_load((cancel, worker, _): NormalLoad) {
+    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = worker.join();
+}
+
 #[tauri::command]
 pub fn start_server(app: AppHandle, config: ServerConfig) -> Result<(), String> {
+    let mut loading = NORMAL_LOAD.lock().map_err(|_| "加载任务锁不可用")?;
+    // 先取消并等待上一次普通加载：它自己握着 NORMAL_LOAD 里的 LifecycleGuard，
+    // 不先收掉就直接 acquire_lifecycle 只会永远撞上「正在加载」。
+    if let Some(previous) = loading.take() { join_normal_load(previous); }
+    let guard = crate::services::benchmark::acquire_lifecycle()?;
+    // 互斥闸门放在生命周期到手之后：拿不到所有权时不能先把别的后端停掉。
+    let stopped = backend_gate::ensure_exclusive(Backend::Main, &app)?;
+    if !stopped.is_empty() {
+        app.emit(
+            "backend:exclusive",
+            serde_json::json!({ "target": "主模型", "stopped": stopped }),
+        )
+        .ok();
+    }
     let config = normalize_server_access(config);
+    let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(Some(guard)));
+    let ready_lifecycle = lifecycle.clone();
+    let error_lifecycle = lifecycle.clone();
     let app2 = app.clone();
     let app3 = app.clone();
-    process_manager::start_server(
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = process_manager::start_server_internal(
         &config,
         move |progress| {
             app2.emit("server:progress", progress).ok();
         },
         move || {
+            if let Ok(mut guard) = ready_lifecycle.lock() { guard.take(); }
             app3.emit("server:ready", serde_json::json!({"message": "服务就绪"}))
                 .ok();
         },
         move |error| {
+            if let Ok(mut guard) = error_lifecycle.lock() { guard.take(); }
             app.emit("server:error", error).ok();
         },
-    )
-    .map_err(|e| e.to_string())
+        Some(cancel.clone()),
+    ).map_err(|e| e.to_string())?;
+    *loading = Some((cancel, worker, lifecycle));
+    Ok(())
+}
+
+/// 命令层停止主模型：取消加载、回收生命周期、停进程并广播 `server:stopped`。
+///
+/// `backend_gate` 也走这里，保证「被别的后端顶掉」与用户手动停止是同一条路径，
+/// 前端不会停留在 `serverRunning: true`。
+pub(crate) fn stop_server_with_app(app: &AppHandle) -> Result<(), String> {
+    let mut loading = NORMAL_LOAD.lock().map_err(|_| "加载任务锁不可用")?;
+    // 普通加载可以停止，但不能绕过调参/更新所有权。
+    let load_guard = loading.as_ref().and_then(|(_, _, shared)| shared.lock().ok().and_then(|mut g| g.take()));
+    let _guard = match load_guard { Some(guard) => guard, None => crate::services::benchmark::acquire_lifecycle()? };
+    if let Some(load) = loading.take() { join_normal_load(load); }
+    process_manager::stop_server().map_err(|e| e.to_string())?;
+    app.emit("server:stopped", serde_json::json!({})).ok();
+    Ok(())
 }
 
 #[tauri::command]
 pub fn stop_server(app: AppHandle) -> Result<(), String> {
-    process_manager::stop_server().map_err(|e| e.to_string())?;
-    app.emit("server:stopped", serde_json::json!({})).ok();
-    Ok(())
+    stop_server_with_app(&app)
 }
 
 #[tauri::command]
@@ -161,6 +205,7 @@ fn resolve_embedding_exe(executable_path: &str) -> Result<String, String> {
 /// 因此对话/VLM 模型与向量模型可以同时运行。
 #[tauri::command]
 pub fn start_embedding_server(app: AppHandle, config: ServerConfig) -> Result<(), String> {
+    let _guard = crate::services::benchmark::acquire_lifecycle()?;
     let config = normalize_server_access(config);
     let exe = match resolve_embedding_exe(&config.executable_path) {
         Ok(exe) => exe,
@@ -227,6 +272,20 @@ pub fn clear_embedding_logs() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_loading_waits_for_worker_exit_without_reacquiring_lifecycle() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = exited.clone();
+        let worker = std::thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) { std::thread::yield_now(); }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        join_normal_load((cancel, worker, std::sync::Arc::new(std::sync::Mutex::new(None))));
+        assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn loopback_server_never_requires_api_key() {
