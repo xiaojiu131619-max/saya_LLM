@@ -448,6 +448,11 @@ pub fn install_online(
 ) -> Result<PiAgentInstallResult, String> {
     let version = sanitize_version(version)?;
     let registry = normalize_registry(registry)?;
+    // Windows 下 rename 正在使用的 node_modules 会共享冲突；Pi 在跑时直接拒绝，
+    // 给出明确动作指引，而不是报一句晦涩的备份失败。
+    if pi_agent::is_running() {
+        return Err("Pi 正在运行：请先停止 Pi（或等当前任务收尾）再安装 / 升级。".to_string());
+    }
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err("已有 Pi 在线安装在进行中".to_string());
     }
@@ -634,6 +639,9 @@ pub fn rollback() -> Result<PiAgentInstallResult, String> {
     let backup = rollback_point();
     if !backup.exists() {
         return Err("没有可回滚的上一版本。".to_string());
+    }
+    if pi_agent::is_running() {
+        return Err("Pi 正在运行：请先停止 Pi 再回滚。".to_string());
     }
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err("已有 Pi 在线安装在进行中".to_string());

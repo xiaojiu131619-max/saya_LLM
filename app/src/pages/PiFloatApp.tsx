@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Send, Square, X } from 'lucide-react';
-import ConfirmDialog from '@/components/ConfirmDialog';
+import { Loader2, Send, ShieldAlert, Square, X } from 'lucide-react';
 import {
   piAgentCancel,
   piAgentGetStatus,
-  piAgentPermissionAnswer,
   piAgentRun,
   piAgentSelectSkills,
   piTextDelta,
@@ -12,7 +10,6 @@ import {
   piToolStep,
   subscribePiAgent,
   type PiAgentStatus,
-  type PiPermissionRequest,
   type PiToolStep,
 } from '@/lib/ipc/pi';
 import { ensurePiForSession, hydratePiConfig, loadPiConfig } from '@/lib/piConfig';
@@ -25,6 +22,10 @@ import { isDesktopRuntime } from '@/lib/desktopRuntime';
  * 有意不写主界面的会话存储：浮窗是对当前 Pi 会话的快聊/速查，
  * 正式对话仍以 Chat 的 Pi 工作区为准。为避免打断正在跑的任务，
  * Pi 被其他会话占用时浮窗不发送，提示等任务收尾。
+ *
+ * 权限确认不在浮窗弹：主窗的全局 Pi runtime 也订阅 `pi:permission`，
+ * 两边都弹会出现「一边确认后另一边挂着失效弹窗」的竞态；浮窗只提示
+ * 去主界面确认。
  */
 
 const FLOAT_SESSION = 'pi-float';
@@ -42,7 +43,7 @@ export default function PiFloatApp() {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [permission, setPermission] = useState<PiPermissionRequest | null>(null);
+  const [permissionWaiting, setPermissionWaiting] = useState(false);
   const [thinkingChars, setThinkingChars] = useState(0);
   const runIdRef = useRef('');
   const seqRef = useRef(1);
@@ -113,6 +114,7 @@ export default function PiFloatApp() {
         const type = String(event.type ?? '');
         if (type === 'agent_settled' || type === 'agent_end' || type === 'error') {
           setBusy(false);
+          setPermissionWaiting(false);
           runIdRef.current = '';
           if (type === 'error') {
             setError(`Pi 错误：${String(event.message ?? event.error ?? '未知错误')}`);
@@ -124,16 +126,19 @@ export default function PiFloatApp() {
       onStopped: () => {
         setStatus((prev) => (prev ? { ...prev, running: false, pid: null } : prev));
         setBusy(false);
+        setPermissionWaiting(false);
       },
       onExit: () => {
         setStatus((prev) => (prev ? { ...prev, running: false, pid: null } : prev));
         setBusy(false);
+        setPermissionWaiting(false);
       },
       onError: ({ message }) => {
         setError(message ?? 'Pi 运行出错');
         setBusy(false);
+        setPermissionWaiting(false);
       },
-      onPermission: (request) => setPermission(request),
+      onPermission: () => setPermissionWaiting(true),
     });
   }, []);
 
@@ -194,7 +199,7 @@ export default function PiFloatApp() {
 
   if (!isDesktopRuntime()) {
     return (
-      <div className="flex h-screen items-center justify-center px-6 text-center text-[12px] text-[var(--text-tertiary)]">
+      <div className="flex h-screen items-center justify-center px-6 text-center text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
         Pi 浮窗只在桌面版可用。
       </div>
     );
@@ -211,8 +216,8 @@ export default function PiFloatApp() {
           }`}
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[12px] font-medium">Pi 浮窗</p>
-          <p className="truncate text-[10px] text-[var(--text-tertiary)]">
+          <p className="truncate text-[length:var(--font-caption)] font-medium">Pi 浮窗</p>
+          <p className="truncate text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
             {running ? `运行中 · ${status?.model || '—'}` : '未启动 · 发送时自动拉起'}
           </p>
         </div>
@@ -228,7 +233,7 @@ export default function PiFloatApp() {
 
       <div ref={transcriptRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-2.5">
         {entries.length === 0 ? (
-          <p className="text-[11px] leading-relaxed text-[var(--text-tertiary)]">
+          <p className="text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
             对当前 Pi 会话的快聊入口：发送即自动启动/复用浮窗会话，文件与命令仍走宿主代理与权限档。
             对话不写入主界面历史；正式对话请用 Chat 的 Pi 工作区。
           </p>
@@ -236,7 +241,7 @@ export default function PiFloatApp() {
         {entries.map((entry) => (
           <div key={entry.id}>
             {entry.role === 'user' ? (
-              <p className="ml-auto w-fit max-w-[85%] rounded-lg bg-[var(--surface-muted)] px-2.5 py-1.5 text-[12px]">
+              <p className="ml-auto w-fit max-w-[85%] rounded-lg bg-[var(--surface-muted)] px-2.5 py-1.5 text-[length:var(--font-caption)]">
                 {entry.text}
               </p>
             ) : (
@@ -246,7 +251,7 @@ export default function PiFloatApp() {
                     {entry.steps.map((step) => (
                       <p
                         key={step.id}
-                        className={`text-[10px] ${
+                        className={`text-[length:var(--font-micro)] ${
                           step.state === 'error'
                             ? 'text-[var(--state-danger)]'
                             : step.state === 'running'
@@ -259,7 +264,7 @@ export default function PiFloatApp() {
                     ))}
                   </div>
                 ) : null}
-                <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed">
+                <p className="whitespace-pre-wrap break-words text-[length:var(--font-caption)] leading-relaxed">
                   {entry.text || (busy ? '…' : '')}
                 </p>
               </div>
@@ -267,13 +272,20 @@ export default function PiFloatApp() {
           </div>
         ))}
         {busy && thinkingChars > 0 ? (
-          <p className="text-[10px] text-[var(--text-tertiary)]">思考中（{thinkingChars} 字）…</p>
+          <p className="text-[length:var(--font-micro)] text-[var(--text-tertiary)]">思考中（{thinkingChars} 字）…</p>
         ) : null}
       </div>
 
       {error ? (
-        <p className="border-t border-[var(--border)] px-3 py-1.5 text-[10px] leading-relaxed text-[var(--state-danger)]">
+        <p className="border-t border-[var(--border)] px-3 py-1.5 text-[length:var(--font-micro)] leading-relaxed text-[var(--state-danger)]">
           {error}
+        </p>
+      ) : null}
+
+      {permissionWaiting ? (
+        <p className="flex items-center gap-1.5 border-t border-[var(--border)] px-3 py-1.5 text-[length:var(--font-micro)] leading-relaxed text-[var(--state-warning)]">
+          <ShieldAlert className="h-3.5 w-3.5 flex-shrink-0" />
+          Pi 在请求工具权限，请到主界面确认弹窗；确认后这里会继续。
         </p>
       ) : null}
 
@@ -289,7 +301,7 @@ export default function PiFloatApp() {
           }}
           rows={2}
           placeholder={running ? '发消息给当前 Pi 会话…' : '输入任务（Enter 发送）'}
-          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
+          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[length:var(--font-caption)] outline-none focus:border-[var(--accent)]"
         />
         {busy ? (
           <button
@@ -312,26 +324,6 @@ export default function PiFloatApp() {
           </button>
         )}
       </div>
-
-      <ConfirmDialog
-        open={Boolean(permission)}
-        title="Pi 请求权限"
-        description={permission ? `${permission.title || '工具调用'}\n${permission.detail}` : ''}
-        bullets={permission ? [`当前权限档：${permission.mode}`] : undefined}
-        confirmLabel="允许"
-        cancelLabel="拒绝"
-        tone="warning"
-        onConfirm={() => {
-          const request = permission;
-          setPermission(null);
-          if (request) void piAgentPermissionAnswer(request.id, true);
-        }}
-        onCancel={() => {
-          const request = permission;
-          setPermission(null);
-          if (request) void piAgentPermissionAnswer(request.id, false);
-        }}
-      />
     </div>
   );
 }

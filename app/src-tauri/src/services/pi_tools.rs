@@ -395,6 +395,12 @@ fn handle_request(state: &std::sync::Arc<PiToolState>, mut request: tiny_http::R
                 )
                 .with_header(json_header()),
             );
+            // 与主路径一致：非权限类失败也进长期记忆的工具错误区。
+            if !result.ok && !result.denied {
+                if let Some(error) = &result.error {
+                    crate::services::pi_memory::append_tool_error(&tool, &target, error);
+                }
+            }
         });
         return;
     }

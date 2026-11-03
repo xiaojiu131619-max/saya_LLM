@@ -55,11 +55,11 @@ const PERMISSION_OPTIONS: { value: PiPermissionMode; label: string; hint: string
 ];
 
 const inputClass =
-  'w-full rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2.5 py-1.5 text-[12px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)]';
+  'w-full rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2.5 py-1.5 text-[length:var(--font-caption)] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)]';
 const buttonClass =
-  'inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50';
 const primaryButtonClass =
-  'inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50';
 
 function Section({
   icon: Icon,
@@ -80,9 +80,9 @@ function Section({
         <div className="flex min-w-0 items-start gap-2.5">
           <Icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)]" />
           <div className="min-w-0">
-            <h3 className="text-[13px] font-medium text-[var(--text-primary)]">{title}</h3>
+            <h3 className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">{title}</h3>
             {description ? (
-              <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--text-tertiary)]">
+              <p className="mt-0.5 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
                 {description}
               </p>
             ) : null}
@@ -98,9 +98,9 @@ function Section({
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-medium text-[var(--text-secondary)]">{label}</span>
+      <span className="mb-1 block text-[length:var(--font-eyebrow)] font-medium text-[var(--text-secondary)]">{label}</span>
       {children}
-      {hint ? <span className="mt-1 block text-[11px] text-[var(--text-tertiary)]">{hint}</span> : null}
+      {hint ? <span className="mt-1 block text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{hint}</span> : null}
     </label>
   );
 }
@@ -381,7 +381,7 @@ export default function PiPanel() {
   if (!desktop) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center">
-        <p className="text-[12px] text-[var(--text-tertiary)]">
+        <p className="text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
           Pi 需要本机 Node 子进程，仅在桌面版可用。
         </p>
       </div>
@@ -415,23 +415,23 @@ export default function PiPanel() {
                     running ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'
                   }`}
                 />
-                <h2 className="text-[13px] font-medium text-[var(--text-primary)]">
+                <h2 className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">
                   {running ? 'Pi 运行中' : 'Pi 未启动'}
                 </h2>
                 {status?.pid ? (
-                  <span className="mono-font text-[10px] text-[var(--text-tertiary)]">
+                  <span className="mono-font text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
                     PID {status.pid}
                   </span>
                 ) : null}
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--text-secondary)]">
+              <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                 <span className="truncate">模型 {status?.model || config.model || '—'}</span>
                 <span className="truncate">会话 {status?.session_id || '—'}</span>
                 <span className="truncate">
                   权限 {PERMISSION_OPTIONS.find((option) => option.value === currentPermissionMode)?.label ?? '—'}
                 </span>
               </div>
-              <p className="mt-1.5 truncate text-[11px] text-[var(--text-tertiary)]" title={status?.work_dir}>
+              <p className="mt-1.5 truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]" title={status?.work_dir}>
                 工作区 {status?.work_dir || '—'}
               </p>
             </div>
@@ -450,12 +450,12 @@ export default function PiPanel() {
             </div>
           </div>
           {message ? (
-            <p className="mt-2 flex items-center gap-1.5 text-[11px] text-[var(--state-success)]">
+            <p className="mt-2 flex items-center gap-1.5 text-[length:var(--font-eyebrow)] text-[var(--state-success)]">
               <CheckCircle2 className="h-3.5 w-3.5" />
               {message}
             </p>
           ) : null}
-          {error ? <p className="mt-2 text-[11px] text-[var(--state-danger)]">{error}</p> : null}
+          {error ? <p className="mt-2 text-[length:var(--font-eyebrow)] text-[var(--state-danger)]">{error}</p> : null}
         </section>
 
         <Section
@@ -516,11 +516,11 @@ export default function PiPanel() {
                 onChange={(event) => update({ sessionDir: event.target.value })}
               />
             </Field>
-            <p className="rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            <p className="rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-secondary)]">
               安装位置：`%APPDATA%\AgentLLM\pi\node_modules`；版本锁：`pi-version.json`。安装后可删除临时实验目录。
             </p>
             <div className="rounded-lg border border-[var(--border)] p-2.5">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-[var(--text-secondary)]">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                 <span className="font-medium text-[var(--text-primary)]">在线安装 / 升级</span>
                 <span>
                   已安装 {versionInfo?.installedVersion ?? '无'}
@@ -530,7 +530,7 @@ export default function PiPanel() {
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <select
-                  className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1.5 text-[11px] text-[var(--text-primary)] outline-none"
+                  className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-primary)] outline-none"
                   value={registryId}
                   onChange={(event) => setRegistryId(event.target.value)}
                   title="npm registry 下载源"
@@ -592,11 +592,11 @@ export default function PiPanel() {
               </div>
               {npmVersions && npmVersions.versions.length > 1 ? (
                 <div className="mt-2 flex flex-wrap items-center gap-1">
-                  <span className="text-[10px] text-[var(--text-tertiary)]">其他版本：</span>
+                  <span className="text-[length:var(--font-micro)] text-[var(--text-tertiary)]">其他版本：</span>
                   {npmVersions.versions.slice(0, 8).map((info) => (
                     <button
                       key={info.version}
-                      className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
+                      className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
                       onClick={() => void handleInstallOnline(info.version)}
                       disabled={busy !== null}
                       title={`安装 v${info.version}`}
@@ -606,7 +606,7 @@ export default function PiPanel() {
                   ))}
                 </div>
               ) : null}
-              <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-tertiary)]">
+              <p className="mt-2 text-[length:var(--font-micro)] leading-relaxed text-[var(--text-tertiary)]">
                 npm 从 registry 下载整棵依赖树（约 114 MB），每个包经 SRI sha512 校验；安装后跑
                 `--version` 冒烟，失败自动恢复上一版本。安装进度见运行日志。
               </p>
@@ -648,7 +648,7 @@ export default function PiPanel() {
               />
             </Field>
           </div>
-          <p className="mt-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          <p className="mt-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-secondary)]">
             模型 ID 留空时，Chat 发送前会读取 /v1/models 自动取第一个模型。
           </p>
         </Section>
@@ -662,7 +662,7 @@ export default function PiPanel() {
                   type="button"
                   title={option.hint}
                   onClick={() => void handlePermissionMode(option.value)}
-                  className={`rounded-lg border px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                  className={`rounded-lg border px-2 py-1.5 text-[length:var(--font-eyebrow)] font-medium transition-colors ${
                     currentPermissionMode === option.value
                       ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--text-on-accent)]'
                       : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'
@@ -702,7 +702,7 @@ export default function PiPanel() {
             <button
               type="button"
               onClick={() => update({ skillRoutingEnabled: !config.skillRoutingEnabled })}
-              className={`w-full rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+              className={`w-full rounded-lg border px-2.5 py-1.5 text-[length:var(--font-caption)] font-medium transition-colors ${
                 config.skillRoutingEnabled
                   ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--text-on-accent)]'
                   : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'
@@ -711,7 +711,7 @@ export default function PiPanel() {
               {config.skillRoutingEnabled ? '已开启' : '已关闭'}
             </button>
           </Field>
-          <p className="mt-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          <p className="mt-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-secondary)]">
             命令执行不是 OS 级沙箱：守门档逐条确认，放行档仍有危险命令黑名单。真正的强隔离需要容器/VM。
           </p>
         </Section>
@@ -736,9 +736,9 @@ export default function PiPanel() {
             </div>
           }
         >
-          <p className="text-[11px] text-[var(--text-tertiary)]">已录制 {logs.length} 行。</p>
+          <p className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">已录制 {logs.length} 行。</p>
           {logsOpen ? (
-            <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--app-bg)] p-2.5 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+            <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--app-bg)] p-2.5 text-[length:var(--font-micro)] leading-relaxed text-[var(--text-secondary)]">
               {logs.length > 0 ? logs.join('\n') : '（暂无日志）'}
             </pre>
           ) : null}

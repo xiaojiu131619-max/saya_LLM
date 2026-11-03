@@ -511,6 +511,11 @@ fn write_host_extension(agent_dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Pi 子进程是否在跑（在线安装 / 回滚的前置检查用）。
+pub fn is_running() -> bool {
+    PI_RUNNING.load(Ordering::SeqCst)
+}
+
 /// 停止并回收 Pi 进程树。
 pub fn stop() {
     PI_GENERATION.fetch_add(1, Ordering::SeqCst);
