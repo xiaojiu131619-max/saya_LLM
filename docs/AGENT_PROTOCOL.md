@@ -1,294 +1,130 @@
-# Agent 协议（阶段 3 契约留档）
+# Agent（Pi）宿主集成协议
 
-> 状态：**契约冻结，本轮不落地代码**。  
-> 现有实现仍是前端 `EventSource` 直连拾一 HTTP API（`lib/ipc/shiyi.ts`）。  
-> 阶段 3 把传输换成宿主（Rust）↔ worker（Python）的 stdio 行协议，本文件是那次替换的依据。
+> 状态：**现行实现**。本文档描述宿主（Rust）与 Pi 内核（Node 子进程）的实际集成契约，
+> 是改动 `pi_*` 系列代码前的必读依据。
+>
+> 历史：2026-11-02 的旧版本是「拾一 Python worker + 自定义 stdio 行协议」的契约冻结稿。
+> 实施时（2026-11-02→04）内核换成 Pi——Pi 更适合本地助手形态（Node 常驻进程、自带
+> `--mode rpc`、扩展机制可宿主代理工具），旧 stdio 设计由 Pi 自带 RPC 取代，旧版可在
+> git 历史查到。旧设计的核心原则保留了下来：**宿主是权限与文件访问的唯一收口**。
 
 ## 1. 角色与边界
 
-- **宿主**：Tauri / Rust 骨架。负责进程、窗口、文件、GPU、沙箱与工具权限的最终收口。
-- **worker**：拾一 Python 内核。负责 loop、判据、工具执行、skills 与会话状态。
-- **宿主不重写内核**；worker 不直接操作系统 UI，也不直接打开浏览器 / 资源管理器。
+- **宿主（Rust）**：进程托管、权限最终否决权、文件与命令的实际执行、产物读取、
+  记忆落盘、窗口与 UI。
+  - `commands/pi_agent.rs` 只做转发；
+  - 进程与 RPC 协议在 `services/pi_agent.rs`；
+  - 工具执行与权限判定在 `services/pi_tools.rs`；
+  - 产物在 `services/pi_artifacts.rs`。
+- **Pi 内核（Node 子进程）**：agent loop、模型调用、会话状态。**自带 read/write/edit/bash
+  全部禁用**，只能通过宿主代理扩展调用工具——内核不直接碰文件系统与命令行。
+- **前端**：`lib/ipc/pi.ts`（invoke 包装 + 事件订阅）；编排逻辑在
+  `features/pi/PiRuntimeContext.tsx`。
 
-stdin / stdout 只承载协议消息；日志、进度、Python traceback 一律走 stderr。宿主把 stderr 收进环形日志，不解析成协议。
+## 2. 进程模型与安装
 
-## 2. 传输格式
+- spawn：`node <cli.js> --mode rpc --model <model> --session-id <id> --session-dir <dir>
+  --extension <host_tools.js> …`。常驻子进程，stdin/stdout 承载 JSONL RPC；日志走
+  stderr，宿主收进环形日志。
+- 启动参数 `PiAgentStartOptions`：`node_path` / `cli_path` / `agent_dir` / `work_dir` /
+  `provider` / `model` / `base_url` / `api_key` / `permission_mode` / `session_id` /
+  `session_dir`。路径由界面填写或自动探测，不写死。
+- 桥地址与 token 由 spawn 时环境变量注入（`PI_HOST_BRIDGE_URL` / `PI_HOST_BRIDGE_TOKEN`），
+  **不得写进日志或落盘**。
+- 安装与版本（`services/pi_install.rs`）：npm registry 版本列表、在线安装到应用数据
+  目录、版本锁、回滚。Pi 不要求目标机装 Python——Node 由 dsh 链路同款方式托管。
 
-- UTF-8 编码，一行一个 JSON 对象，行尾 `\n`。
-- 不允许 pretty-print、多行 JSON、BOM。
-- 每条消息必须有 `type` 字段；未知 `type` 由接收方记录警告并忽略。
-- 协议版本放在 `ready` / `config` 的 `protocol` 字段，当前为 `1`。
-- 所有 id 使用字符串；宿主生成 `run_id`，worker 生成 `turn_id`、`ask_id`。
+## 3. 传输一：RPC JSONL（宿主 ↔ Pi）
 
-## 3. 一轮任务的时序
+- UTF-8，一行一个 JSON 对象；未知 `type` 记录警告并忽略。
+- 宿主 → Pi：`{"type":"prompt", …}`（发起一轮，见 `pi_agent_run`）、
+  `{"type":"abort"}`（中止当前轮，见 `pi_agent_cancel`）。
+- Pi → 宿主：Pi 自己的 RPC 事件词汇（`message_update` / `tool_execution_*` /
+  `agent_settled` 等），宿主**原样**封进 `pi:event`（payload `{ runId, event }`）转发，
+  不在 Rust 层做语义改写。
 
-```text
-宿主                                    worker
-  │  spawn                                │
-  │ ────────────── config ──────────────> │
-  │ <───────────── ready ──────────────── │
-  │ ────────────── run ─────────────────> │
-  │ <───────────── event ──────────────── │  (可多次)
-  │ <───────────── ask ────────────────── │  (可多次，挂起等待回答)
-  │ ────────────── answer ───────────────> │  (必须带 ask_id)
-  │ <───────────── event ──────────────── │
-  │ <───────────── turn_done ───────────── │  (终态)
-  │                                       │
-  │ ────────────── cancel ───────────────> │  (任意时刻)
-  │ <───────────── turn_done ───────────── │  state = aborted / cancelled
-```
+## 4. 传输二：宿主工具桥（权限的唯一收口）
 
-约束：
+Pi 自带工具全部禁用；`services/pi_host_tools.ts` 是随 spawn 注入的扩展，把模型的工具
+调用经**本地回环 HTTP**（`tiny_http`）送回宿主：
 
-- 同一个 `turn_id` 内，`event.seq` 从 1 开始严格递增；宿主按 `(turn_id, seq)` 去重。
-- `ask` 会挂起当前轮次，但不会关闭流；回答后继续产生 `event`。
-- `turn_done` 是轮次终态；发出后该轮不再产生 `event` / `ask`。
-- `cancel` 是幂等的；对已结束的轮次返回一条 `error`（`code = turn_finished`）或直接忽略，二者都可接受，但必须稳定。
+- 工具面：`read_file` / `write_file` / `edit_file` / `list_dir` / `run_command` /
+  `save_memory` / `canvas_*` 等，见扩展里的 `HOST_TOOLS`。
+- `services/pi_tools.rs` 是唯一执行点：
+  - 路径必须落在 Pi 工作区（沙箱）内，canonicalize 校验；
+  - 权限三档 `plan / auto / full`；auto 档需要确认时发 `pi:permission` 事件挂起，
+    前端用 `pi_agent_permission_answer(id, allow)` 回答——**`id` 就是确认请求的凭证，
+    等价于旧设计里的 `ask_id`**，杜绝多轮确认串答；
+  - 命令用 PowerShell 执行，超时整树回收。
+- 浮窗（`pi_float_window`）不弹确认：收到 `pi:permission` 只提示「请到主界面确认」，
+  避免双弹竞态（主窗与浮窗都订阅了 `pi:permission`，一边确认后另一边挂着失效弹窗）。
 
-## 4. 宿主 → worker
+## 5. 事件面（Rust → 前端，Tauri 事件）
 
-### 4.1 `config`
+| 事件 | payload | 语义 |
+|---|---|---|
+| `pi:event` | `{ runId, event }` | Pi RPC 事件原样转发 |
+| `pi:log` | `{ line, stream? }` | 子进程日志 |
+| `pi:ready` | `PiAgentStatus` | 进程就绪 |
+| `pi:exit` | `{ message? }` | 进程退出 |
+| `pi:error` | `{ message? }` | 错误 |
+| `pi:permission` | `PiPermissionRequest`（带 `id`） | 权限确认请求 |
 
-启动后、`ready` 之前发送一次。后续配置变化需要宿主重启 worker（本轮不做热更新）。
+## 6. 产物契约（`services/pi_artifacts.rs`）
 
-```json
-{
-  "type": "config",
-  "protocol": 1,
-  "workspace_dir": "C:\\Users\\me\\AppData\\Roaming\\AgentLLM\\shiyi\\sandbox",
-  "state_dir": "C:\\Users\\me\\AppData\\Roaming\\AgentLLM\\shiyi\\state",
-  "skills_dir": "D:\\Projects\\shyi-ai\\data\\skills",
-  "log_file": "C:\\Users\\me\\AppData\\Roaming\\AgentLLM\\shiyi\\logs\\events.jsonl",
-  "permission": "auto",
-  "ctx": 32768,
-  "engine": {
-    "base_url": "http://127.0.0.1:8080/v1",
-    "model": "local-model",
-    "api_key": null
-  }
-}
-```
+- 产物只允许落在工作区根下，**每个会话一个子目录**；读取时宿主再做 canonicalize
+  子树校验。**不复用**聊天附件的白名单（`read_media_file` 覆盖桌面/文档/下载；
+  产物路径来自模型输出，必须单独收口）。
+- `pi_resolve_artifacts`：递归按文件名解析（深度 ≤ 8、条目 ≤ 20,000），返回
+  `{ name, relPath, size, mtime, exists, duplicate, magic, … }`；重名取最新修改并标记。
+- `pi_read_artifact`：按需读取。上限：图片 16MB、PDF 24MB、文本 2MB。
+- 文件头嗅探：`magic` 是真实格式（png / jpeg / pdf / zip / cfb …），`magicOk` 表示
+  与扩展名是否一致。PNG / JPEG / PDF / ZIP 容器（docx、xlsx、pptx、odt）都会校验；
+  PDF 读取前校验 `%PDF-` 头，不符直接拒绝。
+- 消息里只存相对路径、大小、mtime、标题等元数据；**绝不存 base64**——AppContext
+  持久化时剥离 `artifacts[].src`，防止 localStorage 配额写满后全部数据不再落盘。
+- 产物门（前端 `artifactGate.ts`）只在任务类型白名单内生效，并要求出现明确产出动作
+  或文件名；它按「存在 → 扩展名 → 非空 → 文件头」顺序校验，失败时把本轮标为未交付
+  并给出中文原因。
+- `pdf` 预览走内嵌 iframe；思维导图识别 `.mmd` / `.mermaid` / `.mindmap` /
+  `.mindmap.json`，支持 mermaid `mindmap`、嵌套 JSON 和 Markdown 标题/列表三种来源，
+  解析成树后用纯 CSS 渲染（`MindMapPreview`），不引入 mermaid / 图形库。
 
-- `permission`：`plan` / `auto` / `full`，与现有三档一致。
-- `engine.api_key` 可以为 `null`；宿主只在连接本机引擎时注入。
-- `workspace_dir` 是文件工具的唯一边界。worker 不得把路径写到该目录之外。
+## 7. 记忆与技能
 
-### 4.2 `run`
+- 记忆（`services/pi_memory.rs`）：跨会话全局——会话工作区按会话隔离，所以「记住
+  用户偏好 / 提炼出的事实」不能落在工作区里。
+  - `MEMORY.md`：模型经 `save_memory` 宿主工具主动写入的事实；
+  - `tool-errors.md`：宿主在工具调用失败时自动追加（零模型成本），让下一轮不再踩
+    同一个坑；
+  - 每轮任务前把两者拼成【长期记忆】块注入（有大小上限，超限从最旧行裁起）；
+  - 记忆内容会进入后续轮次的提示词——它由模型写入，宿主只做转义，注入前要意识到
+    这是不可信内容。
+- 技能（`services/pi_skills.rs`）：索引与选配；筛选口径源自拾一时期的实测结论
+  （`shyi-ai/shiyi/kernel/skill_loader.py`）。
 
-```json
-{
-  "type": "run",
-  "run_id": "run-018f...",
-  "text": "帮我把这个目录里的截图整理成一份报告",
-  "perm": "auto"
-}
-```
+## 8. 错误与恢复
 
-- `run_id` 由宿主生成，用于关联日志与取消；worker 可生成自己的 `turn_id`。
-- `perm` 可选；缺省使用 `config.permission`。
-- 同一时间默认只跑一轮；若未来支持并发，宿主必须给每轮独立的 `run_id`，worker 用 `turn_id` 隔离状态。
-
-### 4.3 `answer`
-
-```json
-{
-  "type": "answer",
-  "turn_id": "turn-...",
-  "ask_id": "ask-...",
-  "reply": "允许"
-}
-```
-
-**`ask_id` 是必填字段。** 现有 HTTP 协议只有 `turn_id`，多轮确认时会串答：两条挂起的提问只能靠到达顺序猜，用户回答第二个问题可能被当成第一个问题的答案。worker 必须：
-
-- 每个 `ask` 生成唯一 `ask_id`；
-- 校验 `answer.ask_id` 属于当前挂起的提问；
-- `ask_id` 不匹配或缺失时返回 `error`（`code = invalid_ask_id`），**绝不猜测**。
-
-### 4.4 `cancel`
-
-```json
-{
-  "type": "cancel",
-  "turn_id": "turn-...",
-  "reason": "用户点击停止"
-}
-```
-
-worker 应尽快停止模型调用 / 工具执行，并发出终态 `turn_done`（`state = aborted`）。`reason` 只用于日志。
-
-### 4.5 `ping`
-
-```json
-{ "type": "ping", "id": "ping-42" }
-```
-
-worker 用一条 `event` 回复：
-
-```json
-{
-  "type": "event",
-  "turn_id": null,
-  "seq": 0,
-  "ts": 1730000000.0,
-  "point": "pong",
-  "id": "ping-42"
-}
-```
-
-宿主用它做存活探测；`pong` 不进入对话步骤流。
-
-## 5. worker → 宿主
-
-### 5.1 `ready`
-
-```json
-{
-  "type": "ready",
-  "protocol": 1,
-  "worker_version": "0.4.0",
-  "skills_count": 238,
-  "sandbox_dir": "C:\\Users\\me\\AppData\\Roaming\\AgentLLM\\shiyi\\sandbox"
-}
-```
-
-`ready` 之后宿主机才允许发 `run`。如果 worker 需要引擎但引擎未就绪，仍然发 `ready`，并在 `engine_ok` / `message` 里说明；不要把「进程起了但引擎不可达」当成启动失败。
-
-### 5.2 `event`
-
-```json
-{
-  "type": "event",
-  "turn_id": "turn-...",
-  "seq": 7,
-  "ts": 1730000000.0,
-  "point": "after_tool_result",
-  "tool": "write_file",
-  "decision": "已写入 report.md",
-  "ok": true
-}
-```
-
-- 字段与现有 SSE 事件记录保持同构，宿主直接把 `point` 翻译成步骤文案。
-- `seq` 必须在单个 `turn_id` 内严格递增；心跳事件也占用序号。
-- `ts` 为 Unix 秒（浮点）。
-
-### 5.3 `ask`
-
-```json
-{
-  "type": "ask",
-  "ask_id": "ask-...",
-  "turn_id": "turn-...",
-  "kind": "permission",
-  "prompt": "是否允许覆盖已有的 report.md？",
-  "options": ["允许", "拒绝"]
-}
-```
-
-- `kind`：`permission` / `question`。
-- `ask_id` 由 worker 生成，必须全局唯一（至少在同一 worker 生命周期内唯一）。
-- 宿主在气泡里显示确认按钮，用户回答时原样回传 `ask_id`。
-- 允许多个 `ask` 先后挂起，但同一时刻默认只有一个待回答的 `ask`；若未来支持并发，宿主用 `ask_id` 区分。
-
-### 5.4 `turn_done`
-
-```json
-{
-  "type": "turn_done",
-  "turn_id": "turn-...",
-  "state": "done",
-  "reply": "报告已经生成，共 3 个文件。",
-  "steps": 12,
-  "artifacts": [
-    "report.md",
-    { "name": "chart.png", "kind": "image", "title": "月度趋势" },
-    { "name": "https://example.com/source", "kind": "link", "title": "数据来源" }
-  ]
-}
-```
-
-- `state`：`done` / `aborted` / `error` / `waiting_user`。
-- `waiting_user` 表示挂起等待 `answer`，**不是终态**；回答后继续产生 `event`，最终再发一条真正的终态 `turn_done`。
-- `reply` 是本轮最终答复正文；宿主写进气泡，不能只显示「完成 · N 步」。
-- `artifacts` 的兼容契约见第 6 节。
-
-### 5.5 `error`
-
-```json
-{
-  "type": "error",
-  "turn_id": "turn-...",
-  "code": "engine_unreachable",
-  "message": "引擎端点不可达：http://127.0.0.1:8080/v1",
-  "fatal": false
-}
-```
-
-- `fatal = true` 表示 worker 无法继续服务，宿主应回收进程。
-- 非致命错误仍应尽量发 `turn_done`（`state = error`），避免界面停在「输出中」。
-
-## 6. `artifacts` 契约
-
-宿主接收两代载荷：
-
-```json
-["report.md", "chart.png"]
-```
-
-```json
-[
-  { "name": "report.md", "kind": "file", "title": "调研报告" },
-  { "name": "chart.png", "kind": "image", "title": "月度趋势" },
-  { "name": "https://example.com/source", "kind": "link", "title": "数据来源" }
-]
-```
-
-规则：
-
-- 旧 `string[]`：元素是**文件名**（不是绝对路径）。宿主按扩展名推断 `image` / `file`。
-- 新对象：`name` 必填；`kind` 可选，缺省按扩展名推断 `image` / `file`。
-- `link` 与 `mindmap` **必须显式声明**，不靠扩展名猜。
-- `link.name`（或对象里的 `url`）必须是 `http` / `https`；其他协议直接丢弃。
-- 宿主在拾一沙箱内按文件名递归解析（深度 ≤ 6、条目 ≤ 5000），重名取最新修改并标记。
-- 解析结果附带文件头嗅探：`magic` 是真实格式（png / jpeg / pdf / zip / cfb …），`magicOk` 表示它与扩展名是否一致。PNG / JPEG / PDF / ZIP 容器（docx、xlsx、pptx、odt）等都会校验。
-- 消息里只存相对路径、大小、mtime、标题等元数据；**绝不存 base64**。
-- 图片、PDF、文本由前端按需调用宿主读取；读取路径必须 canonicalize 后仍位于沙箱子树内。PDF 读取前同样校验 `%PDF-` 文件头，不符直接拒绝。
-- 产物门（前端 `artifactGate.ts`）只在任务类型白名单内生效，并要求出现明确产出动作或文件名；它按「存在 → 扩展名 → 非空 → 文件头」顺序校验，失败时把本轮标为未交付并给出中文原因。
-- `pdf` 预览走内嵌 iframe；思维导图识别 `.mmd` / `.mermaid` / `.mindmap` / `.mindmap.json`，支持 mermaid `mindmap`、嵌套 JSON 和 Markdown 标题/列表三种来源，解析成树后用纯 CSS 渲染，不引入 mermaid / 图形库。
-
-## 7. 错误与重试
-
-| code | 触发条件 | 宿主处理 |
-| --- | --- | --- |
-| `invalid_ask_id` | `answer.ask_id` 缺失或不匹配 | 提示用户重新回答，不推进轮次 |
-| `turn_finished` | 对已结束轮次发 `answer` / `cancel` | 忽略并清理挂起 UI |
-| `engine_unreachable` | 引擎端点不可达 | 气泡显示错误，保留任务文本可重试 |
-| `sandbox_denied` | 工具试图越过沙箱 | 拒绝执行，步骤流标红 |
-| `worker_crashed` | 进程退出 / stdout 关闭 | 宿主回收进程，界面标「已中止」 |
-
-超时建议：
-
-- `ping` 5 秒无 `pong` → 标记 worker 失联；
-- `run` 后 60 秒无任何 `event` → 显示「内核无响应」，允许取消；
-- `ask` 挂起不设硬超时，由用户回答或 `cancel` 结束。
-
-## 8. 与现有 HTTP / SSE 的映射
-
-| 现有 | 阶段 3 |
-| --- | --- |
-| `POST /task` | `run` |
-| `GET /events?turn=` (SSE) | `event` 行 |
-| `POST /answer` | `answer`（新增 `ask_id`） |
-| `POST /cancel` | `cancel` |
-| `GET /health` | `ready` / `ping` |
-| `turn_done.artifacts: string[]` | 兼容旧数组，新增对象数组 |
-
-前端传输层替换点：`app/src/lib/ipc/shiyi.ts` 的 `shiyiSubscribeEvents`（`EventSource`）改为订阅 Tauri 事件；业务层接口形状尽量保持不变，减少 ChatPage 改动。
+- 子进程退出：`pi:exit` 带消息；宿主清理运行态，界面标「已停止」，不自动重启
+  （重启是显式动作，由 PiPanel / 聊天入口触发）。
+- 错误：`pi:error` 带消息；气泡内以步骤（tone=err）呈现，不弹系统对话框。
+- 权限挂起不设硬超时：由用户回答或 `pi_agent_cancel` 结束；轮次收尾时清除挂起提示。
+- 旧 stdio 设计里的 `ping/pong` 存活探测未在 Pi 集成中实现——存活以进程句柄
+  `pi_agent_get_status().running` 为准。
 
 ## 9. 安全边界
 
-- 协议消息不是可信输入：worker 产出的路径、URL、文件名都要在宿主侧重新校验。
-- 文件读取走独立命令（`shiyi_read_artifact`），**不复用**聊天附件的白名单；附件白名单覆盖桌面 / 文档 / 下载，产物路径来自模型输出，必须单独收口到沙箱。
+- 协议消息不是可信输入：Pi 产出的路径、URL、文件名都要在宿主侧重新校验。
 - `link` 只允许 `http` / `https`，由 `open_external_url` 二次校验。
-- worker 执行模型生成的代码时，权限三档、沙箱与 Job Object 回收仍由宿主兜底；协议不替代这些边界。
+- **`full` 档不是操作系统级沙箱**：它只拦截常见危险命令与越界路径，无法覆盖所有
+  PowerShell 绕过；真正的强隔离需要容器/虚拟机。这是已知且接受的边界，如实写在这里。
+- 权限三档、沙箱路径校验、超时整树回收由宿主兜底；协议与扩展不替代这些边界。
+
+## 10. 改动纪律
+
+1. 不要绕过 `pi_tools` 执行模型请求的动作；宿主是权限的唯一收口。
+2. 新增工具先在 `pi_host_tools.ts` 的 `HOST_TOOLS` 注册，再在 `pi_tools` 实现与判定，
+   两处名字必须一致。
+3. 桥 token 出现在日志或落盘文件里视为缺陷。
+4. 会话数据读写走 `historyKeyOf(scope)`，不要硬编码桶键（见架构 v3 记忆）。
+5. 改前端后必须 touch `build.rs` 再 `cargo build --release`，否则 exe 里仍是旧前端。
