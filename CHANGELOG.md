@@ -6,10 +6,34 @@
 
 ---
 
-## [Unreleased]
+## [0.5.0] - 2026-11-04
+
+Pi 内核接入 Chat 之后的收口批次：P0–P3 完成清单（`docs/plans/POST_0.5_BACKLOG.md`）全部落地，并把无限画布接进 Pi 的工具链。此前 `[Unreleased]` 的批次一并归入本版本。
+
+### 2026-11-04 批次：Pi 收口与无限画布联动
+
+#### 新增
+
+- **Pi 在线安装 / 升级 / 回滚**（`services/pi_install.rs`）：从 npm registry（官方源 + npmmirror 镜像可选）在线安装指定版本；npm 自带的 SRI sha512 逐包校验之外，顶层包 integrity 另行记录进 `pi-version.json`；安装后跑 `--version` 冒烟，失败自动恢复上一版本；升级保留 `node_modules.backup` 回滚点，界面一键回滚。Agent 页「运行时」新增「在线安装 / 升级」区块（检查版本、安装最新、任意历史版本、回滚）。
+- **技能路由对齐拾一完整雷达**（`services/pi_skills.rs`）：打分口径与 `shyi-ai` 雷达一致——名称 +3、格式词 +3（词边界）、别名 +2、触发词 +2、描述 token +0.5（封顶 4）、`not_for` −4、查询型 −0.5；转发器互斥（image-gen / video-gen / music-gen / media-enhance 共用别名表，同一句话只留分最高的一个转发器）；强信号门（纯描述命中不入选，杜绝「帮我看看工作区里有什么文件」误中市场查询类技能）；转发器不再注入原文（那会跟宿主画布工具打架），只注入转发说明并自动带上目标技能的执行摘要。真实 238 技能回归集 11 条输入全过；技能索引加进程级缓存（根目录 mtime + 技能数签名，11 次路由 1.65s → 0.58s）。
+- **Pi 模型矩阵**（`scripts/pi-model-matrix.mjs`）：自动拉起 llama-server + Pi RPC，跑 10 项任务电池并逐项校验真实副作用（settled 但没落盘不算过）；Saluki-27B IQ2 实测 0.90 成功率、0 协议失败、TTFT 中位 423ms，越界写观测为拒绝。报告见 `docs/reports/PI_MODEL_MATRIX_2026-11-04.md`。
+- **Agent 消息性能指标**：Pi `message_update` 自带的 provider usage + 增量事件时刻 → 输出 token、TTFT、tok/s、生成耗时写进消息 `stats`，Agent 气泡统计行与普通对话同口径；中止也保留已产生的部分测量值。
+- **Pi 长期记忆**（`services/pi_memory.rs`）：`save_memory` 宿主工具（只读档拒绝 / 守门档逐条确认 / 放行档直记）；工具调用失败自动进「工具错误」记忆（连续重复去重），下一轮任务注入避免重复踩坑；每轮发送前注入【长期记忆】块（32 KB 上限，超限裁最旧行）。落盘在 `%APPDATA%\AgentLLM\pi\memory\`，跨会话共享。
+- **Pi 浮窗**：标题栏机器人按钮打开常驻小窗（置顶、不进任务栏、关闭即隐藏）；快聊走当前 Pi 会话与技能路由，Pi 被其他会话占用时明确提示而不是打断。
+- **无限画布 × Pi 联动**（`services/canvas_agent.rs`）：`canvas_status` / `canvas_list_workflows` / `canvas_get_workflow` 只读工具 + `canvas_run` 生图 / 图生图——工作流 ID 只接受网关已安装列表（白名单），输入图限制在会话工作区内（沙箱校验），输出固定写会话工作区 `canvas/` 并进气泡产物卡，守门档逐条确认，`canvas_cancel` 中断 ComfyUI 当前任务。全部回环请求显式 `no_proxy`，防宿主代理劫持。生图长任务在独立线程执行，不堵工具桥。
+
+#### 变更
+
+- **无限画布更新到上游 v0.24.7**（commit 1a67130）：重新打包 `Agent_LLM_Canvas_v0.24.7.zip`（sha256 `42a4311b…`），`CanvasPanel` 下载源同步；本地改动（移除修复助手插件及其入口）复刻。
+- **技能转发器注入**：命中 image-gen / video-gen / music-gen / media-enhance 时注入的是「用 canvas_status / canvas_list_workflows / canvas_run 真正执行」的转发说明，不再注入直接调 ComfyUI 的旧正文。
+
+### 归并自 [Unreleased] 的批次
 
 ### 变更
 
+- **Pi 产物门增强：魔数校验、任务类型白名单与 PDF / 思维导图预览**：宿主解析产物时同步嗅探文件头，返回 `magic` / `magicOk`，PNG、JPEG、PDF、ZIP 容器（docx / xlsx / pptx）、OLE 文档等都能识别；文件扩展名与真实格式不符时不再进入预览。产物门抽成 `features/chat/artifactGate.ts`，只在白名单任务类型且出现「生成 / 导出成 / 保存为」或明确文件名时生效，按「存在 → 扩展名 → 非空 → 文件头」判定，并区分 `missing` / `wrong_type` / `empty_file` / `magic_mismatch`；「PDF 是什么格式」这类提问不再误拦。PDF 由宿主校验 `%PDF-` 后以 data URL 返回并内嵌预览；思维导图支持 mermaid `mindmap`、嵌套 JSON、Markdown 标题/列表三种来源，用纯 CSS 树渲染，不引入 mermaid / 图形依赖。CSP 相应放开 `frame-src data: blob:`。
+- **新增无限画布外挂模块（Agent → 画布）**：把参考项目 ComfyUI-Local-Infinite-Canvas 作为独立本地 Web 应用接入，而不是把整套前端合进主工程。Rust 侧复用 dsh 的托管 Node，启动 `comfyui-gateway`（默认 8190）与画布静态服务（固定 3210），在应用内独立窗口打开；画布项目按 origin 保存，因此端口不做静默回退。网关自带更新/修复助手关闭，ComfyUI 地址、端口、窗口偏好落在 `%APPDATA%/AgentLLM/canvas/config.json`。画布包不打进安装包，支持本地 zip 安装与 GitHub Releases 按需下载（SHA256 校验）；`app/scripts/build-canvas-pack.ps1` 负责生成 zip 与清单。详见 `docs/guides/CANVAS_MODULE.md`。
+- **UI 令牌收口：字号、圆角、阴影收敛到单一刻度**：全仓 137 处 `text-[Npx]` 换成 `text-[length:var(--font-*)]`；字号刻度补两档——`--font-micro: 10px`（时间戳/徽章/行内提示，26 处真实在用，硬拔到 11px 会挤坏密集布局）与 `--font-hero: 40px`（使用统计的巨型指标，对应 WinUI Title Large），13/17/20px 就近归入 body(14)/title(18)/display(22)。Tailwind 的 `rounded-*` 与 `shadow-*` 改为在 `tailwind.config.js` 里映射到 `--radius-*` / `--shadow-*`，消除「令牌 4/8/10/14/16」与「Tailwind 默认 4/6/8/12」两套圆角刻度并存：sm/md 走卡片刻度、lg/xl 走浮层、2xl 走对话框，`shadow-card/flyout/dialog` 三个语义类此前因 config 未定义而根本不生成，现在生效。`index.css` 里 `.model-tile` 的 12px 圆角与裸写阴影、散落的 `999px` 也一并换成令牌。
 - **产品界面改名「拾壹」**：只改显示名（`index.html` 标题、窗口标题、标题栏、侧边栏、设置页关于），仓库名与 `productName`/`identifier` 不动。标识改为 `components/BrandLogo.tsx` 的 CSS 字标（圆角方块 + 「拾」），底色跟随强调色，因此换主题色时 logo 一起变；原来的「晓」方块与「Agent LLM」文字移除。
 - **对话侧边栏可拖拽调宽，内容按宽度重排**：右侧加 5px 分隔条（悬停/拖拽时显形），宽度收口 200–480px，双击恢复 288px，拖拽结束写进 `ui.sidebarWidth` 持久化。内容不是「简单隐藏」：窄于 260px 收掉快捷键提示与状态卡细节行、搜索框缩短为「搜索」。侧边栏底部服务状态卡从 2 项扩到 4 项（ctx / 显存 / 内存 / GPU，固定顺序），并用容器查询做两档适配：常规宽度 2×2 网格，卡片窄于 200px 时切成 1×4 单列、进度条压到 1.5px（断点按卡片实际宽度定：侧边栏 288px 时卡片约 239px，仍应保持 2×2）。
 - **侧栏导航按后端运行状态着色**：Agent / NiNfer / Strata 未启动时是灰字，启动后染主题色；窄栏图标导航与宽栏文字导航一致。Agent 没有独立进程，按当前 WebUI 后端（主模型 / NiNfer / Strata）是否在跑来判定。
@@ -27,6 +51,11 @@
 - **使用统计纳入 NiNfer 与 Strata 的全部 token**：新增 `lib/engineUsage.ts` + `hooks/useEngineUsageSync.ts`，把两个引擎的请求快照折算成累计值（只计 `success`，速度用每请求 decode TPS、首字延迟转秒、生成时长按 `output / decode_tps` 反推），以快照式 `SET_ENGINE_USAGE` 挂在合成运行时 ID 下；统计页新增「按来源（主模型 / 对外 API / 引擎）」一行与排名行的来源标签。引擎指标只在使用统计页订阅，避免每个页面都起两个每秒一次的 IPC 轮询。
 
 ### 修复
+
+#### 2026-11-01 设计令牌批次
+
+- **Strata 页状态色引用的是不存在的 CSS 变量**：`var(--success)` / `var(--warning)` / `var(--danger)` 在令牌体系里并不存在（实际叫 `--state-success` 等），状态徽章、错误条与环境警告一直在渲染 fallback 的 GitHub 色板 `#3fb950 / #d29922 / #f85149`。另外 Tailwind 对 `var()` 色值吃不下 `/40` 透明度修饰符，产物里落到的是实色——从未真的半透明。现统一改用 `--state-*-border` / `--state-*-bg` / `--state-*` 三元组，亮暗色与毛玻璃模式下均跟随主题。
+- **两处页面硬编码灰色绕过令牌**：`LlamaNativePreviewPage` 的 9 处 `#999/#555/#333/#ddd/#777/#aaa`、`ChatPage` 未知模型兜底色 `#808080` 全部换成语义令牌（`--text-primary/secondary/tertiary`），并删掉与令牌打架的冗余 `dark:` 变体——此前这些灰在毛玻璃模式下不会跟着背景变化。
 
 #### 2026-11-01 代码审查批次
 
@@ -111,6 +140,41 @@
 - **CI 运行时升级**：`actions/checkout`、`actions/setup-node`、`actions/cache` 由 v4 升到 v5（Node 24 运行时），消除 Node 20 弃用告警。
 
 ---
+
+## [0.5.0] - 2026-11-03
+
+Pi 内核接入 Chat：Pi RPC 管道、宿主工具代理与权限三档、会话隔离、技能路由和产物记录。版本号同步到 `package.json` / `tauri.conf.json` / `Cargo.toml`。
+
+### 新增
+
+- **Chat 的 Pi 工作区**：`ChatScope 'pi'`、`historyKey 'agent:pi'`；每个 Chat 会话带独立 `piSessionId`，切换会话自动预启动目标 Pi 会话，启动期间禁用发送；发送时只做就绪校验。流式文字、工具步骤、思考内容、停止/取消、产物卡都在 Chat 气泡内。
+- **切换会话预启动**：目标 session 与当前不同时先停旧进程再启动新进程；有任务在跑时先记下目标，等本轮收尾后再切换；快速切换用序号丢弃过期启动结果。
+- **全局 Pi runtime**：事件订阅、run 状态、消息回写和权限弹窗提到 App 层；离开 Chat 工作区后任务继续更新，权限弹窗在任意页面都能确认。
+- **最小产物门**：从任务文本推断文档 / 图片 / 表格 / PPT / PDF 类型；`agent_settled` 后校验扩展名、存在与大小，缺失或类型不符时给出警告并把本轮标为未交付。普通对话不触发。
+- **Pi 安装到应用数据目录**：Agent 页「安装到应用目录」把当前运行时复制到 `%APPDATA%\AgentLLM\pi\node_modules`，写 `pi-version.json` 版本锁；`discover()` 优先使用它，不再依赖临时实验目录。
+- **Agent 页「Pi」设置/状态页**：Node / CLI / Agent 目录、工作区根目录、会话目录、Provider / 模型 / 端点、权限三档、技能库与技能路由、运行日志；不再维护自己的聊天，避免与 Chat 争抢 Pi 进程。
+- **宿主工具代理与权限层**（`services/pi_tools.rs`）：
+  - 禁用 Pi 内置 `read/write/edit/bash/powershell`，扩展只暴露 `read_file/write_file/edit_file/list_dir/run_command`；
+  - 回环 HTTP 工具桥：`127.0.0.1` 随机端口 + 随机 token，只接受 `POST /tool`；
+  - 文件路径 canonicalize 后必须落在会话工作区内，拒绝 `..`、绝对越界和 junction/符号链接逃逸；
+  - 权限三档：只读 / 守门 / 放行；守门档覆盖、修改、命令逐条弹窗；放行档仍拦截危险命令与嵌套 shell；
+  - 命令 PowerShell 执行，Job Object 整树回收，默认 30 秒、上限 300 秒，输出 32 KB 上限；子进程环境移除工具桥凭据；
+  - 工具调用审计日志（tool/mode/target/ok/denied，不记文件内容）。
+- **会话隔离**：宿主会话 ↔ Pi `--session-id`/`--session-dir`；每个会话独立工作区 `<根目录>/<Pi session>`；Chat 切换会话后发送时自动启动目标会话。
+- **技能路由**：不把 238 个技能全部注册成 Pi skills；宿主扫描 `SKILL.md` 元数据，用触发词/名称/别名/描述 token 评分选 1–2 个技能，只把命中技能的正文注入本轮任务。
+- **产物记录**：`write_file`/`edit_file` 成功后，气泡显示「产物」卡与「打开位置」；宿主按会话工作区解析路径，图片按需读取。
+- **安全验证**：`cargo test pi_` 覆盖路径越界、junction 逃逸、三档权限、命令超时/黑名单、token 校验、产物路径校验；真机 GUI 验证会话 A/B 隔离、技能路由、产物卡与 Chat 权限弹窗。
+
+### 变更
+
+- 删除旧 sidecar：命令 / 服务 / 类型 / 前端 IPC / 面板全部移除，配置字段与退出逻辑一并清理。
+- Agent 页标签：Pi / WebUI / 画布；Chat 侧边栏头像在「主对话 / Pi 工作区」之间切换。
+- 技能库默认路径改由 `services/pi_skills.rs` 解析（配置 → 环境变量 → 资源目录 → 应用数据目录 → 本地开发技能库）。
+- README 版本号与 portable 示例更新到 0.5.0。
+
+### 计划（未实施）
+
+- 无限画布 × Agent 联动：先出计划，放在 `docs/plans/CANVAS_AGENT_LINKAGE_PLAN.md` 与 `docs/plans/POST_0.5_BACKLOG.md`，本轮不改代码。
 
 ## [0.4.0] - 2026-10-09
 

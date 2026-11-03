@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  ArrowLeftRight,
+  Bot,
   CheckSquare,
   Download,
   Loader2,
@@ -13,12 +15,13 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import ThemeToggleButton from '@/components/ThemeToggleButton';
 import BrandLogo from '@/components/BrandLogo';
+import ThemeToggleButton from '@/components/ThemeToggleButton';
 import RuntimeStatusCard, { type StatusMetric } from '@/components/RuntimeStatusCard';
 import { useResizableWidth } from '@/hooks/useResizableWidth';
 import { SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@/context/AppContext';
-import type { ChatSession, ModelInfo, ThemeType } from '@/types';
+import { chatScopeProfile } from '@/features/chat/chatScope';
+import type { ChatScope, ChatSession, ModelInfo, ThemeType } from '@/types';
 
 /** 会话行的搜索结果（模糊命中 + 对话内文本命中）。 */
 export interface SessionSearchHit {
@@ -32,6 +35,10 @@ export interface SessionSearchHit {
 interface ChatSidebarProps {
   activeModel?: ModelInfo;
   canChat: boolean;
+  /** 当前对话归属：主对话 / Agent 工作区。 */
+  scope: ChatScope;
+  /** 两段式切换回调（主对话 ↔ Agent 工作区）。 */
+  onSelectScope: (scope: ChatScope) => void;
   collapsed: boolean;
   collapseLocked?: boolean;
   selectionMode: boolean;
@@ -56,7 +63,6 @@ interface ChatSidebarProps {
   onOpenModelLoad: () => void;
   onToggleTheme: () => void;
   onToggleCollapse: () => void;
-  onSwitchToModel: () => void;
   onResize: (width: number) => void;
   theme: ThemeType;
   sidebarWidth: number;
@@ -69,6 +75,8 @@ interface ChatSidebarProps {
 export default function ChatSidebar({
   activeModel,
   canChat,
+  scope,
+  onSelectScope,
   collapsed,
   collapseLocked = false,
   selectionMode,
@@ -90,7 +98,6 @@ export default function ChatSidebar({
   onOpenModelLoad,
   onToggleTheme,
   onToggleCollapse,
-  onSwitchToModel,
   onResize,
   theme,
   sidebarWidth,
@@ -102,6 +109,9 @@ export default function ChatSidebar({
   const expandedTransition = { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const };
   const modelStatusLabel = canChat ? '可用' : activeModel ? '已加载' : '未加载';
   const modelStatusDotClass = canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
+  const scopeProfile = chatScopeProfile(scope);
+  const nextScope: ChatScope = scope === 'main' ? 'pi' : 'main';
+  const scopeSwitchLabel = scope === 'main' ? '切换到 Pi 工作区' : '切换到主对话';
   const selectionActionLabel = selectionMode
     ? selectedSessionIds.size > 0
       ? `删除已选的 ${selectedSessionIds.size} 个对话`
@@ -196,23 +206,43 @@ export default function ChatSidebar({
 
       <div className={`pb-3 pt-14 ${narrow ? 'px-2' : 'px-2.5'}`}>
         <div className={`flex min-w-0 items-center gap-3 ${collapsed ? 'pb-1' : 'pb-4'}`}>
+          {/* 这颗头像就是对话归属开关：主对话显示模型头像，Pi 工作区显示 Pi 图标。
+              点一下在 Chat 与 Pi 两个会话空间之间切换，不再另做胶囊分段。 */}
           <button
             type="button"
-            onClick={onSwitchToModel}
-            className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-[var(--radius-field)] bg-black/[0.045] text-[length:var(--font-body)] font-semibold text-[var(--text-primary)] transition-colors hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]"
-            title="切换到模型管理"
-            aria-label="切换到模型管理"
+            onClick={() => onSelectScope(nextScope)}
+            className={`relative grid h-10 w-10 flex-shrink-0 place-items-center rounded-[var(--radius-field)] text-[length:var(--font-body)] font-semibold transition-colors ${
+              scope === 'main'
+                ? 'bg-black/[0.045] text-[var(--text-primary)] hover:bg-black/[0.075] dark:bg-white/[0.055] dark:text-[var(--accent)] dark:hover:bg-[var(--surface-raised)]'
+                : 'bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent)]/15'
+            }`}
+            title={`${scopeSwitchLabel}（当前：${scopeProfile.label}）`}
+            aria-label={scopeSwitchLabel}
           >
-            {collapsed
-              ? (activeModel?.family?.[0]?.toUpperCase() ?? <BrandLogo size={18} />)
-              : (activeModel?.family?.slice(0, 2).toUpperCase() ?? <BrandLogo size={20} />)}
+            {scope === 'main'
+              ? collapsed
+                ? (activeModel?.family?.[0]?.toUpperCase() ?? <BrandLogo size={18} />)
+                : (activeModel?.family?.slice(0, 2).toUpperCase() ?? <BrandLogo size={20} />)
+              : <Bot className="h-[18px] w-[18px]" />}
+            <span
+              aria-hidden="true"
+              className="absolute -bottom-0.5 -right-0.5 grid h-4 w-4 place-items-center rounded-full border border-[var(--surface-muted)] bg-[var(--surface)] text-[var(--text-tertiary)] shadow-sm"
+            >
+              <ArrowLeftRight className="h-2.5 w-2.5" />
+            </span>
           </button>
           <AnimatePresence initial={false}>
             {!collapsed && (
-              <motion.div {...expandedMotion} className="min-w-0">
-                <div className="truncate text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">本地对话</div>
+              <motion.div {...expandedMotion} className="min-w-0 flex-1">
+                <div className="truncate text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">
+                  {scopeProfile.label}
+                </div>
                 <div className="truncate text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
-                  {canChat ? activeModel?.name ?? '模型已连接' : '模型未连接'}
+                  {scope === 'main'
+                    ? canChat
+                      ? activeModel?.name ?? '模型已连接'
+                      : '模型未连接'
+                    : 'Pi 内核 · 独立会话'}
                 </div>
               </motion.div>
             )}

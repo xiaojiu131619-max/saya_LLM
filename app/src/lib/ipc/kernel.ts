@@ -46,6 +46,8 @@ export interface InstalledKernelInfo {
   version: string;
   installed_at: string;
   is_active: boolean;
+  /** 是否是用户显式选中的本机核心目录。 */
+  is_selected: boolean;
 }
 
 export async function checkDesktopEngine(executablePath = 'resources/llama-server.exe') {
@@ -61,6 +63,16 @@ export async function listRecentLlamaReleases(count = 8) {
 export async function listInstalledKernels() {
   if (!isDesktopRuntime()) return [];
   return invoke<InstalledKernelInfo[]>('list_installed_kernels');
+}
+
+export async function getSelectedKernel() {
+  if (!isDesktopRuntime()) return null;
+  return invoke<string | null>('get_selected_kernel');
+}
+
+export async function setSelectedKernel(name: string | null) {
+  if (!isDesktopRuntime()) return;
+  await invoke('set_selected_kernel', { name });
 }
 
 export async function updateLlamaKernel(url: string, version: string, useMirror = true, mirrorUrl?: string) {

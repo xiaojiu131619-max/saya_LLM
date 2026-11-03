@@ -683,7 +683,7 @@ export default function DshAgentPanel() {
           <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <h2 className="flex-1 text-sm font-semibold text-primary-custom">dsh 运行日志</h2>
-              <span className="rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] text-secondary-custom">
+              <span className="rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-[length:var(--font-micro)] text-secondary-custom">
                 {dshLogs.length} 行
               </span>
               <button
@@ -725,7 +725,7 @@ export default function DshAgentPanel() {
                 <Trash2 className="h-3 w-3" /> 清空
               </button>
             </div>
-            <div className="mono-font h-64 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[11px] leading-[1.7]">
+            <div className="mono-font h-64 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-[1.7]">
               {renderedLogs.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center text-secondary-custom">
                   <Terminal className="mb-2 h-7 w-7 opacity-40" />

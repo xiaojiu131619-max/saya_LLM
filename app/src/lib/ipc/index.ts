@@ -14,3 +14,5 @@ export * from './fast27b';
 export * from './strata';
 export * from './mcp';
 export * from './storage';
+export * from './canvas';
+export * from './pi';

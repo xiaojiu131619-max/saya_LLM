@@ -438,9 +438,9 @@ export default function StrataPage() {
 
   const badgeClass =
     stateBadge.tone === 'ok'
-      ? 'border-[var(--success,#3fb950)]/40 text-[var(--success,#3fb950)]'
+      ? 'border-[var(--state-success-border)] text-[var(--state-success)]'
       : stateBadge.tone === 'wait'
-        ? 'border-[var(--warning,#d29922)]/40 text-[var(--warning,#d29922)]'
+        ? 'border-[var(--state-warning-border)] text-[var(--state-warning)]'
         : 'border-[var(--border)] text-[var(--text-tertiary)]';
 
   return (
@@ -475,7 +475,7 @@ export default function StrataPage() {
         </div>
 
         {errorMessage && (
-          <div className="flex items-start gap-2 rounded-md border border-[var(--danger,#f85149)]/40 bg-[var(--danger,#f85149)]/10 px-3 py-2 text-xs text-[var(--danger,#f85149)]">
+          <div className="flex items-start gap-2 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3 py-2 text-xs text-[var(--state-danger)]">
             <TriangleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
             <span className="min-w-0 break-words">{errorMessage}</span>
           </div>
@@ -597,7 +597,7 @@ export default function StrataPage() {
               )}
 
               {envIssues.length > 0 && (
-                <div className="mt-4 space-y-1 rounded-md border border-[var(--warning,#d29922)]/40 bg-[var(--warning,#d29922)]/10 px-3 py-2 text-xs text-[var(--warning,#d29922)]">
+                <div className="mt-4 space-y-1 rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-3 py-2 text-xs text-[var(--state-warning)]">
                   {envIssues.map((issue) => (
                     <div key={issue} className="break-words">
                       {issue}
@@ -701,7 +701,7 @@ export default function StrataPage() {
                     className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5"
                   >
                     <div className="min-w-0">
-                      <dt className="text-[11px] text-[var(--text-tertiary)]">{item.label}</dt>
+                      <dt className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{item.label}</dt>
                       <dd
                         className={`truncate text-xs text-primary-custom ${item.mono ? 'font-mono' : ''}`}
                         title={item.value}
@@ -725,7 +725,7 @@ export default function StrataPage() {
                   </div>
                 ))}
               </dl>
-              <p className="mt-3 text-[11px] leading-5 text-[var(--text-tertiary)]">
+              <p className="mt-3 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                 Strata 是 OpenAI 兼容后端，可直接在对话页切到它；上下文、KV 精度与专家驻留预算写在启动配置里，
                 由 strata 自己的 launch 决定，本应用不改这些数值。
               </p>
@@ -764,7 +764,7 @@ export default function StrataPage() {
                 </button>
               </div>
             </div>
-            <pre className="fat-log max-h-[28rem] overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-[11px] leading-5 text-[var(--text-secondary)]">
+            <pre className="fat-log max-h-[28rem] overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
               {logs.length > 0 ? logs.join('\n') : '暂无日志。启动智慧模型后这里会显示网关与引擎的输出。'}
             </pre>
           </section>
@@ -815,10 +815,10 @@ export default function StrataPage() {
                   <div className="mb-1 flex items-center gap-1.5 text-xs text-secondary-custom">
                     <span>{field.label}</span>
                     {field.ok === true && (
-                      <CheckCircle2 className="h-3 w-3 text-[var(--success,#3fb950)]" />
+                      <CheckCircle2 className="h-3 w-3 text-[var(--state-success)]" />
                     )}
                     {field.ok === false && (
-                      <TriangleAlert className="h-3 w-3 text-[var(--warning,#d29922)]" />
+                      <TriangleAlert className="h-3 w-3 text-[var(--state-warning)]" />
                     )}
                   </div>
                   <input
@@ -831,7 +831,7 @@ export default function StrataPage() {
                     className={INPUT}
                     spellCheck={false}
                   />
-                  <div className="mt-1 text-[11px] leading-4 text-[var(--text-tertiary)]">
+                  <div className="mt-1 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
                     {field.hint}
                   </div>
                 </label>
@@ -850,7 +850,7 @@ export default function StrataPage() {
                     className={INPUT}
                     inputMode="numeric"
                   />
-                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">
+                  <div className="mt-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                     默认 8082，避开主模型 8080 与 NiNfer 8094。
                   </div>
                 </label>
@@ -866,7 +866,7 @@ export default function StrataPage() {
                     className={INPUT}
                     inputMode="numeric"
                   />
-                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">
+                  <div className="mt-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                     按首次加载留余量：90GiB 权重实测约 18 分钟。
                   </div>
                 </label>
@@ -900,7 +900,7 @@ export default function StrataPage() {
                   placeholder="--lazy"
                   spellCheck={false}
                 />
-                <div className="mt-1 text-[11px] leading-4 text-[var(--text-tertiary)]">
+                <div className="mt-1 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
                   原样透传给 serve.server，不补默认值也不做白名单过滤——排障基线必须显式可复现。
                 </div>
               </label>
@@ -921,7 +921,7 @@ export default function StrataPage() {
               </fieldset>
 
               {running && (
-                <div className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-[11px] leading-5 text-[var(--text-tertiary)]">
+                <div className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                   运行中不可改解释器、源码目录、启动配置、端口与附加参数——这些是进程的出生参数，
                   改了也只能等下次启动生效。需要修改请先停止。
                 </div>

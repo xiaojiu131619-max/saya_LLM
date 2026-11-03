@@ -1,7 +1,7 @@
 # dsh 接入实验记录（Phase 0 Spike）
 
 > 日期：2026-09-04（补充首轮 2026-09-02 的遗留产物）
-> 目的：为 [DSH_AGENT_0.4_PLAN.md](DSH_AGENT_0.4_PLAN.md) 第 9 章 7 项待确认问题提供实测结论，定稿 v0.4.0 配置 schema 与版本。
+> 目的：为 [DSH_AGENT_0.4_PLAN.md](../archive/DSH_AGENT_0.4_PLAN.md) 第 9 章 7 项待确认问题提供实测结论，定稿 v0.4.0 配置 schema 与版本。
 > 环境：Windows 10 (19044) x64、RTX 3080 Ti 12GB、系统 Node v24.15.0、llama.cpp 内核 **b10760**（`resources/kernels/b10760_20260902_233229`）、模型 Qwen3.5-9B-Uncensored-Q6_K_M（D:\lmstudio-community）。
 > 实验产物目录：`%APPDATA%\AgentLLM\dsh-spike\`（草稿区）、`%APPDATA%\AgentLLM\dsh-home\`（DSH_HOME）。
 

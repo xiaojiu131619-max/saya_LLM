@@ -227,7 +227,7 @@ export default function AgentWebUiPanel() {
           </span>
         </div>
         <div className="mt-3 flex items-center gap-2">
-          <span className="mono-font min-w-0 flex-1 truncate rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1.5 text-[11px] text-secondary-custom" title="官方网页界面地址">
+          <span className="mono-font min-w-0 flex-1 truncate rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-secondary-custom" title="官方网页界面地址">
             {address || '（正在启动 NiNfer 的网页桥…）'}
           </span>
           <button
@@ -282,7 +282,7 @@ export default function AgentWebUiPanel() {
             </button>
           )}
         </div>
-        <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-5 text-secondary-custom">
+        <p className="mt-3 flex items-start gap-1.5 text-[length:var(--font-eyebrow)] leading-5 text-secondary-custom">
           <Info className="mt-0.5 h-3 w-3 flex-shrink-0" />
           {isFast27b ? (
             <span>
@@ -304,13 +304,13 @@ export default function AgentWebUiPanel() {
           )}
         </p>
         {bridgeError && (
-          <p className="mt-2 rounded-md bg-[var(--state-danger-bg)] px-2 py-1.5 text-[11px] text-[var(--state-danger)]">
+          <p className="mt-2 rounded-md bg-[var(--state-danger-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--state-danger)]">
             网页桥启动失败：{bridgeError}
           </p>
         )}
       </div>
 
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-4 text-[11px] leading-5 text-secondary-custom">
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-4 text-[length:var(--font-eyebrow)] leading-5 text-secondary-custom">
         <p className="mb-1 font-medium text-primary-custom">关于这个入口</p>
         <p>
           官方 webui 提供对话、思考过程折叠、采样参数、模型信息与流式续传等完整能力；

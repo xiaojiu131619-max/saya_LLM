@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState, type ComponentType } from 'react';
+import { useEffect, useMemo, useState, type ComponentType } from 'react';
 import {
   Activity,
   ArrowLeft,
@@ -298,11 +298,11 @@ export default function ModelWorkspace() {
           <button
             type="button"
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
-            title="切换到对话"
-            aria-label="切换到对话"
+            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
+            title="切换到对话界面"
+            aria-label="切换到对话界面"
           >
-            {selectedModel?.family?.[0] || '晓'}
+            <MessageSquare className="h-4 w-4" />
           </button>
           <nav aria-label="模型工作区主导航" className="mt-3 flex w-full flex-col items-center gap-1">
             <RailNavButton
@@ -390,15 +390,18 @@ export default function ModelWorkspace() {
             <button
               type="button"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'chat' })}
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-sm font-semibold text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
-              title="切换到对话"
-              aria-label="切换到对话"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
+              title="切换到对话界面"
+              aria-label="切换到对话界面"
             >
-              {selectedModel?.family?.[0] || '晓'}
+              <MessageSquare className="h-4 w-4" />
             </button>
             <div className="min-w-0">
-              <div className="truncate text-base font-semibold">拾壹</div>
-              <div className="truncate text-xs text-[var(--text-tertiary)]">本地模型加载中心</div>
+              {/* 身份区：这是 **Agent 设置**——agent 侧（NiNfer / Strata / 拾一）的
+                  模型与引擎配置面板，不负责对话。对话在另一棵界面树（Chat 页）上，
+                  两边各有各的侧边栏与状态，不互通。 */}
+              <div className="truncate text-base font-semibold">Agent 设置</div>
+              <div className="truncate text-xs text-[var(--text-tertiary)]">模型 · 引擎 · 智能体</div>
             </div>
           </div>
         </div>
@@ -492,7 +495,7 @@ export default function ModelWorkspace() {
             <div className="flex min-w-0 items-center gap-2">
               <MessageSquare className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
               <div className="min-w-0">
-                <div className="text-[11px] text-[var(--text-tertiary)]">切换到对话</div>
+                <div className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">切换到对话</div>
                 <div className="truncate text-sm font-medium text-[var(--text-primary)]">
                   {selectedModel?.name ?? '尚未选择模型'}
                 </div>
@@ -612,7 +615,7 @@ function RailNavButton({
 function LoadedModelPanel({ model, running, onStop }: { model?: ModelInfo; running: boolean; onStop: () => void }) {
   return (
     <div className="border-b border-[var(--border-subtle)] py-2.5">
-      <div className="mb-1 flex items-center justify-between text-[11px] text-[var(--text-tertiary)]">
+      <div className="mb-1 flex items-center justify-between text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
         <span>已加载模型</span>
         <span
           className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${running && model ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`}
@@ -622,14 +625,14 @@ function LoadedModelPanel({ model, running, onStop }: { model?: ModelInfo; runni
       <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
         {model?.name ?? '暂无运行模型'}
       </div>
-      <div className="mt-0.5 truncate text-[11px] text-[var(--text-tertiary)]">
+      <div className="mt-0.5 truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
         {model ? `${model.params} · ${model.quant}` : '加载后会显示名称与状态'}
       </div>
       <button
         type="button"
         onClick={onStop}
         disabled={!running}
-        className="mt-1.5 text-[11px] font-medium text-[var(--state-danger)] transition-colors hover:underline disabled:cursor-not-allowed disabled:text-[var(--text-tertiary)] disabled:no-underline"
+        className="mt-1.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--state-danger)] transition-colors hover:underline disabled:cursor-not-allowed disabled:text-[var(--text-tertiary)] disabled:no-underline"
         title="停止当前 llama-server 服务"
       >
         停止运行
@@ -686,18 +689,18 @@ function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxP
       title="查看 API 状态详情"
     >
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+        <div className="flex min-w-0 items-center gap-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
           <Server className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)]' : ''}`} />
           <span className="truncate">{label}</span>
         </div>
         <div className="flex items-center gap-1">
-          <span className={`text-[10px] font-medium ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`}>
+          <span className={`text-[length:var(--font-micro)] font-medium ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`}>
             {running ? `:${port}` : '未运行'}
           </span>
           <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
         </div>
       </div>
-      <div className="space-y-1 text-[11px]">
+      <div className="space-y-1 text-[length:var(--font-eyebrow)]">
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex-shrink-0 text-[var(--text-tertiary)]">速度</span>
           <span className="mono-font break-all text-right leading-4 text-[var(--text-primary)]" title={tokensPerSec}>{tokensPerSec}</span>
@@ -716,7 +719,7 @@ function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxP
         </div>
       </div>
       {ctxHas && (
-        <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+        <div className="mt-1.5 flex items-center gap-2 text-[length:var(--font-micro)]">
           <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]">
             <div
               className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
@@ -726,7 +729,7 @@ function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxP
           <span className="mono-font flex-shrink-0 text-[var(--text-tertiary)]">{Math.round(ctxPercent!)}% ctx</span>
         </div>
       )}
-      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+      <div className="mt-1.5 flex items-center gap-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
         <LinkIcon className={`h-3 w-3 flex-shrink-0 ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`} />
         <span className="break-words leading-4">{linkState}</span>
       </div>

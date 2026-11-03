@@ -275,8 +275,8 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                 >
                   <span className="model-load-param-control">
                     <Settings2 className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
-                    <span className="text-[13px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">高级参数</span>
-                    <span className="hidden truncate text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)] sm:inline">线程、批处理、RoPE、聊天模板等</span>
+                    <span className="text-[length:var(--font-body)] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">高级参数</span>
+                    <span className="hidden truncate text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:text-[var(--text-secondary)] sm:inline">线程、批处理、RoPE、聊天模板等</span>
                   </span>
                   <ChevronRight className={`h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] transition-transform duration-200 dark:text-[var(--text-secondary)] ${config.showAdvancedSettings ? 'rotate-90' : ''}`} />
                 </button>
@@ -635,7 +635,7 @@ function ParamLabel({ label, description, badge }: { label: string; description?
         <span className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</span>
         <Info className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
         {badge && (
-          <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
+          <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-medium uppercase tracking-normal text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
             {badge}
           </span>
         )}
@@ -694,13 +694,13 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
           <span className="text-xs font-normal text-[var(--text-tertiary)]">{records.length} 条 · 含调参与启动实测</span>
         )}
         {running && (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-[var(--text-on-accent)] shadow-sm">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--text-on-accent)] shadow-sm">
             <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
             调参搜索中…
           </span>
         )}
         {!running && applied && (
-          <span className="rounded-md bg-[var(--state-success-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]">
+          <span className="rounded-md bg-[var(--state-success-bg)] px-2 py-0.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--state-success)] dark:bg-[var(--state-success-bg)] dark:text-[var(--state-success)]">
             已自动应用调参结果
           </span>
         )}
@@ -710,7 +710,7 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
           {log.length > 0 && (
             <div>
               <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">
-                <span className="font-mono text-[11px]">调参日志（共 {log.length} 条）</span>
+                <span className="font-mono text-[length:var(--font-eyebrow)]">调参日志（共 {log.length} 条）</span>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -733,7 +733,7 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
               {!logCollapsed && (
                 <div
                   ref={logViewportRef}
-                  className="max-h-36 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-2.5 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-secondary)]"
+                  className="max-h-36 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] p-2.5 font-mono text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-black/20 dark:text-[var(--text-secondary)]"
                 >
                   {log.map((line, index) => (
                     <div key={index} className="break-words">{line}</div>
@@ -749,7 +749,7 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
             return (
               <div
                 key={`${record.timestamp}-${record.kind}`}
-                className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-[11px] dark:bg-white/[0.04]"
+                className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] dark:bg-white/[0.04]"
               >
                 <span className="rounded-sm bg-[var(--accent-subtle)] px-1 py-0.5 font-medium text-[var(--accent)] dark:bg-white/[0.06]">
                   {RUN_RECORD_KIND_LABEL[record.kind] ?? record.kind}
@@ -797,7 +797,7 @@ function ParamSection({ title, icon: Icon, children }: {
     <div className="model-load-param-section min-w-0 border-b border-[var(--border-subtle)]">
       <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-1 py-2.5">
         <Icon className="h-4 w-4 text-[var(--accent)]" />
-        <h3 className="text-[13px] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{title}</h3>
+        <h3 className="text-[length:var(--font-body)] font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">{title}</h3>
       </div>
       <div>{children}</div>
     </div>
@@ -1022,16 +1022,16 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
               step={step}
               className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[var(--text-primary)] outline-none dark:text-[var(--text-primary)]"
             />
-            {suffix && <span className="text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{suffix}</span>}
+            {suffix && <span className="text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{suffix}</span>}
           </div>
         </div>
         <div className="flex justify-between">
-          <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{min.toLocaleString()}</span>
-          <span className="mono-font text-[11px] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safeMax.toLocaleString()}</span>
+          <span className="mono-font text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{min.toLocaleString()}</span>
+          <span className="mono-font text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{safeMax.toLocaleString()}</span>
         </div>
         {ticks && ticks.length > 0 && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-[var(--text-tertiary)]">快速定位</span>
+            <span className="text-[length:var(--font-micro)] text-[var(--text-tertiary)]">快速定位</span>
             {ticks.map((tick) => (
               <button
                 key={tick.value}
@@ -1040,7 +1040,7 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
                   setDraft(null);
                   onChange(clamp(tick.value, min, safeMax));
                 }}
-                className={`mono-font rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                className={`mono-font rounded border px-1.5 py-0.5 text-[length:var(--font-micro)] transition-colors ${
                   sliderValue === tick.value
                     ? 'border-[var(--accent)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                     : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] dark:border-white/[0.08] dark:hover:bg-white/[0.06]'
@@ -1292,7 +1292,7 @@ function MetadataCard({ name, value }: { name: string; value: string }) {
 
   return (
     <div className="min-w-0 border-b border-[var(--border-subtle)] py-4">
-      <div className="mono-font truncate text-[11px] text-[var(--accent)]" title={name}>
+      <div className="mono-font truncate text-[length:var(--font-eyebrow)] text-[var(--accent)]" title={name}>
         {name}
       </div>
       <div className="mt-2 break-words text-xs leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" title={value}>

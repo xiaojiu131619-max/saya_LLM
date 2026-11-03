@@ -133,7 +133,7 @@ pub struct MediaPayload {
     pub byte_size: u64,
 }
 
-fn infer_media_mime(p: &Path) -> Option<String> {
+pub(crate) fn infer_media_mime(p: &Path) -> Option<String> {
     let ext = p.extension()?.to_str()?.to_ascii_lowercase();
     let mime = match ext.as_str() {
         // 图片
@@ -141,6 +141,7 @@ fn infer_media_mime(p: &Path) -> Option<String> {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
         "bmp" => "image/bmp",
         "tif" | "tiff" => "image/tiff",
         // 音频
@@ -163,7 +164,7 @@ fn infer_media_mime(p: &Path) -> Option<String> {
     Some(mime.to_string())
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;

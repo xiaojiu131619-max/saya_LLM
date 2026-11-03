@@ -542,9 +542,15 @@ mod tests {
     /// 直连本地 fixture。这里刻意跳过公网 host 校验：本测试验证的是
     /// HTTP/SSE 协议实现，而 127.0.0.1 会被 `validate_endpoint` 正常拒绝
     /// （该拒绝行为本身由 mcp_endpoint 的测试覆盖）。
+    ///
+    /// `no_proxy()` 是必需的：环境里存在 `HTTP_PROXY`（代理/公司网络/CI）时，
+    /// reqwest 会把发往回环地址的请求也交给代理，客户端在直连连接上写出
+    /// absolute-form 请求行（`POST http://127.0.0.1:.../messages`），
+    /// fixture 的 `req.url` 不以 `/messages` 开头，于是回 405。
     fn plain_connection(url: &str) -> Result<HttpConnection, String> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
+            .no_proxy()
             .build()
             .map_err(|e| e.to_string())?;
         Ok(HttpConnection {
@@ -613,6 +619,8 @@ mod tests {
         };
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
+            // 同上：环境代理会让回环请求变成 absolute-form，fixture 会回 405。
+            .no_proxy()
             .build()
             .expect("client");
         let mut connection = open_sse_transport_with(

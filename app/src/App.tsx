@@ -1,6 +1,7 @@
 ﻿import { Component, useEffect, type ErrorInfo, type ReactNode } from 'react';
 import { MotionConfig } from 'framer-motion';
 import { AppProvider, useApp } from '@/context/AppContext';
+import { PiRuntimeProvider } from '@/features/pi/PiRuntimeContext';
 import WorkspaceShell from '@/features/workspace/WorkspaceShell';
 import LlamaNativePreviewPage from '@/pages/LlamaNativePreviewPage';
 
@@ -30,9 +31,11 @@ function AppContent() {
 
   // 「减少动画」开关对 framer-motion 生效：always = 直接跳到终态，user = 跟随系统设置。
   return (
-    <MotionConfig reducedMotion={state.reduceMotion ? 'always' : 'user'}>
-      {showLlamaNativePreview ? <LlamaNativePreviewPage /> : <WorkspaceShell />}
-    </MotionConfig>
+    <PiRuntimeProvider>
+      <MotionConfig reducedMotion={state.reduceMotion ? 'always' : 'user'}>
+        {showLlamaNativePreview ? <LlamaNativePreviewPage /> : <WorkspaceShell />}
+      </MotionConfig>
+    </PiRuntimeProvider>
   );
 }
 

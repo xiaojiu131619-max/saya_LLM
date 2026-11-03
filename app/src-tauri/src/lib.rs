@@ -17,7 +17,7 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// 真正退出：先停止 llama-server、fast-27b、智慧模型、dsh 与 MCP 旁路进程，再退出进程。
+/// 真正退出：先停止 llama-server、fast-27b、智慧模型、dsh、Pi 与 MCP 旁路进程，再退出进程。
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
@@ -26,6 +26,8 @@ fn quit_app(app: &tauri::AppHandle) {
     services::strata_manager::stop_strata_on_exit();
     services::webui_bridge::stop();
     services::dsh_manager::stop_dsh_on_exit();
+    services::pi_agent::stop_on_exit();
+    services::canvas_manager::stop_on_exit();
     commands::mcp::disconnect_all_on_exit();
     app.exit(0);
 }
@@ -93,6 +95,8 @@ pub fn run() {
             commands::config::set_proxy_url,
             commands::config::get_kernel_override_path,
             commands::config::set_kernel_override_path,
+            commands::config::get_selected_kernel,
+            commands::config::set_selected_kernel,
             commands::config::save_model_run_record,
             commands::config::get_model_run_records,
             commands::config::clear_model_run_records,
@@ -128,6 +132,26 @@ pub fn run() {
             commands::dsh::dsh_bind_model,
             commands::dsh::dsh_unbind_model,
             commands::dsh::dsh_cleanup_data,
+            commands::pi_agent::pi_agent_discover,
+            commands::pi_agent::pi_agent_install,
+            commands::pi_agent::pi_agent_get_status,
+            commands::pi_agent::pi_float_window,
+            commands::pi_agent::pi_agent_start,
+            commands::pi_agent::pi_agent_run,
+            commands::pi_agent::pi_agent_cancel,
+            commands::pi_agent::pi_agent_stop,
+            commands::pi_agent::pi_agent_get_logs,
+            commands::pi_agent::pi_agent_clear_logs,
+            commands::pi_agent::pi_agent_permission_answer,
+            commands::pi_agent::pi_agent_set_permission_mode,
+            commands::pi_agent::pi_agent_skills_index,
+            commands::pi_agent::pi_agent_select_skills,
+            commands::pi_agent::pi_agent_npm_versions,
+            commands::pi_agent::pi_agent_install_online,
+            commands::pi_agent::pi_agent_rollback,
+            commands::pi_agent::pi_agent_version_info,
+            commands::pi_agent::pi_resolve_artifacts,
+            commands::pi_agent::pi_read_artifact,
             commands::fast27b::fast27b_start,
             commands::fast27b::fast27b_stop,
             commands::fast27b::fast27b_restart,
@@ -156,6 +180,20 @@ pub fn run() {
             commands::strata::strata_clear_metrics,
             commands::strata::strata_bind_dsh,
             commands::strata::strata_unbind_dsh,
+            commands::canvas::canvas_get_config,
+            commands::canvas::canvas_save_config,
+            commands::canvas::canvas_get_status,
+            commands::canvas::canvas_get_summary,
+            commands::canvas::canvas_start,
+            commands::canvas::canvas_stop,
+            commands::canvas::canvas_open_window,
+            commands::canvas::canvas_open_browser,
+            commands::canvas::canvas_reveal_data_dir,
+            commands::canvas::canvas_get_logs,
+            commands::canvas::canvas_clear_logs,
+            commands::canvas::canvas_install_node,
+            commands::canvas::canvas_install_pack_from_zip,
+            commands::canvas::canvas_install_pack_from_url,
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,
             commands::mcp::delete_mcp_server,
@@ -190,6 +228,8 @@ pub fn run() {
             // 且其后没有新的 engine ready，仍要在状态面板显示失效（拉起新实例时才清空）。
             services::fast27b_manager::seed_fault_from_log_file();
             services::fast27b_metrics::initialize();
+            // 热重启 / 强杀后可能残留上一次的画布网关，按 PID 文件清理。
+            services::canvas_manager::stop_stale_runtime();
 
             // 系统托盘：关窗后常驻后台，左键单击恢复窗口，右键菜单提供"显示/退出"。
             let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
@@ -256,6 +296,8 @@ pub fn run() {
                             services::fast27b_manager::stop_fast27b_on_exit();
                             services::strata_manager::stop_strata_on_exit();
                             services::webui_bridge::stop();
+                            services::pi_agent::stop_on_exit();
+                            services::canvas_manager::stop_on_exit();
                             commands::mcp::disconnect_all_on_exit();
                             // 允许窗口正常关闭，之后进程会退出。
                         }
@@ -269,6 +311,8 @@ pub fn run() {
                         services::fast27b_manager::stop_fast27b_on_exit();
                         services::strata_manager::stop_strata_on_exit();
                         services::webui_bridge::stop();
+                        services::pi_agent::stop_on_exit();
+                        services::canvas_manager::stop_on_exit();
                         commands::mcp::disconnect_all_on_exit();
                     }
                 }

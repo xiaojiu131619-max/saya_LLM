@@ -15,7 +15,10 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 #[allow(non_snake_case, non_upper_case_globals, dead_code)]
 mod job_guard {
+    use std::collections::HashMap;
     use std::sync::Mutex;
+
+    use once_cell::sync::Lazy;
 
     type HANDLE = *mut std::ffi::c_void;
 
@@ -72,15 +75,49 @@ mod job_guard {
         fn CloseHandle(hObject: HANDLE) -> i32;
     }
 
-    static JOB_HANDLE: Mutex<Option<JobHandle>> = Mutex::new(None);
+    /// 按用途分组的 Job 表：同一个 tag 下的所有子进程共享一个 Job。
+    ///
+    /// 早期实现只有一个 `Option<JobHandle>`，每次 attach 都新建 Job 并直接覆盖旧句柄：
+    /// 旧 Job 既不终止也无法再访问，后启动的 MCP 旁路会「顶掉」llama-server 的句柄，
+    /// `stop_server()` 于是只能终止最后一个 Job，整棵 llama 进程树被漏掉，句柄也一路泄漏。
+    /// 现在每个 tag 只建一个 Job，重复 attach 复用同一个 Job。
+    static JOBS: Lazy<Mutex<HashMap<String, JobHandle>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
 
-    pub fn attach(process_handle: HANDLE) {
+    /// 把子进程放进 `tag` 对应的 Job；必要时创建 Job。
+    /// 返回是否成功进入某个 Job（失败不致命，调用方仍有 taskkill 兜底）。
+    pub fn attach(process_handle: HANDLE, tag: &str) -> bool {
+        let mut jobs = match JOBS.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                eprintln!("[server] Job 表 Mutex 已中毒，跳过 Job 附加: {error}");
+                return false;
+            }
+        };
+
+        // 复用同 tag 的现有 Job：同一服务代次的进程树必须落在同一个 Job 里，
+        // 这样 terminate(tag) 才能一次性回收整棵树。
+        if let Some(JobHandle(job)) = jobs.get(tag) {
+            unsafe {
+                if AssignProcessToJobObject(*job, process_handle) != 0 {
+                    return true;
+                }
+                // 旧 Job 已被 TerminateJobObject 终止时无法再接收进程，重建一个。
+                eprintln!("[server] 现有 Job({tag}) 不可复用，重建");
+            }
+            if let Some(JobHandle(stale)) = jobs.remove(tag) {
+                unsafe {
+                    CloseHandle(stale);
+                }
+            }
+        }
+
         unsafe {
             // 创建一个无名 Job Object
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
                 eprintln!("[server] Job Object 创建失败");
-                return;
+                return false;
             }
 
             // 设置 KILL_ON_JOB_CLOSE：父进程退出时 OS 自动终止子进程
@@ -96,7 +133,7 @@ mod job_guard {
             if ret == 0 {
                 eprintln!("[server] SetInformationJobObject 失败");
                 CloseHandle(job);
-                return;
+                return false;
             }
 
             // 将子进程附加到 Job Object
@@ -104,33 +141,39 @@ mod job_guard {
             if ret == 0 {
                 eprintln!("[server] AssignProcessToJobObject 失败");
                 CloseHandle(job);
-                return;
+                return false;
             }
 
-            if let Ok(mut guard) = JOB_HANDLE.lock() {
-                *guard = Some(JobHandle(job));
-            }
-            eprintln!("[server] Job Object 已附加到子进程");
+            jobs.insert(tag.to_string(), JobHandle(job));
+            eprintln!("[server] Job Object 已附加到子进程（tag={tag}）");
+            true
         }
     }
 
-    pub fn terminate() {
-        if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(JobHandle(job)) = guard.take() {
-                unsafe {
-                    TerminateJobObject(job, 1);
-                    CloseHandle(job);
-                }
+    /// 终止并释放一个 tag 的整棵进程树。
+    pub fn terminate(tag: &str) {
+        let job = match JOBS.lock() {
+            Ok(mut guard) => guard.remove(tag),
+            Err(_) => None,
+        };
+        if let Some(JobHandle(job)) = job {
+            unsafe {
+                TerminateJobObject(job, 1);
+                CloseHandle(job);
             }
         }
     }
 
+    /// 应用退出时释放所有 Job 句柄。KILL_ON_JOB_CLOSE 会在最后一个句柄关闭时
+    /// 由系统回收其中所有进程，所以这里只需关句柄，不必逐个 Terminate。
     pub fn cleanup() {
-        if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(JobHandle(handle)) = guard.take() {
-                unsafe {
-                    CloseHandle(handle);
-                }
+        let jobs = match JOBS.lock() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(_) => return,
+        };
+        for (_, JobHandle(handle)) in jobs {
+            unsafe {
+                CloseHandle(handle);
             }
         }
     }
@@ -150,6 +193,12 @@ use crate::services::gguf_parser::parse_gguf_header;
 use crate::services::model_scanner::mtp_draft_is_compatible;
 
 static CHILD_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
+
+/// Job Object 分组名。主服务与旁路各占一个 Job：
+/// 停止 llama-server 时不应该连带杀掉正在服役的 MCP 服务器，
+/// 但两者都必须挂在某个 Job 上，应用被强杀时才不会留下孤儿进程。
+const SERVER_JOB_TAG: &str = "llama-server";
+const SIDECAR_JOB_TAG: &str = "sidecar";
 static SERVER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SYSTEM_LOGS: Lazy<Mutex<Vec<SystemLogEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
@@ -1269,7 +1318,7 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
     #[cfg(windows)]
     {
         if let Some(guard) = CHILD_PROCESS.lock().ok().as_mut().and_then(|g| g.as_mut()) {
-            job_guard::attach(guard.as_raw_handle());
+            job_guard::attach(guard.as_raw_handle(), SERVER_JOB_TAG);
         }
     }
 
@@ -2426,7 +2475,7 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     #[cfg(windows)]
     {
         if let Some(guard) = CHILD_PROCESS.lock().ok().as_mut().and_then(|g| g.as_mut()) {
-            job_guard::attach(guard.as_raw_handle());
+            job_guard::attach(guard.as_raw_handle(), SERVER_JOB_TAG);
         }
     }
 
@@ -2716,6 +2765,8 @@ pub(crate) fn start_server_internal(
                     // 3) 不读管道会让子进程写满缓冲后卡死（非 Windows 上则是 SIGPIPE 被杀）。
                     let mut pipes_closed = false;
                     let mut last_liveness_check = Instant::now();
+                    // 同一条运行期告警只记一次，避免每个失败请求都往日志里灌一遍。
+                    let mut last_warning: Option<String> = None;
                     loop {
                         if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                             return;
@@ -2727,15 +2778,34 @@ pub(crate) fn start_server_internal(
                                 Ok(line) => {
                                     add_log(&line);
                                     if let Some(err) = detect_error(&line) {
-                                        eprintln!(
-                                            "[server] runtime error detected (gen={}): {}",
-                                            generation, err.error_type
-                                        );
-                                        log_server_event(
-                                            "error",
-                                            &format!("运行期错误（{}）：{}", err.error_type, err.details),
-                                        );
-                                        on_error(err);
+                                        // 就绪之后的单次推理错误（一次请求 CUDA OOM、上下文超限等）
+                                        // 并不等于服务退出：进程还活着时把全局状态改成「已停止」，
+                                        // 会让后续请求、停止按钮和模型卸载互相矛盾。
+                                        // 这里只做诊断记录，真正的崩溃由下面的存活检查统一上报。
+                                        let alive = CHILD_PROCESS
+                                            .lock()
+                                            .map(|mut guard| {
+                                                guard.as_mut().is_some_and(|child| {
+                                                    matches!(child.try_wait(), Ok(None))
+                                                })
+                                            })
+                                            .unwrap_or(false);
+                                        if alive {
+                                            if last_warning.as_deref() != Some(err.details.as_str()) {
+                                                eprintln!(
+                                                    "[server] runtime diagnostic (gen={}): {}",
+                                                    generation, err.error_type
+                                                );
+                                                log_server_event(
+                                                    "warn",
+                                                    &format!(
+                                                        "运行期告警（{}，服务仍在运行）：{}",
+                                                        err.error_type, err.details
+                                                    ),
+                                                );
+                                                last_warning = Some(err.details.clone());
+                                            }
+                                        }
                                     }
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -2867,7 +2937,7 @@ pub(crate) fn start_server_internal(
 
 pub fn stop_server() -> Result<()> {
     #[cfg(windows)]
-    job_guard::terminate();
+    job_guard::terminate(SERVER_JOB_TAG);
 
     let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
     if let Some(mut child) = guard.take() {
@@ -2880,12 +2950,16 @@ pub fn stop_server() -> Result<()> {
 
 /// 为旁路子进程（MCP 服务器等）挂上 KILL_ON_JOB_CLOSE 的 Job Object，
 /// 保证应用被强杀时这些进程不会变成孤儿。
-/// 与 llama-server 共用同一个 Job 句柄：句柄在应用退出时统一关闭，
-/// 期间任何被 attach 的子进程都会被一并回收。
+///
+/// 旁路使用独立的 `sidecar` Job，与 llama-server 的 Job 分开：
+/// 停止主服务时不能连带杀掉仍在服役的 MCP 服务器，而应用退出时
+/// 所有 Job 句柄统一关闭，两条进程树都会被系统回收。
 #[cfg(windows)]
-pub fn attach_child_job(child: &Child, _tag: &str) {
+pub fn attach_child_job(child: &Child, tag: &str) {
     use std::os::windows::io::AsRawHandle;
-    job_guard::attach(child.as_raw_handle());
+    if !job_guard::attach(child.as_raw_handle(), tag) {
+        eprintln!("[mcp] 旁路进程未能加入 Job（tag={tag}），退出时依赖 taskkill 兜底");
+    }
 }
 
 #[cfg(not(windows))]
@@ -2974,7 +3048,7 @@ pub fn spawn_sidecar_process(
     let child = cmd
         .spawn()
         .map_err(|error| format!("无法启动该命令：{error}。请确认它存在且已加入 PATH。"))?;
-    attach_child_job(&child, "sidecar");
+    attach_child_job(&child, SIDECAR_JOB_TAG);
     Ok(child)
 }
 
@@ -3051,6 +3125,10 @@ pub fn add_log(line: &str) {
 /// `slot print_timing: id  N | task M |       total time = Z ms / T tokens`
 ///
 /// 只统计 `prompt eval` 与 `eval` 两行（P=prompt，C=completion），跳过 total 行以免重复。
+///
+/// `response_count` 只在 `eval`（生成完成）行加一：一次请求会先后打印
+/// `prompt eval` 和 `eval` 两行，两行都加会让请求数翻倍，
+/// 使用页的「每响应平均吞吐」因此接近腰斩。
 fn collect_api_usage(line: &str) {
     if !line.contains("slot print_timing") || !line.contains("tokens") {
         return;
@@ -3058,6 +3136,8 @@ fn collect_api_usage(line: &str) {
     let Some((prompt, completion)) = parse_print_timing(line) else {
         return;
     };
+    // 与 parse_print_timing 的判定保持一致：非 prompt eval 的 eval 行 = 本次生成完成。
+    let is_completion = line.contains("eval time") && !line.contains("prompt eval time");
     let model_name = current_server_model_name();
 
     if let Ok(mut table) = API_TOKEN_USAGE.lock() {
@@ -3079,6 +3159,8 @@ fn collect_api_usage(line: &str) {
         let added = prompt + completion;
         if added > 0 {
             entry.total_tokens += added;
+        }
+        if is_completion {
             entry.response_count += 1;
         }
         entry.last_seen_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -3383,6 +3465,40 @@ mod tests {
         assert_eq!(super::parse_print_timing("llama_server: listening on http://0.0.0.0:8080"), None);
         assert_eq!(super::parse_print_timing("slot print_timing: prompt eval time = x"), None);
         assert_eq!(super::parse_print_timing(""), None);
+    }
+
+    #[test]
+    fn collect_api_usage_counts_one_response_per_request() {
+        // 回归：prompt eval 与 eval 两行都加一，会让「请求数」翻倍、
+        // 「每响应平均吞吐」接近腰斩。一次请求只能计一次。
+        let prompt = "slot print_timing: id  3 | task 0 | prompt eval time =      73.83 ms /    18 tokens (    4.10 ms per token)";
+        let eval = "slot print_timing: id  3 | task 0 |        eval time =     197.04 ms /    16 tokens (   13.14 ms per token)";
+        let total = "slot print_timing: id  3 | task 0 |       total time =     270.88 ms /    34 tokens";
+
+        super::clear_api_usage();
+        super::collect_api_usage(prompt);
+        super::collect_api_usage(eval);
+        super::collect_api_usage(total);
+
+        {
+            let table = super::API_TOKEN_USAGE.lock().expect("usage table");
+            let entry = table.first().expect("usage entry");
+            assert_eq!(entry.prompt_tokens, 18);
+            assert_eq!(entry.completion_tokens, 16);
+            assert_eq!(entry.total_tokens, 34);
+            assert_eq!(entry.response_count, 1);
+        }
+
+        // 第二个请求（task 1）再加一次，仍是一请求一计数。
+        super::collect_api_usage("slot print_timing: id  3 | task 1 | prompt eval time = 1.00 ms / 5 tokens (x)");
+        super::collect_api_usage("slot print_timing: id  3 | task 1 |        eval time = 1.00 ms / 7 tokens (x)");
+        {
+            let table = super::API_TOKEN_USAGE.lock().expect("usage table");
+            let entry = table.first().expect("usage entry");
+            assert_eq!(entry.response_count, 2);
+            assert_eq!(entry.total_tokens, 34 + 12);
+        }
+        super::clear_api_usage();
     }
 
     #[test]

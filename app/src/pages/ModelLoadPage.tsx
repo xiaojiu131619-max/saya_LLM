@@ -366,7 +366,7 @@ export default function ModelLoadPage() {
             {isRerank ? ' 与 ' : ' / '}<span className="mono-font">--rerank</span> 启动。
             它与对话 / VLM 模型使用不同端口，可同时运行，互不影响。
           </p>
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-[11px] text-[var(--text-tertiary)]">
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
             <span>{model.architecture ?? '未知架构'}</span>
             <span>·</span>
             <span>{model.params} · {model.quant}</span>

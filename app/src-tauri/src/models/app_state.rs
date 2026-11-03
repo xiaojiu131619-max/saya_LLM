@@ -205,6 +205,9 @@ pub struct AppConfig {
     /// 设置后加载模型与本页内核状态都优先使用该路径；None 表示使用内置版本化核心。
     #[serde(default)]
     pub kernel_override_path: Option<String>,
+    /// 用户显式选中的本机核心目录名（kernels/<目录>）；None = 自动选最新。
+    #[serde(default)]
+    pub selected_kernel: Option<String>,
     /// 向量（Embedding）/ 重排模型的独立服务端口。
     /// 与 default_port（对话/VLM 服务）不同端口，才能同时运行两类模型；默认 8081。
     #[serde(default = "default_embedding_port")]
@@ -253,6 +256,7 @@ impl Default for AppConfig {
             proxy_url: None,
             env_check_done: false,
             kernel_override_path: None,
+            selected_kernel: None,
             embedding_port: default_embedding_port(),
             dsh: crate::models::dsh_types::DshConfig::default(),
             mcp_servers: Vec::new(),

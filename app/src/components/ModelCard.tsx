@@ -198,7 +198,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
         ) : null}
         {recentUsedAt && (
           <span
-            className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[11px] leading-6 text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
+            className="hidden h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)]/80 px-2 text-[length:var(--font-eyebrow)] leading-6 text-[var(--state-warning)] dark:border-[var(--state-danger-border)]/30 dark:bg-[var(--surface-raised)]/80 dark:text-[var(--accent)]"
             title={recentTitle}
           >
             <History className="h-3 w-3" />
@@ -392,7 +392,7 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
 
 function CompactPill({ children, className = '', title }: { children: ReactNode; className?: string; title?: string }) {
   return (
-    <span title={title} className={`inline-flex h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[11px] leading-6 text-[var(--text-secondary)] ${className}`}>
+    <span title={title} className={`inline-flex h-6 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-[length:var(--font-eyebrow)] leading-6 text-[var(--text-secondary)] ${className}`}>
       {children}
     </span>
   );
@@ -407,7 +407,7 @@ function ModelTaskPill({ model }: { model: ModelInfo }) {
       title={isRerank
         ? '重排模型：走独立向量服务（--rerank），可与对话 / VLM 模型同时运行'
         : '向量嵌入模型：走独立向量服务（--embeddings），可与对话 / VLM 模型同时运行'}
-      className={`inline-flex h-6 flex-shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] font-semibold leading-6 ${
+      className={`inline-flex h-6 flex-shrink-0 items-center gap-1 rounded-md border px-2 text-[length:var(--font-eyebrow)] font-semibold leading-6 ${
         isRerank
           ? 'border-[var(--accent-subtle)] bg-[var(--accent-subtle)] text-[var(--accent)]'
           : 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)]'
@@ -464,8 +464,8 @@ function CapabilityBadges({ model, dense = false, onlyActive = false, twoLine = 
   const states = modelCapabilityStates(model);
   const videoSupport = modelVideoSupport(model);
   const sizeClasses = dense
-    ? 'h-5 px-1.5 text-[10px] gap-0.5'
-    : 'h-6 px-2 text-[11px] gap-1';
+    ? 'h-5 px-1.5 text-[length:var(--font-micro)] gap-0.5'
+    : 'h-6 px-2 text-[length:var(--font-eyebrow)] gap-1';
   const iconSize = dense ? 'h-2.5 w-2.5' : 'h-3 w-3';
   const activeDefs = CAPABILITY_DEFS.filter((def) => states[def.key] === 'on' || states[def.key] === 'partial');
   // 磁贴（twoLine）与单列都只展示激活的能力：灰色"未检测到"占位格在总览卡片里没有

@@ -33,7 +33,7 @@ export function SettingSection({ title, icon: Icon, children, delay = 0 }: Setti
     >
       <div className="mb-3 flex items-center gap-2.5">
         <Icon className="h-4.5 w-4.5 text-[var(--accent)]" />
-        <h2 className="text-[15px] font-semibold text-primary-custom">{title}</h2>
+        <h2 className="text-[length:var(--font-chat)] font-semibold text-primary-custom">{title}</h2>
       </div>
       <div className="space-y-4">{children}</div>
     </div>

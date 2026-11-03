@@ -1,0 +1,126 @@
+{
+  "date": "2026-11-03T19:01:59.360Z",
+  "llamaServer": "D:\\Projects\\Agent_LLM\\app\\src-tauri\\target\\release\\resources\\kernels\\b12034_20261102_165346\\llama-server.exe",
+  "results": [
+    {
+      "key": "saluki",
+      "label": "Underdog-Saluki-27B-1.0-IQ2-mix",
+      "model": "saluki-27b",
+      "endpoint": "http://127.0.0.1:8091/v1",
+      "serverOk": true,
+      "serverError": null,
+      "tasks": [
+        {
+          "id": "write",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 5437,
+          "totalMs": 9159,
+          "toolCalls": 2,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "read",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 315,
+          "totalMs": 3048,
+          "toolCalls": 1,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "edit",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 351,
+          "totalMs": 4168,
+          "toolCalls": 2,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "ls",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 308,
+          "totalMs": 3092,
+          "toolCalls": 1,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "csv",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 310,
+          "totalMs": 7702,
+          "toolCalls": 3,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "missing",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 430,
+          "totalMs": 4279,
+          "toolCalls": 1,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "chinese-write",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 423,
+          "totalMs": 4459,
+          "toolCalls": 2,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "multi",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 430,
+          "totalMs": 16792,
+          "toolCalls": 6,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "no-tool-chat",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 417,
+          "totalMs": 1469,
+          "toolCalls": 0,
+          "protocolErrors": 0,
+          "verified": true
+        },
+        {
+          "id": "refusal-scope",
+          "settled": true,
+          "timedOut": false,
+          "firstTokenMs": 423,
+          "totalMs": 8676,
+          "toolCalls": 2,
+          "protocolErrors": 0,
+          "verified": false
+        }
+      ],
+      "summary": {
+        "run": 10,
+        "pass": 9,
+        "passRate": 0.9,
+        "protocolFailures": 0,
+        "verifyFailures": 1,
+        "medianTtftMs": 423,
+        "medianTotalMs": 4459
+      },
+      "workDir": "C:\\Users\\sky\\AppData\\Local\\Temp\\pi-matrix-saluki-l0dqXg"
+    }
+  ]
+}

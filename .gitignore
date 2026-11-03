@@ -58,6 +58,10 @@ app/resources/*.pdb
 # fast-llm 引擎与 27B 模型（体积大，仅随项目本地放置，不入库）
 app/resources/fast-llm/
 
+# 无限画布外挂模块（dist + 网关 + 生产依赖，按需下载/构建，不入库）
+app/resources/canvas/
+app/dist-canvas/
+
 # Fallback ignores for app build outputs (also covered by app/.gitignore)
 **/node_modules/
 **/target/

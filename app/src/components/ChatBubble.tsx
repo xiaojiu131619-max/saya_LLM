@@ -21,6 +21,7 @@ import type { Message, ToolActivity } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { judgeDelivery } from '@/features/chat/deliveryGuard';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
+import ArtifactPanel from './ArtifactPanel';
 import { isDesktopRuntime, partialMetricsFromError, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { reasoningProfileFromModel } from '@/lib/reasoningGears';
@@ -40,6 +41,12 @@ interface ChatBubbleProps {
   /** 本条消息是否为当前搜索跳转的目标（给出更醒目的描边）。 */
   searchActive?: boolean;
   onEditAndResend?: (messageId: string, content: string) => Promise<void> | void;
+  /** Pi 会话工作区目录：产物卡拼绝对路径用。 */
+  artifactSandboxDir?: string;
+  /** 产物图异步加载后通知外层重新测量行高。 */
+  onContentResize?: () => void;
+  /** 是否允许「重新生成」；Agent 工作区的轮次不走补全流，默认关闭。 */
+  allowRegenerate?: boolean;
 }
 
 function formatMetric(value: number, suffix = '') {
@@ -115,7 +122,7 @@ function outputOnlyContent(content: string) {
     .trim();
 }
 
-export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, sessionCtx, searchQuery, searchActive, onEditAndResend }: ChatBubbleProps) {
+export default function ChatBubble({ message, modelId, sessionId, sessionModelName, sessionModelColor, sessionCtx, searchQuery, searchActive, onEditAndResend, artifactSandboxDir, onContentResize, allowRegenerate = true }: ChatBubbleProps) {
   const { state, dispatch } = useApp();
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
@@ -128,7 +135,7 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   const activeModel = ownerModel ?? runtimeModel;
   const displayModelName = message.modelName ?? sessionModelName ?? ownerModel?.name ?? '未记录模型';
   const displayModelColor = message.modelColor ?? sessionModelColor ?? ownerModel?.themeColorSolid;
-  const canRegenerate = Boolean(isDesktopRuntime() && activeModel?.filePath && state.serverRunning && !message.isStreaming);
+  const canRegenerate = Boolean(allowRegenerate && isDesktopRuntime() && activeModel?.filePath && state.serverRunning && !message.isStreaming);
   const hasEmbeddedThinking = /<\/?think(?:ing)?>/i.test(message.content);
   const exportContent = message.reasoningContent && !hasEmbeddedThinking
     ? `<think>\n${message.reasoningContent}\n</think>\n\n${message.content}`
@@ -438,6 +445,18 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         <ToolActivityPanel activities={message.toolActivity} />
       )}
 
+      {message.piTurnId !== undefined && (
+        <PiStepsPanel message={message} busy={Boolean(message.isStreaming)} />
+      )}
+
+      {message.artifacts && message.artifacts.length > 0 && (
+        <ArtifactPanel
+          artifacts={message.artifacts}
+          sandboxDir={artifactSandboxDir}
+          onResize={onContentResize}
+        />
+      )}
+
       {/* 列宽跟随消息列（768/896px），字号与行高由 MarkdownRenderer 的 prose-body 决定；
           外层不再声明字号，否则会与内层打架（历史上这里写 15.5px 是死声明）。
           搜索命中时给整段加一层淡描边，并把命中字背景点亮（见 MarkdownRenderer 的 searchQuery）。 */}
@@ -488,6 +507,63 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
     </motion.article>
+  );
+}
+
+/** Pi 执行步骤面板：默认折叠只显最近一步，可展开全部。 */
+function PiStepsPanel({
+  message,
+  busy,
+}: {
+  message: Message;
+  busy: boolean;
+}) {
+  const steps = message.piSteps ?? [];
+  const state = message.piState ?? 'running';
+  const [expanded, setExpanded] = useState(false);
+  const toneClass = {
+    info: 'text-[var(--text-secondary)]',
+    ok: 'text-[var(--state-success)]',
+    warn: 'text-[var(--state-warning)]',
+    err: 'text-[var(--state-danger)]',
+  };
+  const visible = expanded ? steps : steps.slice(-1);
+  const waiting = state === 'waiting_user';
+
+  return (
+    <div className="min-w-0 max-w-full rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="mb-2 flex items-center gap-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" /> : <Zap className="h-3.5 w-3.5 text-[var(--accent)]" />}
+        <span className="min-w-0 flex-1">
+          {waiting ? '等待权限确认' : busy ? 'Pi 执行中' : steps.length > 0 ? `执行了 ${steps.length} 步` : '等待 Pi'}
+        </span>
+        {steps.length > 1 && (
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="inline-flex flex-shrink-0 items-center gap-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)]"
+          >
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            {expanded ? '收起' : `全部 ${steps.length} 步`}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        {visible.map((step, index) => (
+          <div
+            key={`${step.ts}-${step.point}-${index}`}
+            className={`flex min-w-0 items-start gap-2 px-1 py-0.5 text-[length:var(--font-caption)] leading-relaxed ${toneClass[step.tone]}`}
+          >
+            <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-current opacity-60" />
+            <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+              {step.text}
+              {step.repeat && step.repeat > 1 ? ` ×${step.repeat}` : ''}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

@@ -209,13 +209,13 @@ export default function LlamaLogsPage() {
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-danger)]" />
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-warning)]" />
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--state-success)]" />
-              <span className="mono-font ml-2 text-[11px] text-[var(--text-secondary)]">llama-server · stdout / stderr</span>
+              <span className="mono-font ml-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">llama-server · stdout / stderr</span>
             </div>
 
             <div
               ref={viewportRef}
               onScroll={handleScroll}
-              className="mono-font h-[calc(100%-36px)] overflow-y-auto overflow-x-hidden px-4 py-3 text-[12px] leading-[1.7]"
+              className="mono-font h-[calc(100%-36px)] overflow-y-auto overflow-x-hidden px-4 py-3 text-[length:var(--font-caption)] leading-[1.7]"
             >
               {rendered.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center text-[var(--text-secondary)]">

@@ -234,7 +234,7 @@ export default function McpServersSection({ embedded = false }: { embedded?: boo
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex items-center gap-2">
             <Plug className="h-4.5 w-4.5 text-[var(--accent)]" />
-            <h2 className="text-[15px] font-semibold text-primary-custom">MCP 服务器</h2>
+            <h2 className="text-[length:var(--font-chat)] font-semibold text-primary-custom">MCP 服务器</h2>
           </div>
           <p className="text-sm leading-6 text-secondary-custom">
             接入 Model Context Protocol 服务器，把它们的工具交给对话里的模型调用。
@@ -310,19 +310,19 @@ export default function McpServersSection({ embedded = false }: { embedded?: boo
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <Server className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                       <span className="text-sm font-semibold text-primary-custom">{server.name}</span>
-                      <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${stateClass(status)}`}>
+                      <span className={`rounded-full border px-2 py-0.5 text-[length:var(--font-eyebrow)] font-medium ${stateClass(status)}`}>
                         {busy ? '处理中…' : stateLabel(status)}
                       </span>
-                      <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[11px] text-secondary-custom dark:bg-white/[0.06]">
+                      <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-secondary-custom dark:bg-white/[0.06]">
                         {mcpTransportLabel(server.transport)}
                       </span>
                       {server.enabled && (
-                        <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[11px] text-secondary-custom dark:bg-white/[0.06]">
+                        <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-secondary-custom dark:bg-white/[0.06]">
                           随对话自动连接
                         </span>
                       )}
                       {status === 'ready' && tools.length > 0 && (
-                        <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[11px] text-secondary-custom dark:bg-white/[0.06]">
+                        <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-secondary-custom dark:bg-white/[0.06]">
                           {tools.length} 个工具
                         </span>
                       )}
@@ -339,7 +339,7 @@ export default function McpServersSection({ embedded = false }: { embedded?: boo
                       <p className="mt-1 break-words text-xs leading-5 text-[var(--state-danger)]">{server.error}</p>
                     )}
                     {server.lastStderr && (
-                      <p className="mono-font mt-1 break-all text-[11px] leading-5 text-[var(--text-tertiary)]">
+                      <p className="mono-font mt-1 break-all text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                         stderr：{server.lastStderr}
                       </p>
                     )}
@@ -418,11 +418,11 @@ export default function McpServersSection({ embedded = false }: { embedded?: boo
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
                           <CircleCheck className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
                           <span className="text-sm font-medium text-primary-custom">{tool.name}</span>
-                          <span className="mono-font break-all rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[11px] text-secondary-custom dark:bg-white/[0.06]">
+                          <span className="mono-font break-all rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-secondary-custom dark:bg-white/[0.06]">
                             {tool.qualifiedName}
                           </span>
                           {tool.destructive && (
-                            <span className="rounded-full border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--state-warning)]">
+                            <span className="rounded-full border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 py-0.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--state-warning)]">
                               可能修改数据
                             </span>
                           )}
@@ -564,11 +564,11 @@ function McpServerForm({
             );
           })}
         </div>
-        <span className="mt-1 block text-[11px] leading-4 text-[var(--text-tertiary)]">
+        <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
           {TRANSPORT_OPTIONS.find((option) => option.value === transport)?.hint}
         </span>
         {isNetwork && (
-          <span className="mt-1 flex items-start gap-1.5 text-[11px] leading-4 text-[var(--state-warning)]">
+          <span className="mt-1 flex items-start gap-1.5 text-[length:var(--font-eyebrow)] leading-4 text-[var(--state-warning)]">
             <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
             网络传输会把对话内容与工具参数发送到该端点所属的第三方服务。
           </span>
@@ -584,7 +584,7 @@ function McpServerForm({
             placeholder="例如 filesystem"
             className={fieldClass}
           />
-          <span className="mt-1 block text-[11px] leading-4 text-[var(--text-tertiary)]">
+          <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
             工具名会带上这个前缀：mcp__名称__工具名
           </span>
         </label>
@@ -603,14 +603,14 @@ function McpServerForm({
           />
           {isNetwork ? (
             endpointError ? (
-              <span className="mt-1 block text-[11px] leading-4 text-[var(--state-danger)]">{endpointError}</span>
+              <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--state-danger)]">{endpointError}</span>
             ) : (
-              <span className="mt-1 block text-[11px] leading-4 text-[var(--text-tertiary)]">
+              <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
                 仅支持 http / https，且不允许指向本机或内网地址。
               </span>
             )
           ) : (
-            <span className="mt-1 block text-[11px] leading-4 text-[var(--text-tertiary)]">
+            <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
               参数逐项传递，不经过 shell。
             </span>
           )}
@@ -629,7 +629,7 @@ function McpServerForm({
             placeholder={'Authorization=Bearer sk-xxxx'}
             className={`${fieldClass} mono-font resize-y leading-6`}
           />
-          <span className="mt-1 block text-[11px] leading-4 text-[var(--text-tertiary)]">
+          <span className="mt-1 block text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
             需要鉴权的端点在此填 Token；不要写进 URL 里。
           </span>
         </label>

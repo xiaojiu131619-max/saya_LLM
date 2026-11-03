@@ -1,4 +1,18 @@
 export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata';
+
+/**
+ * 顶层界面：**两棵完全独立的界面树**，各有各的侧边栏与导航。
+ *
+ * - `agent`    Agent 工作区：模型 / 引擎 / 智能体的操作区
+ * - `chat`     对话界面：自己的侧边栏与对话记忆区
+ * - `settings` 设置中心
+ *
+ * 以前"在哪个界面"是用 `currentView === 'chat'` 隐式表达的——界面选择和
+ * 界面内导航挤在同一个变量里，两个界面因此看起来像同一页的两态，
+ * 切过去还要重新认路。这里把两层拆开：切换界面换的是 workspace，
+ * 界面内翻页换的是 currentView。
+ */
+export type WorkspaceMode = 'agent' | 'chat' | 'settings';
 export type ThemeType = 'dark' | 'light';
 // 主题模式：system=跟随系统亮/暗，light/dark=用户显式指定。
 export type ThemeMode = 'system' | ThemeType;
@@ -318,12 +332,65 @@ export interface ModelInfo {
 
 export type VideoSupportLevel = 'verified' | 'candidate' | 'frames' | 'none';
 
+/**
+ * Agent 产出的富媒体成果。
+ *
+ * 普通对话用不到（它只有纯文本），agent 模式才有：agent 能自动跑任务，
+ * 除了文字还会给出图片 / 文件 / 网页链接 / 思维导图，这些都要显示在
+ * 同一个 chat 界面里。
+ *
+ * 产物都落在 agent 的工作区里，`path` 记的是**工作区内的相对路径**——
+ * 换工作区不用改数据，绝对路径由宿主按当前工作区根拼出来。
+ */
+export type AgentArtifactKind = 'image' | 'file' | 'link' | 'mindmap';
+
+/** 思维导图节点（agent 产出的导图数据）。 */
+export interface MindMapNode {
+  label: string;
+  children?: MindMapNode[];
+}
+
+export interface AgentArtifact {
+  kind: AgentArtifactKind;
+  /** 展示标题：文件名 / 网页标题 / 导图标题。 */
+  title: string;
+  /** kind=image：图片地址（宿主按需读取，只放运行时内存，绝不写 localStorage）。 */
+  src?: string;
+  /** kind=image/file/mindmap：工作区内的相对路径。 */
+  path?: string;
+  /** kind=file：mime 类型。 */
+  mime?: string;
+  /** kind=file：字节数。 */
+  size?: number;
+  /** 同名文件命中多个时，宿主取最新修改的一份并在这里标记。 */
+  duplicate?: boolean;
+  /** 文件最后修改时间（Unix 秒），用于展示与重名判定。 */
+  mtime?: number;
+  /** 宿主嗅探出的真实文件格式（png / jpeg / pdf / zip …）；文本类可能为空。 */
+  magic?: string;
+  /** 文件头是否与扩展名一致；无签名要求的类型为 true。 */
+  magicOk?: boolean;
+  /** kind=link：链接地址。 */
+  url?: string;
+  /** kind=link：agent 给的摘要。 */
+  snippet?: string;
+  /** kind=mindmap：导图数据。 */
+  mindmap?: MindMapNode;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   // 多模态用户消息：用于重发/编辑时还原 image_url / audio_url / video_url。
   multimodalContent?: ChatMessageContentPart[];
+  /**
+   * Agent 产出的富媒体成果（普通对话用不到——它只有纯文本）。
+   *
+   * agent 模式能自动跑任务，除了文字还会给出图片 / 文件 / 网页链接 /
+   * 思维导图，这些都要显示在同一个 chat 界面里。
+   */
+  artifacts?: AgentArtifact[];
   reasoningContent?: string;
   modelId?: string;
   modelName?: string;
@@ -335,6 +402,22 @@ export interface Message {
   toolActivity?: ToolActivity[];
   /** 交付护栏的警告（本轮回答可能不完整）；不存在 = 判定通过。 */
   warnings?: string[];
+  /** Pi 助手轮次：执行步骤流（气泡内折叠展示）。 */
+  piSteps?: PiStep[];
+  /** Pi 助手轮次 id（取消时回传）。 */
+  piTurnId?: string;
+  /** Pi 助手轮次状态：running / done / aborted。 */
+  piState?: 'running' | 'waiting_user' | 'done' | 'aborted';
+}
+
+/** Pi 执行步骤在气泡里的一条展示记录。 */
+export interface PiStep {
+  ts: number;
+  point: string;
+  text: string;
+  tone: 'info' | 'ok' | 'warn' | 'err';
+  /** 连续相同事件合并后的次数（界面显示 ×N）。 */
+  repeat?: number;
 }
 
 /** 一次 MCP 工具调用在界面上的记录。 */
@@ -377,6 +460,8 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   messages: Message[];
+  /** Pi 内核会话 id：每个 Chat 会话独立，切换后恢复各自上下文。 */
+  piSessionId?: string;
 }
 
 export interface MessageStats {
@@ -399,7 +484,28 @@ export interface SystemStats {
   hostName: string;
 }
 
+/**
+ * 对话界面的归属。
+ *
+ * - `main` 主对话：llama / NiNfer / Strata 三个后端共用一个对话界面
+ * - `pi`   Pi 智能体对话：复用同一套对话 UI，但**侧边栏与数据都独立**
+ *
+ * 两者共用 ChatPage 的对话 UI（气泡 / 输入框 / 步骤流），差别只在
+ * 「对话属于谁」——agent 的对话侧边栏接的是 Pi 自己的工作区。
+ */
+export type ChatScope = 'main' | 'pi';
+
+/** agent 对话在会话桶里的合成键：与真实模型 id 天然隔开，不串数据。 */
+export const AGENT_SCOPE_MODEL_ID: Record<Exclude<ChatScope, 'main'>, string> = {
+  pi: 'agent:pi',
+};
+
 export interface AppState {
+  /** 顶层界面：Agent 工作区 / 对话界面 / 设置中心（两棵独立界面树）。 */
+  workspace: WorkspaceMode;
+  /** 当前对话属于谁：主对话 还是 某个 agent（各自独立的侧边栏与数据）。 */
+  chatScope: ChatScope;
+  /** 当前界面内正在看哪一页（工作区内导航、设置区分页）。 */
   currentView: ViewType;
   /** 对话后端：main = 主 llama-server；fast27b = NiNfer 引擎（自带 OpenAI API）。 */
   chatEngine: ChatEngineId;
@@ -450,11 +556,17 @@ export interface AppState {
   mcpServers: McpServerEntry[];
 }
 
-/** 自带对话的后端选择：主模型或 NiNfer 引擎。 */
+/**
+ * 自带对话的后端选择：主模型 / NiNfer / Strata。
+ *
+ * Pi 不在这个轴上——它属于 `ChatScope`（主对话 / Pi 工作区），
+ * 引擎只描述主对话用哪个补全后端。把 agent 塞进引擎轴会让所有引擎分支
+ * 都要额外比对一次，漏一处就掉进兜底。
+ */
 export type ChatEngineId = 'main' | 'fast27b' | 'strata';
 
 /** WebUI 标签的后端选择：主模型 / NiNfer（NiNfer 走应用提供的同源桥）。 */
 export type WebUiEngineId = 'main' | 'fast27b' | 'strata';
 
 /** Agent 页标签（跨面板跳转用；放在全局状态里，NiNfer 面板按钮可直接切到 WebUI 标签）。 */
-export type AgentTabId = 'shiyi' | 'webui';
+export type AgentTabId = 'pi' | 'webui' | 'canvas';

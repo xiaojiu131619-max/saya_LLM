@@ -252,7 +252,7 @@ export default function EmbeddingWorkspace() {
                             <div className="flex items-center gap-2">
                               <span className="truncate text-sm font-medium text-[var(--text-primary)]">{model.name}</span>
                               <span
-                                className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                                className={`flex-shrink-0 rounded-md px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium ${
                                   model.modelTask === 'rerank'
                                     ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
                                     : 'bg-[var(--state-success-bg)] text-[var(--state-success)]'
@@ -261,7 +261,7 @@ export default function EmbeddingWorkspace() {
                                 {model.modelTask === 'rerank' ? '重排' : '向量'}
                               </span>
                             </div>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[var(--text-tertiary)]">
+                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                               <span>{model.architecture ?? '未知架构'}</span>
                               {model.poolingType && <span>· pooling {model.poolingType}</span>}
                               {model.mmprojPath && (model.supportsVision || model.supportsVideo) && (
@@ -296,7 +296,7 @@ export default function EmbeddingWorkspace() {
                     <label className="flex items-center justify-between gap-3">
                       <span className="text-sm text-[var(--text-secondary)]">
                         池化方式
-                        <span className="mono-font ml-1 text-[11px] text-[var(--text-tertiary)]">--pooling</span>
+                        <span className="mono-font ml-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">--pooling</span>
                       </span>
                       <select
                         value={pooling}
@@ -312,7 +312,7 @@ export default function EmbeddingWorkspace() {
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-sm text-[var(--text-secondary)]">
                         自定义归一化
-                        <span className="mono-font ml-1 text-[11px] text-[var(--text-tertiary)]">--embd-normalize</span>
+                        <span className="mono-font ml-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">--embd-normalize</span>
                       </span>
                       <div className="flex items-center gap-2">
                         <input
@@ -327,7 +327,7 @@ export default function EmbeddingWorkspace() {
                         <ToggleSwitch checked={normalizeEnabled} onChange={setNormalizeEnabled} label="自定义归一化" />
                       </div>
                     </div>
-                    <p className="text-[11px] leading-5 text-[var(--text-tertiary)]">
+                    <p className="text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                       提示：重排模型会自动带上 <span className="mono-font">--rerank</span>；向量模型固定带
                       <span className="mono-font"> --embeddings</span>，限定服务只提供向量用途。
                     </p>
@@ -408,7 +408,7 @@ export default function EmbeddingWorkspace() {
                   </div>
 
                   {status?.multimodal && (
-                    <div className="mt-3 rounded-lg border border-[var(--accent-subtle)] bg-[var(--accent-subtle)] p-2.5 text-[11px] leading-5 text-[var(--text-secondary)]">
+                    <div className="mt-3 rounded-lg border border-[var(--accent-subtle)] bg-[var(--accent-subtle)] p-2.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
                       该模型支持<strong className="text-[var(--accent)]">多模态向量</strong>：可编码图片
                       {status.media?.video ? '与视频' : ''}。媒体标记由服务端每次启动随机生成，
                       当前值已动态获取：
@@ -429,13 +429,13 @@ export default function EmbeddingWorkspace() {
                     <button
                       type="button"
                       onClick={() => void handleCopy(curlExample)}
-                      className="flex h-7 items-center gap-1.5 rounded-md border border-[var(--border)] px-2 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
+                      className="flex h-7 items-center gap-1.5 rounded-md border border-[var(--border)] px-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
                     >
                       <Copy className="h-3 w-3" />
                       复制示例
                     </button>
                   </div>
-                  <div className="space-y-2 text-[11px]">
+                  <div className="space-y-2 text-[length:var(--font-eyebrow)]">
                     <div>
                       <div className="text-[var(--text-tertiary)]">向量嵌入（OpenAI 兼容）</div>
                       <div className="mono-font break-all text-[var(--text-primary)]">{embeddingUrl}</div>
@@ -448,17 +448,17 @@ export default function EmbeddingWorkspace() {
 
                   <div className="mt-3">
                     <div className="mb-1 flex items-center justify-between">
-                      <span className="text-[11px] text-[var(--text-tertiary)]">纯文本示例</span>
+                      <span className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">纯文本示例</span>
                       <button
                         type="button"
                         onClick={() => void handleCopy(curlExample)}
-                        className="flex h-6 items-center gap-1 rounded-md border border-[var(--border)] px-1.5 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
+                        className="flex h-6 items-center gap-1 rounded-md border border-[var(--border)] px-1.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
                       >
                         <Copy className="h-2.5 w-2.5" />
                         复制
                       </button>
                     </div>
-                    <pre className="mono-font max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[11px] leading-5 text-[var(--text-secondary)]">
+                    <pre className="mono-font max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
 {curlExample}
                     </pre>
                   </div>
@@ -466,34 +466,34 @@ export default function EmbeddingWorkspace() {
                   {supportsImage && (
                     <div className="mt-3">
                       <div className="mb-1 flex items-center justify-between">
-                        <span className="text-[11px] text-[var(--text-tertiary)]">
+                        <span className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                           多模态示例（图片{supportsVideo ? ' / 视频' : ''}）
                         </span>
                         <button
                           type="button"
                           onClick={() => void handleCopy(multimodalCurl)}
-                          className="flex h-6 items-center gap-1 rounded-md border border-[var(--border)] px-1.5 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
+                          className="flex h-6 items-center gap-1 rounded-md border border-[var(--border)] px-1.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
                         >
                           <Copy className="h-2.5 w-2.5" />
                           复制
                         </button>
                       </div>
-                      <pre className="mono-font max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[11px] leading-5 text-[var(--text-secondary)]">
+                      <pre className="mono-font max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
 {multimodalCurl}
                       </pre>
-                      <p className="mt-1.5 text-[11px] leading-5 text-[var(--text-tertiary)]">
+                      <p className="mt-1.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                         注意：媒体标记每次启动都会变化，务必用上方「运行状态」里显示的实际值；
                         <span className="mono-font"> multimodal_data </span>
                         只接受原始 base64（不要带 <span className="mono-font">data:</span> 前缀）。
                       </p>
                       {!markerReady && (
-                        <p className="mt-1 text-[11px] leading-5 text-[var(--state-warning)]">
+                        <p className="mt-1 text-[length:var(--font-eyebrow)] leading-5 text-[var(--state-warning)]">
                           ⚠ 媒体标记尚未就绪：请先启动向量服务，就绪后此处会自动填入真实标记。
                           当前示例中的占位标记不能直接使用。
                         </p>
                       )}
                       {supportsVideo && (
-                        <p className={`mt-1 text-[11px] leading-5 ${videoRuntimeReady === false ? 'text-[var(--state-warning)]' : 'text-[var(--text-tertiary)]'}`}>
+                        <p className={`mt-1 text-[length:var(--font-eyebrow)] leading-5 ${videoRuntimeReady === false ? 'text-[var(--state-warning)]' : 'text-[var(--text-tertiary)]'}`}>
                           {videoRuntimeReady === false
                             ? '⚠ 未检测到 ffmpeg / ffprobe：图片向量可用，但视频向量会解码失败。请把它们加入 PATH 或放到内核同目录。'
                             : '视频路径由内核调用 ffmpeg / ffprobe 解码。'}
@@ -513,12 +513,12 @@ export default function EmbeddingWorkspace() {
                     <button
                       type="button"
                       onClick={() => { void clearEmbeddingLogs(); setLogs([]); }}
-                      className="h-7 rounded-md border border-[var(--border)] px-2 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
+                      className="h-7 rounded-md border border-[var(--border)] px-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface)]"
                     >
                       清空
                     </button>
                   </div>
-                  <pre className="mono-font max-h-64 min-h-[80px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[11px] leading-5 text-[var(--text-secondary)]">
+                  <pre className="mono-font max-h-64 min-h-[80px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--surface)] p-2.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
 {logs.length > 0 ? logs.join('\n') : '暂无日志。'}
                   </pre>
                 </section>

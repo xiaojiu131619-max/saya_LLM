@@ -1,0 +1,11 @@
+{
+  "version": "0.24.7",
+  "asset": "Agent_LLM_Canvas_v0.24.7.zip",
+  "url": "https://github.com/xiaojiu131619-max/saya_LLM/releases/download/canvas-v0.24.7/Agent_LLM_Canvas_v0.24.7.zip",
+  "sha256": "42a4311b6f1ccc1d44ef1d730a05ed6a40d9fff833c16aad2ecd6a181cdd44e8",
+  "size": 4894614,
+  "upstream": "1314521gjy/ComfyUI-Local-Infinite-Canvas",
+  "upstream_commit": "1a67130ad8315258166ec5dd347a852575f09a1d",
+  "built_at": "2026-11-04T03:27:00+08:00",
+  "note": "重新运行 app/scripts/build-canvas-pack.ps1 后必须同步 sha256 与 CanvasPanel.tsx 的 CANVAS_PACK_RELEASE。"
+}

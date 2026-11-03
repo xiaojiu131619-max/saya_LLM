@@ -13,7 +13,7 @@ function StatTile({ label, value, unit }: { label: string; value: string; unit?:
     <div className="min-w-0 rounded-[var(--radius-field)] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-3">
       <div className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{label}</div>
       <div className="mt-1 flex items-baseline gap-1.5 overflow-hidden">
-        <span className="mono-font truncate text-[20px] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
+        <span className="mono-font truncate text-[length:var(--font-display)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
           {value}
         </span>
         {unit && (
@@ -193,7 +193,7 @@ export default function ServiceUsageCard({ stats, note }: {
                     <div className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
                       {detail.label}
                     </div>
-                    <div className="mono-font mt-0.5 flex items-baseline gap-1.5 truncate text-[14px] font-semibold text-[var(--text-primary)]">
+                    <div className="mono-font mt-0.5 flex items-baseline gap-1.5 truncate text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">
                       <span className="truncate">{detail.value ?? '—'}</span>
                       {detail.value !== null && detail.unit && (
                         <span className="flex-shrink-0 text-[length:var(--font-caption)] font-normal text-[var(--text-secondary)]">

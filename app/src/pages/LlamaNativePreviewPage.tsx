@@ -112,11 +112,11 @@ export default function LlamaNativePreviewPage() {
             {sidebarOpen && (
               <div className="flex min-w-0 items-center gap-2">
                 <div className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-lg bg-[var(--surface-raised)] text-white shadow-sm dark:bg-[var(--surface-muted)] dark:text-[var(--app-bg)]">
-                  <span className="font-mono text-[11px] font-bold">L</span>
+                  <span className="font-mono text-[length:var(--font-eyebrow)] font-bold">L</span>
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold tracking-tight">llama.cpp</div>
-                  <div className="truncate text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">本地网页聊天</div>
+                  <div className="truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">本地网页聊天</div>
                 </div>
               </div>
             )}
@@ -149,7 +149,7 @@ export default function LlamaNativePreviewPage() {
           <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-2">
             {sidebarOpen ? (
               <>
-                <div className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">最近</div>
+                <div className="mb-1 px-3 text-[length:var(--font-eyebrow)] font-medium uppercase tracking-[0.12em] text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">最近</div>
                 <div className="space-y-0.5">
                   {HISTORY.map((item) => (
                     <button
@@ -166,7 +166,7 @@ export default function LlamaNativePreviewPage() {
                       }`}
                     >
                       <MessageSquare className="h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]" />
-                      <span className="min-w-0 flex-1 truncate text-[13px]">{item.title}</span>
+                      <span className="min-w-0 flex-1 truncate text-[length:var(--font-body)]">{item.title}</span>
                       <MoreHorizontal className="h-4 w-4 flex-shrink-0 opacity-0 group-hover:opacity-100" />
                     </button>
                   ))}
@@ -204,7 +204,7 @@ export default function LlamaNativePreviewPage() {
               {sidebarOpen && (
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium">Qwen3.5-35B-A3B</div>
-                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                     llama-server 已连接
                   </div>
@@ -227,12 +227,12 @@ export default function LlamaNativePreviewPage() {
               {!sidebarOpen && <Menu className="h-5 w-5 text-[var(--text-tertiary)] md:hidden" />}
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <h1 className="truncate text-sm font-semibold sm:text-[15px]">{activeTitle}</h1>
+                  <h1 className="truncate text-sm font-semibold sm:text-[length:var(--font-chat)]">{activeTitle}</h1>
                   <button type="button" className="rounded-md p-1 text-[var(--text-tertiary)] hover:bg-black/5 dark:hover:bg-white/10" title="切换模型">
                     <ChevronDown className="h-4 w-4" />
                   </button>
                 </div>
-                <div className="mt-0.5 hidden items-center gap-2 text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)] sm:flex">
+                <div className="mt-0.5 hidden items-center gap-2 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)] sm:flex">
                   <span>Qwen3.5-35B-A3B-Q4_K_M.gguf</span>
                   <span>·</span>
                   <span className="text-emerald-600 dark:text-emerald-400">运行中</span>
@@ -241,7 +241,7 @@ export default function LlamaNativePreviewPage() {
             </div>
 
             <div className="flex items-center gap-1">
-              <div className="mr-2 hidden items-center gap-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-1.5 text-[11px] text-[var(--text-tertiary)] lg:flex dark:bg-[var(--surface-raised)] dark:text-[var(--text-tertiary)]">
+              <div className="mr-2 hidden items-center gap-2 rounded-lg bg-[var(--surface-muted)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] lg:flex dark:bg-[var(--surface-raised)] dark:text-[var(--text-tertiary)]">
                 <Gauge className="h-3.5 w-3.5" />
                 <span>上下文 1,284 / 32,768</span>
               </div>
@@ -269,7 +269,7 @@ export default function LlamaNativePreviewPage() {
                     <SquareTerminal className="h-7 w-7" />
                   </div>
                   <h2 className="mt-5 text-2xl font-semibold tracking-tight">开始本地对话</h2>
-                  <p className="mt-2 text-sm leading-6 text-[var(--text-tertiary)] dark:text-[#999]">当前模型已通过 llama-server 加载。输入消息，或从左侧打开历史对话。</p>
+                  <p className="mt-2 text-sm leading-6 text-[var(--text-tertiary)]">当前模型已通过 llama-server 加载。输入消息，或从左侧打开历史对话。</p>
                 </div>
               </div>
             ) : (
@@ -280,19 +280,19 @@ export default function LlamaNativePreviewPage() {
                       className={`grid h-8 w-8 place-items-center rounded-lg text-xs font-semibold sm:h-9 sm:w-9 ${
                         message.role === 'assistant'
                           ? 'bg-[var(--app-bg)] text-white dark:bg-[var(--border)] dark:text-[var(--app-bg)]'
-                          : 'border border-black/10 bg-[var(--surface-muted)] text-[#555] dark:border-white/10 dark:bg-[var(--app-bg)] dark:text-[#ddd]'
+                          : 'border border-black/10 bg-[var(--surface-muted)] text-[var(--text-secondary)] dark:border-white/10 dark:bg-[var(--app-bg)]'
                       }`}
                     >
                       {message.role === 'assistant' ? 'L' : '你'}
                     </div>
                     <div className="min-w-0 pt-0.5">
-                      <div className="mb-2 flex items-center gap-2 text-[13px]">
+                      <div className="mb-2 flex items-center gap-2 text-[length:var(--font-body)]">
                         <strong>{message.role === 'assistant' ? 'llama.cpp' : '你'}</strong>
-                        {message.role === 'assistant' && <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">本地</span>}
+                        {message.role === 'assistant' && <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-emerald-600 dark:text-emerald-400">本地</span>}
                       </div>
-                      <div className="whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-secondary)] dark:text-[var(--border)]">{message.content}</div>
+                      <div className="whitespace-pre-wrap text-[length:var(--font-chat)] leading-7 text-[var(--text-secondary)] dark:text-[var(--border)]">{message.content}</div>
                       {message.code && (
-                        <pre className="mt-4 overflow-x-auto rounded-xl border border-black/10 bg-[var(--surface-muted)] p-4 font-mono text-[13px] leading-6 text-[var(--text-secondary)] dark:border-white/10 dark:bg-[var(--app-bg)] dark:text-[var(--border)]">
+                        <pre className="mt-4 overflow-x-auto rounded-xl border border-black/10 bg-[var(--surface-muted)] p-4 font-mono text-[length:var(--font-body)] leading-6 text-[var(--text-secondary)] dark:border-white/10 dark:bg-[var(--app-bg)] dark:text-[var(--border)]">
                           {message.code}
                         </pre>
                       )}
@@ -314,7 +314,7 @@ export default function LlamaNativePreviewPage() {
                             <RotateCcw className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="ml-1 text-[11px]">{message.role === 'assistant' ? '36.4 tok/s · 2.1 秒' : '刚刚'}</span>
+                        <span className="ml-1 text-[length:var(--font-eyebrow)]">{message.role === 'assistant' ? '36.4 tok/s · 2.1 秒' : '刚刚'}</span>
                       </div>
                     </div>
                   </article>
@@ -337,10 +337,10 @@ export default function LlamaNativePreviewPage() {
                   }}
                   rows={2}
                   placeholder="向本地模型发送消息…"
-                  className="chat-composer-input max-h-44 min-h-[62px] w-full resize-none bg-transparent px-4 pt-4 text-[15px] leading-6 outline-none placeholder:text-[var(--text-tertiary)]"
+                  className="chat-composer-input max-h-44 min-h-[62px] w-full resize-none bg-transparent px-4 pt-4 text-[length:var(--font-chat)] leading-6 outline-none placeholder:text-[var(--text-tertiary)]"
                 />
                 <div className="flex items-center gap-1.5 px-3 pb-3">
-                  <button type="button" className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-tertiary)] hover:bg-black/5 dark:text-[#aaa] dark:hover:bg-white/10" title="添加附件">
+                  <button type="button" className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-tertiary)] hover:bg-black/5 hover:text-[var(--text-secondary)] dark:hover:bg-white/10" title="添加附件">
                     <Paperclip className="h-4 w-4" />
                   </button>
                   <button type="button" className="flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-[#55555d] hover:bg-black/5 dark:text-[var(--text-tertiary)] dark:hover:bg-white/10" title="思考模式">
@@ -351,19 +351,19 @@ export default function LlamaNativePreviewPage() {
                     <Sparkles className="h-4 w-4" />
                     工具
                   </button>
-                  <span className="ml-auto hidden text-[11px] text-[var(--text-secondary)] sm:block">Enter 发送 · Shift + Enter 换行</span>
+                  <span className="ml-auto hidden text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] sm:block">Enter 发送 · Shift + Enter 换行</span>
                   <button
                     type="button"
                     onClick={sendMessage}
                     disabled={!input.trim()}
-                    className="ml-1 grid h-9 w-9 place-items-center rounded-xl bg-[var(--app-bg)] text-white transition-colors hover:bg-black disabled:bg-[var(--border)] disabled:text-[#999] dark:bg-[var(--border)] dark:text-[var(--app-bg)] dark:hover:bg-white dark:disabled:bg-[var(--surface-raised)] dark:disabled:text-[#777]"
+                    className="ml-1 grid h-9 w-9 place-items-center rounded-xl bg-[var(--app-bg)] text-white transition-colors hover:bg-black disabled:bg-[var(--border)] disabled:text-[var(--text-tertiary)] dark:bg-[var(--border)] dark:text-[var(--app-bg)] dark:hover:bg-white dark:disabled:bg-[var(--surface-raised)]"
                     title="发送"
                   >
                     <ArrowUp className="h-4 w-4" />
                   </button>
                 </div>
               </div>
-              <p className="mt-2 text-center text-[10px] text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">本地模型可能生成不准确内容，请核对重要信息</p>
+              <p className="mt-2 text-center text-[length:var(--font-micro)] text-[var(--text-secondary)] dark:text-[var(--text-tertiary)]">本地模型可能生成不准确内容，请核对重要信息</p>
             </div>
           </div>
         </section>
@@ -376,7 +376,7 @@ export default function LlamaNativePreviewPage() {
           <div className="flex h-16 items-center justify-between border-b border-black/10 px-5 dark:border-white/10">
             <div>
               <h2 className="text-sm font-semibold">生成参数</h2>
-              <p className="mt-0.5 text-[11px] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">仅用于界面预览，不会修改默认值</p>
+              <p className="mt-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] dark:text-[var(--text-tertiary)]">仅用于界面预览，不会修改默认值</p>
             </div>
             <button type="button" onClick={() => setSettingsOpen(false)} className="grid h-9 w-9 place-items-center rounded-lg hover:bg-black/5 dark:hover:bg-white/10" title="关闭参数面板">
               <X className="h-4 w-4" />
@@ -399,10 +399,10 @@ export default function LlamaNativePreviewPage() {
                 <span className="font-medium">模型状态</span>
                 <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-current" />运行中</span>
               </div>
-              <dl className="mt-3 space-y-2 text-[var(--text-tertiary)] dark:text-[#999]">
-                <div className="flex justify-between gap-4"><dt>上下文长度（ctx）</dt><dd className="font-mono text-[#333] dark:text-[#ddd]">32768</dd></div>
-                <div className="flex justify-between gap-4"><dt>GPU 卸载（ngl）</dt><dd className="font-mono text-[#333] dark:text-[#ddd]">99</dd></div>
-                <div className="flex justify-between gap-4"><dt>并行数（parallel）</dt><dd className="font-mono text-[#333] dark:text-[#ddd]">1</dd></div>
+              <dl className="mt-3 space-y-2 text-[var(--text-tertiary)]">
+                <div className="flex justify-between gap-4"><dt>上下文长度（ctx）</dt><dd className="font-mono text-[var(--text-primary)]">32768</dd></div>
+                <div className="flex justify-between gap-4"><dt>GPU 卸载（ngl）</dt><dd className="font-mono text-[var(--text-primary)]">99</dd></div>
+                <div className="flex justify-between gap-4"><dt>并行数（parallel）</dt><dd className="font-mono text-[var(--text-primary)]">1</dd></div>
               </dl>
             </div>
           </div>
@@ -427,9 +427,9 @@ function ParameterRow({ label, hint, value, display, min, max, step, onChange }:
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs font-medium">{label}</div>
-          <div className="mt-0.5 font-mono text-[10px] text-[var(--text-secondary)] dark:text-[#777]">{hint}</div>
+          <div className="mt-0.5 font-mono text-[length:var(--font-micro)] text-[var(--text-tertiary)]">{hint}</div>
         </div>
-        <output className="rounded-md bg-[var(--border)] px-2 py-1 font-mono text-[11px] dark:bg-[var(--surface-raised)]">{display}</output>
+        <output className="rounded-md bg-[var(--border)] px-2 py-1 font-mono text-[length:var(--font-eyebrow)] dark:bg-[var(--surface-raised)]">{display}</output>
       </div>
       <input
         type="range"

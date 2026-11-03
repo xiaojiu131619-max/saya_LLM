@@ -69,7 +69,7 @@ function Fact({ label, value, hint, mono = false }: { label: string; value: stri
   return (
     <div className="min-w-0">
       <dt className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{label}</dt>
-      <dd className={`mt-1 truncate text-[13px] font-medium text-[var(--text-primary)] ${mono ? 'mono-font' : ''}`}>{value}</dd>
+      <dd className={`mt-1 truncate text-[length:var(--font-body)] font-medium text-[var(--text-primary)] ${mono ? 'mono-font' : ''}`}>{value}</dd>
       {hint && <dd className="mt-0.5 truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{hint}</dd>}
     </div>
   );
@@ -85,7 +85,7 @@ function DetailRow({ label, value, mono = false, action }: {
     <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] py-2.5 last:border-b-0">
       <span className="flex-shrink-0 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{label}</span>
       <span className="flex min-w-0 items-center gap-2">
-        <span className={`truncate text-[13px] text-[var(--text-primary)] ${mono ? 'mono-font' : ''}`}>{value}</span>
+        <span className={`truncate text-[length:var(--font-body)] text-[var(--text-primary)] ${mono ? 'mono-font' : ''}`}>{value}</span>
         {action}
       </span>
     </div>
@@ -307,10 +307,10 @@ export default function ApiStatusPage() {
               </span>
               <button
                 type="button"
-                onClick={() => dispatch({ type: 'SET_CHAT_ENGINE', payload: 'fast27b' })}
+                onClick={openFast27bPage}
                 className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
               >
-                切换对话后端为 NiNfer
+                前往 NiNfer 页
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -325,7 +325,7 @@ export default function ApiStatusPage() {
                     <span className={`absolute -inset-1 rounded-full opacity-20 ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                     <span className={`absolute inset-0 rounded-full ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                   </span>
-                  <h2 className="text-[20px] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
+                  <h2 className="text-[length:var(--font-display)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
                   <span className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                     {engineMode ? engine.label : '主模型'}
                   </span>
@@ -339,7 +339,7 @@ export default function ApiStatusPage() {
                   )}
                 </div>
 
-                <div className="mono-font mt-3 truncate text-[17px] font-semibold text-[var(--text-primary)]">{serviceModelName}</div>
+                <div className="mono-font mt-3 truncate text-[length:var(--font-title)] font-semibold text-[var(--text-primary)]">{serviceModelName}</div>
                 <div className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">{serviceModelNote}</div>
               </div>
 
@@ -439,7 +439,7 @@ export default function ApiStatusPage() {
             </div>
 
             <div className="accent-soft mt-3.5 flex items-center justify-between gap-3 rounded-[var(--radius-field)] px-3.5 py-3">
-              <code className="mono-font min-w-0 truncate text-[13px] text-[var(--accent)]" title={serviceBaseUrl}>{serviceBaseUrl}</code>
+              <code className="mono-font min-w-0 truncate text-[length:var(--font-body)] text-[var(--accent)]" title={serviceBaseUrl}>{serviceBaseUrl}</code>
               <button
                 type="button"
                 onClick={() => void copyBaseUrl()}

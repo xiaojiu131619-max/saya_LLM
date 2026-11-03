@@ -21,6 +21,27 @@ static UPDATE_CANCELLED: AtomicBool = AtomicBool::new(false);
 /// 供 resolve_exe_path 在拿不到 AppState 的调用点（进程管理、环境检测等）读取。
 static KERNEL_OVERRIDE: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
 
+/// 用户在本机核心目录里显式选中的目录名（`<版本>_<时间>`）。
+/// None = 自动使用安装时间最新的目录。
+static SELECTED_KERNEL: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+/// 同步用户选中的本机核心目录；None 表示恢复「自动选最新」。
+pub fn set_selected_kernel(name: Option<String>) {
+    let selected = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Ok(mut guard) = SELECTED_KERNEL.lock() {
+        *guard = selected;
+    }
+}
+
+/// 当前显式选中的本机核心目录名；未选中时返回 None（自动选最新）。
+pub fn selected_kernel() -> Option<String> {
+    SELECTED_KERNEL.lock().ok().and_then(|guard| guard.clone())
+}
+
 /// 同步自编译核心路径到全局镜像；None 表示清除并回退内置核心。
 pub fn set_kernel_override(path: Option<String>) {
     let trimmed = path
@@ -84,6 +105,8 @@ pub struct InstalledKernel {
     pub version: String,
     pub installed_at: String,
     pub is_active: bool,
+    /// 是否是用户显式选中的目录（自编译核心启用时仍可保留选择）。
+    pub is_selected: bool,
 }
 
 /// 从目录名 `<版本>_<YYYYmmdd>_<HHMMSS>` 解析出安装时间（用于排序）。
@@ -110,8 +133,16 @@ fn parse_kernel_version(name: &str) -> String {
     }
 }
 
-/// 当前生效的核心目录：kernels 下安装时间最新的一个。
+/// 当前生效的核心目录：显式选中的目录优先；否则取安装时间最新的一个。
 pub fn active_kernel_dir() -> Option<PathBuf> {
+    if let Some(selected) = selected_kernel() {
+        if kernel_dir_timestamp(&selected).is_some() {
+            let candidate = kernels_dir().join(&selected);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
     let mut best: Option<(String, PathBuf)> = None;
     if let Ok(entries) = fs::read_dir(kernels_dir()) {
         for entry in entries.flatten() {
@@ -136,7 +167,10 @@ pub fn active_kernel_exe() -> Option<PathBuf> {
 
 /// 列出本机已安装的版本化核心，按安装时间从新到旧。
 pub fn list_installed_kernels() -> Vec<InstalledKernel> {
-    let active = active_kernel_dir();
+    // 自编译核心存在且文件有效时，本机版本化目录只是备用，不能标成「使用中」。
+    let override_active = kernel_override().is_some_and(|path| path.is_file());
+    let active = if override_active { None } else { active_kernel_dir() };
+    let selected = selected_kernel();
     let mut kernels: Vec<(String, InstalledKernel)> = Vec::new();
     if let Ok(entries) = fs::read_dir(kernels_dir()) {
         for entry in entries.flatten() {
@@ -149,10 +183,12 @@ pub fn list_installed_kernels() -> Vec<InstalledKernel> {
                 let installed_at = chrono::NaiveDateTime::parse_from_str(&ts, "%Y%m%d_%H%M%S")
                     .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|_| ts.clone());
+                let is_selected = selected.as_deref() == Some(name.as_str());
                 kernels.push((
                     ts,
                     InstalledKernel {
                         is_active: active.as_ref().map_or(false, |a| *a == entry.path()),
+                        is_selected,
                         version: parse_kernel_version(&name),
                         name,
                         installed_at,
@@ -168,7 +204,11 @@ pub fn list_installed_kernels() -> Vec<InstalledKernel> {
 /// 安装成功后清理：按安装时间只保留最近 keep 个核心目录。
 fn cleanup_old_kernels(keep: usize) {
     let sorted = list_installed_kernels();
+    let selected = selected_kernel();
     for kernel in sorted.into_iter().skip(keep) {
+        if selected.as_deref() == Some(kernel.name.as_str()) {
+            continue;
+        }
         let _ = fs::remove_dir_all(kernels_dir().join(&kernel.name));
     }
 }
@@ -877,8 +917,9 @@ pub fn check_latest_release(proxy_url: Option<&str>) -> Result<ReleaseInfo, Stri
 }
 
 pub fn list_recent_releases(count: usize, proxy_url: Option<&str>) -> Result<Vec<ReleaseInfo>, String> {
-    // 多请求一倍以过滤掉不带 Windows 安装包的公告版；比默认拉满 30 条响应小得多。
-    let per_page = (count.saturating_mul(2)).clamp(10, 30);
+    // 只请求需要的条数（当前界面固定 5 条）；不带 Windows 安装包的公告版会被跳过，
+    // 极端情况下列表会少于 count，但不额外拉取更多版本。
+    let per_page = count.clamp(1, 30);
     let json = github_api_json(&format!("releases?per_page={}", per_page), proxy_url)?;
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();
@@ -1107,14 +1148,30 @@ fn try_download_stream(
     }
 }
 
+/// 发布包体积上限。正常 llama.cpp 包在 1 GB 以内，留一倍余量；
+/// 没有上限时，被劫持的镜像可以推一个几十 GB 的响应把内存吃光。
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 pub(crate) fn download_with_progress(
     resp: reqwest::blocking::Response,
     on_progress: &dyn Fn(String),
 ) -> Result<Vec<u8>, String> {
     let total = resp.content_length().unwrap_or(0);
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "发布包体积异常（{:.1} MB），已中止下载。",
+            total as f64 / 1024.0 / 1024.0
+        ));
+    }
     let mut downloaded: u64 = 0;
-    let mut bytes = Vec::new();
+    // 按已知大小预分配，减少扩容时的整块搬运；但只按 64 MB 封顶，
+    // 避免服务端谎报 content-length 时一次性申请上 GB 内存。
+    let mut bytes = Vec::with_capacity(total.min(64 * 1024 * 1024) as usize);
     let mut reader = resp;
+    // 进度节流：8 KiB 一个块时，1 GB 包会产生约 13 万次事件，WebView 处理不过来。
+    // 只在百分比变化且间隔够久时上报，最多约 100 条。
+    let mut last_emit = std::time::Instant::now();
+    let mut last_pct: i64 = -1;
 
     let mut buffer = [0u8; 8192];
     loop {
@@ -1126,16 +1183,29 @@ pub(crate) fn download_with_progress(
         }
         bytes.extend_from_slice(&buffer[..n]);
         downloaded += n as u64;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "发布包体积超过上限（已下载 {:.1} MB），已中止下载。",
+                downloaded as f64 / 1024.0 / 1024.0
+            ));
+        }
 
         if total > 0 {
             let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-            let mb_down = downloaded as f64 / 1024.0 / 1024.0;
-            let mb_total = total as f64 / 1024.0 / 1024.0;
-            on_progress(format!(
-                "下载中: {}% ({:.1}/{:.1} MB)",
-                pct, mb_down, mb_total
-            ));
-        } else {
+            let percent_changed = pct as i64 != last_pct;
+            let enough_time_passed = last_emit.elapsed() >= std::time::Duration::from_millis(150);
+            if percent_changed && (enough_time_passed || pct >= 100) {
+                last_pct = pct as i64;
+                last_emit = std::time::Instant::now();
+                let mb_down = downloaded as f64 / 1024.0 / 1024.0;
+                let mb_total = total as f64 / 1024.0 / 1024.0;
+                on_progress(format!(
+                    "下载中: {}% ({:.1}/{:.1} MB)",
+                    pct, mb_down, mb_total
+                ));
+            }
+        } else if last_emit.elapsed() >= std::time::Duration::from_millis(250) {
+            last_emit = std::time::Instant::now();
             let mb_down = downloaded as f64 / 1024.0 / 1024.0;
             on_progress(format!("下载中: {:.1} MB", mb_down));
         }
@@ -1476,6 +1546,9 @@ pub fn download_and_install(
         let mut file = fs::File::create(&zip_path).map_err(|error| error.to_string())?;
         file.write_all(&bytes).map_err(|error| error.to_string())?;
     }
+    // 解压只读磁盘上的 zip；及时释放整包内存副本，
+    // 否则解压 + 复制期间会同时占用「Vec 一份 + 文件一份」两倍体积。
+    drop(bytes);
 
     on_progress("正在解压主程序包...".to_string());
     ensure_not_cancelled()?;
@@ -1523,6 +1596,7 @@ pub fn download_and_install(
             file.write_all(&runtime_bytes)
                 .map_err(|error| error.to_string())?;
         }
+        drop(runtime_bytes);
         on_progress("正在解压 CUDA runtime...".to_string());
         expand_zip(&runtime_zip_path, &runtime_extract_dir)?;
         runtime_copied = copy_runtime_dependency_files(&runtime_extract_dir, &staging_dir)?;

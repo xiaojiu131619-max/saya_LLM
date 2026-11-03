@@ -202,12 +202,12 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium text-primary-custom">{item.title}</span>
                           {item.level === 'warning' && (
-                            <span className="rounded-full bg-[var(--state-warning)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-warning)]">
+                            <span className="rounded-full bg-[var(--state-warning)]/15 px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-warning)]">
                               可选
                             </span>
                           )}
                           {item.level === 'error' && (
-                            <span className="rounded-full bg-[var(--state-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--state-danger)]">
+                            <span className="rounded-full bg-[var(--state-danger)]/15 px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-danger)]">
                               必需
                             </span>
                           )}

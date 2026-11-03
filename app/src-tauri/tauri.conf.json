@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Agent LLM",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.agentllm.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -32,7 +32,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob:; connect-src 'self' data: http://localhost:* http://127.0.0.1:*"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob:; frame-src 'self' data: blob:; connect-src 'self' data: http://localhost:* http://127.0.0.1:*"
     }
   },
   "bundle": {

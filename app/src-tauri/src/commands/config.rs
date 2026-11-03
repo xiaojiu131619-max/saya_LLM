@@ -296,6 +296,8 @@ pub fn init_config() -> (AppState, Option<String>) {
     let (config, pending_key) = load_config_from_disk();
     // 把已保存的自编译核心路径同步到全局镜像，供启动早期的内核解析使用。
     auto_updater::set_kernel_override(config.kernel_override_path.clone());
+    // 本机核心目录的显式选择也必须在内核解析前就位。
+    auto_updater::set_selected_kernel(config.selected_kernel.clone());
     // 引擎 / 日志 / 归档三个目录同样要在任何引擎与内核解析之前就位。
     crate::services::storage_paths::apply_config(
         config.engine_dir.clone(),
@@ -408,6 +410,45 @@ pub fn set_kernel_override_path(
     Ok(())
 }
 
+/// 读取当前显式选中的本机核心目录；None = 自动选最新。
+#[tauri::command]
+pub fn get_selected_kernel(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    Ok(config.selected_kernel.clone())
+}
+
+/// 选择本机已安装的核心目录；传 null 表示恢复自动选最新。
+#[tauri::command]
+pub fn set_selected_kernel(
+    state: State<'_, AppState>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let selected = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(selected_name) = selected.as_deref() {
+        let exists = auto_updater::list_installed_kernels()
+            .iter()
+            .any(|kernel| kernel.name == selected_name);
+        if !exists {
+            return Err(format!("找不到本机核心目录：{}", selected_name));
+        }
+    }
+
+    {
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        let mut new_config = (*config).clone();
+        new_config.selected_kernel = selected.clone();
+        persist_config(&new_config)?;
+        *config = new_config;
+    }
+    auto_updater::set_selected_kernel(selected);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_tune_result(state: State<'_, AppState>, entry: TuneHistoryEntry) -> Result<(), String> {
     let mut config = state.config.lock().map_err(|e| e.to_string())?;
@@ -441,6 +482,7 @@ pub fn reset_app_config(state: State<'_, AppState>) -> Result<(), String> {
     drop(guard);
     // 出厂重置后自编译核心路径同步清空，回退内置核心。
     auto_updater::set_kernel_override(None);
+    auto_updater::set_selected_kernel(None);
     // 三个可配置目录也回到默认位置。
     crate::services::storage_paths::apply_config(None, None, None);
 

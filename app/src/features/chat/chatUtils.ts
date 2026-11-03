@@ -1,4 +1,4 @@
-import type { ChatSession, ChatMessageContentPart, Message, MessageStats } from '@/types';
+import type { ChatSession, ChatEngineId, ChatMessageContentPart, Message, MessageStats } from '@/types';
 
 export const CHAT_HISTORY_MODEL_ID = 'chat-workspace';
 
@@ -91,7 +91,7 @@ export function classifyAttachment(file: { name: string; type: string; size: num
 
 export function attachmentBackendError(
   kind: AttachmentKind,
-  engine: 'main' | 'fast27b' | 'strata',
+  engine: ChatEngineId,
 ): string | null {
   // Strata 的 /health 回报 images: false —— 纯文本后端，没有视觉塔也没有音频通道。
   // 放行出去只会得到一条 400，不如在选文件时就说明白。
@@ -114,6 +114,7 @@ export function attachmentMediaMime(name: string, type: string): string {
     ogg: 'audio/ogg', oga: 'audio/ogg', flac: 'audio/flac', opus: 'audio/ogg',
     mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska',
     webm: 'video/webm', avi: 'video/x-msvideo', m4v: 'video/mp4', ogv: 'video/ogg',
+    pdf: 'application/pdf',
   };
   return byExtension[fileExtension(name)] ?? 'application/octet-stream';
 }
@@ -195,6 +196,7 @@ export function createChatSession(
     createdAt: now,
     updatedAt: now,
     messages: [],
+    piSessionId: `pi-${now}-${Math.random().toString(36).slice(2, 8)}`,
   };
 }
 

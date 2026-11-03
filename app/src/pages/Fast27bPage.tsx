@@ -1023,7 +1023,7 @@ export default function Fast27bPage() {
                     className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5"
                   >
                     <div className="min-w-0">
-                      <dt className="text-[11px] text-[var(--text-tertiary)]">{item.label}</dt>
+                      <dt className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{item.label}</dt>
                       <dd className="truncate text-xs text-primary-custom mono-font" title={item.value}>
                         {item.value}
                       </dd>
@@ -1040,7 +1040,7 @@ export default function Fast27bPage() {
                   </div>
                 ))}
               </dl>
-              <p className="mt-3 text-[11px] leading-5 text-[var(--text-tertiary)]">
+              <p className="mt-3 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-tertiary)]">
                 NiNfer 是 OpenAI 兼容后端，可直接在对话页切到它；草稿长度、上下文等启动参数见下方「高级配置」，保存后下次启动生效。{status?.lan ? " 已开放局域网：其他设备把 127.0.0.1 换成本机局域网 IP。" : " 当前仅本机可访问。"}
               </p>
             </section>

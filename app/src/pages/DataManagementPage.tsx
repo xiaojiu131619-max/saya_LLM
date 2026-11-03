@@ -28,6 +28,7 @@ import {
   revealDesktopPath,
   scanDesktopModels,
   setStorageDir,
+  stopActiveChatCompletion,
   stopDesktopServer,
   toFrontendModel,
   writeArchiveFile,
@@ -307,6 +308,8 @@ export default function DataManagementPage() {
   const runPendingDataAction = async () => {
     switch (pendingDataAction) {
       case 'clear-chat-history':
+        // 先中止在途生成：请求还在跑的话会把结果写回已删除的会话，并继续占用 GPU。
+        stopActiveChatCompletion();
         dispatch({ type: 'CLEAR_ALL_CHAT_HISTORY' });
         setDataMessage('已清空全部对话历史，模型与目录配置未变动。');
         break;

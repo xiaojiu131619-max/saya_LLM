@@ -1,10 +1,9 @@
 ﻿import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isTauri } from '@tauri-apps/api/core';
-import { Minus, Square, X } from 'lucide-react';
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { Bot, Minus, Square, X } from 'lucide-react';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { useApp } from '@/context/AppContext';
 import BrandLogo from '@/components/BrandLogo';
-import type { ViewType } from '@/types';
 import EnvCheckDialog from './EnvCheckDialog';
 import { useAutoChatEngine } from '@/hooks/useAutoChatEngine';
 
@@ -19,23 +18,19 @@ const ChatPage = lazy(() => import('@/pages/ChatPage'));
 const SettingsWorkspace = lazy(() => import('@/features/settings/SettingsWorkspace'));
 const ModelWorkspace = lazy(() => import('@/features/model/ModelWorkspace'));
 
-type WorkspaceMode = 'model' | 'chat' | 'settings';
-
-function workspaceMode(view: ViewType): WorkspaceMode {
-  if (view === 'chat') return 'chat';
-  // apiStatus / agent / embedding / fast27b / strata 在模型工作区内嵌展示（与 llama 日志一致，保留侧边栏）。
-  if (view === 'apiStatus' || view === 'home' || view === 'modelLoad' || view === 'llamaLogs' || view === 'agent' || view === 'embedding' || view === 'fast27b' || view === 'strata') return 'model';
-  return 'settings';
-}
-
 export default function WorkspaceShell() {
   const { state } = useApp();
-  const activeMode = workspaceMode(state.currentView);
   // 对话后端全局自动选择：放在外壳层，切页面时不会重置，也不会因对话页卸载而停摆。
   useAutoChatEngine();
 
+  // 三棵界面树各自独立：
+  //   agent    Agent 工作区——模型 / 引擎 / 智能体的操作区
+  //   chat     对话界面——自己的侧边栏与对话记忆区
+  //   settings 设置中心
+  // 换界面换的是整棵树，不是同一棵树里的某一页——两个界面因此不会再
+  // 长得像同一页的两态。
   const renderWorkspace = () => {
-    switch (activeMode) {
+    switch (state.workspace) {
       case 'chat':
         return <ChatPage />;
       case 'settings':
@@ -92,6 +87,14 @@ function WindowTitleBar() {
         <BrandLogo size={18} variant="lockup" />
       </div>
       {appWindow && <nav className="flex h-full flex-shrink-0 items-stretch">
+        <WindowControlButton
+          label="Pi 浮窗"
+          onClick={() => {
+            void invoke('pi_float_window').catch(() => undefined);
+          }}
+        >
+          <Bot className="h-3.5 w-3.5" />
+        </WindowControlButton>
         <WindowControlButton label="最小化" onClick={handleMinimize}>
           <Minus className="h-3.5 w-3.5" />
         </WindowControlButton>

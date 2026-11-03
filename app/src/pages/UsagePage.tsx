@@ -55,7 +55,7 @@ function SubMetric({ label, value, unit, hint }: { label: string; value: string;
     <div className="min-w-0" title={hint}>
       <div className="truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{label}</div>
       <div className="mt-0.5 flex items-baseline gap-1">
-        <span className="mono-font truncate text-[17px] font-semibold leading-tight text-[var(--text-primary)]">{value}</span>
+        <span className="mono-font truncate text-[length:var(--font-title)] font-semibold leading-tight text-[var(--text-primary)]">{value}</span>
         {unit && <span className="flex-shrink-0 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">{unit}</span>}
       </div>
     </div>
@@ -228,7 +228,7 @@ export default function UsagePage() {
                   累计消耗
                 </div>
                 <div className="mono-font mt-2 flex items-baseline gap-2">
-                  <span className="text-[40px] font-bold leading-none tracking-[var(--tracking-display)] text-[var(--text-primary)]">
+                  <span className="text-[length:var(--font-hero)] font-bold leading-none tracking-[var(--tracking-display)] text-[var(--text-primary)]">
                     {formatCount(totals.totalTokens)}
                   </span>
                   <span className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">Token</span>
@@ -416,7 +416,7 @@ export default function UsagePage() {
                 <div className="overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:thin]">
                   <div style={{ width: heatmapWidth(heatmapView) + 42, minWidth: '100%' }}>
                     {/* 月份标签 */}
-                    <div className="mb-1.5 flex pl-9 text-[10px] leading-none text-[var(--text-tertiary)]">
+                    <div className="mb-1.5 flex pl-9 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
                       {heatmapView.columns.map((column, index) => (
                         <div key={index} style={{ width: heatmapCellSize(heatmapScale).cell + heatmapCellSize(heatmapScale).gap, flexShrink: 0 }}>
                           {column.monthLabel ? <span className="relative -left-px whitespace-nowrap">{column.monthLabel}</span> : null}
@@ -426,7 +426,7 @@ export default function UsagePage() {
                     {/* items-start：否则两列被拉伸到同高，星期标签行距会与格子错开 */}
                     <div className="flex items-start">
                       {/* 星期标签 */}
-                      <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col text-[10px] text-[var(--text-secondary)]" style={{ gap: heatmapCellSize(heatmapScale).gap }}>
+                      <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col text-[length:var(--font-micro)] text-[var(--text-secondary)]" style={{ gap: heatmapCellSize(heatmapScale).gap }}>
                         {WEEKDAY_LABELS.map((label, rowIndex) => (
                           <div
                             key={rowIndex}
@@ -471,7 +471,7 @@ export default function UsagePage() {
               )}
               {heatmapView.scale !== 'day' && (
                 /* 图例固定在滚动容器之外：格子可以横向滚动，图例始终在可见区域右下角。 */
-                <div className="mt-2 flex items-center justify-end gap-1.5 pr-0.5 text-[10px] leading-none text-[var(--text-tertiary)]">
+                <div className="mt-2 flex items-center justify-end gap-1.5 pr-0.5 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
                   <span>少</span>
                   {heatmapPalette.map((color, index) => (
                     <span key={index} className="h-[14px] w-[14px] rounded-[3px]" style={{ background: color }} />

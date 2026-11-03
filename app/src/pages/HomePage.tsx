@@ -268,15 +268,15 @@ export default function HomePage() {
                             <div className="mt-3 grid gap-2 sm:grid-cols-3">
                               <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)]">
                                 <div className="font-semibold text-[var(--text-primary)]">1. 进入设置</div>
-                                <div className="mt-0.5 text-[11px]">点击下方按钮进入「设置」页</div>
+                                <div className="mt-0.5 text-[length:var(--font-eyebrow)]">点击下方按钮进入「设置」页</div>
                               </div>
                               <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)]">
                                 <div className="font-semibold text-[var(--text-primary)]">2. 选择目录</div>
-                                <div className="mt-0.5 text-[11px]">添加存放 .gguf 文件的本地文件夹</div>
+                                <div className="mt-0.5 text-[length:var(--font-eyebrow)]">添加存放 .gguf 文件的本地文件夹</div>
                               </div>
                               <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)]">
                                 <div className="font-semibold text-[var(--text-primary)]">3. 开始加载</div>
-                                <div className="mt-0.5 text-[11px]">刷新后选择模型并点击加载</div>
+                                <div className="mt-0.5 text-[length:var(--font-eyebrow)]">刷新后选择模型并点击加载</div>
                               </div>
                             </div>
                           )}
@@ -320,15 +320,15 @@ export default function HomePage() {
                         <div className="mt-4 grid gap-2 text-left sm:grid-cols-3">
                           <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-left text-xs text-[var(--text-secondary)]">
                             <div className="font-semibold text-[var(--text-primary)]">1. 进入设置</div>
-                            <div className="mt-0.5 text-[11px]">点击「选择目录」进入设置</div>
+                            <div className="mt-0.5 text-[length:var(--font-eyebrow)]">点击「选择目录」进入设置</div>
                           </div>
                           <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-left text-xs text-[var(--text-secondary)]">
                             <div className="font-semibold text-[var(--text-primary)]">2. 添加路径</div>
-                            <div className="mt-0.5 text-[11px]">指定本地模型所在目录</div>
+                            <div className="mt-0.5 text-[length:var(--font-eyebrow)]">指定本地模型所在目录</div>
                           </div>
                           <div className="border-l border-[var(--border-subtle)] px-2.5 py-1 text-left text-xs text-[var(--text-secondary)]">
                             <div className="font-semibold text-[var(--text-primary)]">3. 开始加载</div>
-                            <div className="mt-0.5 text-[11px]">回到首页即可直接加载</div>
+                            <div className="mt-0.5 text-[length:var(--font-eyebrow)]">回到首页即可直接加载</div>
                           </div>
                         </div>
                         <div className="mt-5 flex justify-center gap-2">

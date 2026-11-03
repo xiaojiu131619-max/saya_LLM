@@ -26,7 +26,10 @@
     --radius-panel: 14px;
     --radius-bubble: 16px;
 
-    /* 字号刻度：唯一口径。UI 里不要再写 text-[Npx]。 */
+    /* 字号刻度：唯一口径。UI 里不要再写 text-[Npx]。
+       micro 10px = 时间戳/徽章/行内提示这类微型文字；
+       hero 40px = 仪表盘巨型指标（对应 WinUI Title Large），与 display 之间存在真实断层。 */
+    --font-micro: 10px;
     --font-eyebrow: 11px;
     --font-caption: 12px;
     --font-body: 14px;
@@ -34,6 +37,7 @@
     --font-subtitle: 16px;
     --font-title: 18px;
     --font-display: 22px;
+    --font-hero: 40px;
 
     /* 行高：界面 1.5；中文长段落 1.78（原先 leading-8 = 2.0 偏松）；代码 1.6。 */
     --leading-tight: 1.25;
@@ -201,7 +205,7 @@
   *::-webkit-scrollbar { width: 8px; height: 8px; }
   *::-webkit-scrollbar-thumb {
     border: 2px solid transparent;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: rgba(128, 128, 128, 0.4);
     background-clip: padding-box;
   }
@@ -448,14 +452,14 @@
   }
 
   .model-tile {
-    border-radius: 0.75rem;
+    border-radius: var(--radius-panel);
     border: 1px solid var(--border-subtle);
     background: var(--surface);
     transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
   }
   .model-tile:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+    box-shadow: var(--shadow-card);
   }
 
   .model-load-summary-metrics { display: grid; min-width: 0; gap: 0.375rem; }
@@ -539,7 +543,7 @@
     min-width: 0;
     overflow: hidden;
     gap: 1px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--surface-muted);
   }
 
@@ -767,13 +771,13 @@
     display: block;
     height: 3px;
     overflow: hidden;
-    border-radius: 9999px;
+    border-radius: var(--radius-pill);
     background: rgba(128, 128, 128, 0.16);
   }
   .runtime-status-bar > span {
     display: block;
     height: 100%;
-    border-radius: 9999px;
+    border-radius: var(--radius-pill);
     transition: width 240ms ease-out;
   }
 

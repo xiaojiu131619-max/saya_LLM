@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
-import type { AppState, ViewType, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset, McpServerEntry, McpServerStatus, ToolActivity, ChatEngineId, WebUiEngineId, AgentTabId } from '@/types';
+import type { AppState, ViewType, WorkspaceMode, ThemeType, ThemeMode, SortType, GridColumnType, ModelInfo, Message, SystemStats, ModelLoadConfig, ChatGenerationConfig, ExternalApiConfig, ModelUsageStats, ChatSession, ModelLaunchMemory, SystemPromptPreset, McpServerEntry, McpServerStatus, ToolActivity, PiStep, ChatEngineId, WebUiEngineId, AgentTabId, ChatScope } from '@/types';
 import {
   checkDesktopEngine,
   connectMcpServer,
@@ -20,6 +20,7 @@ import {
   toFrontendModel,
 } from '@/lib/desktop';
 import { DEFAULT_MAX_COMPLETION_TOKENS, RECOMMENDED_CTX_LENGTH, maxGpuLayers } from '@/lib/modelDefaults';
+import { dayKey } from '@/lib/usageHeatmap';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 import { autoTuneManager, ensureAutoTuneRuntime } from '@/lib/autoTuneRuntime';
 import { canApplyAutoTune, tuneRecordPatch, type AutoTuneAuthorization } from '@/lib/autoTuneTask';
@@ -42,8 +43,27 @@ function mixAccent(hex: string, amount: number): string {
 
 const THEME_MANUAL_FLAG = 'agent-llm-theme-manual';
 
+/**
+ * 读取 localStorage 的安全封装。
+ * 隐私模式、被策略禁用或存储配额异常时，连 `getItem` 都可能抛错；
+ * 这些调用发生在模块初始化阶段，一次异常就会让整个应用白屏且无法自愈。
+ */
+function readStoredFlag(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 type Action =
   | { type: 'SET_VIEW'; payload: ViewType }
+  // 顶层界面切换：Agent 工作区 / 对话界面 / 设置中心。
+  // 与 SET_VIEW 分开：前者换整棵界面树，后者只换当前这棵树里在看哪一页。
+  | { type: 'SET_WORKSPACE'; payload: WorkspaceMode }
+  // 切换对话归属：主对话 ↔ 某个 agent 的对话（各自独立侧边栏与数据）。
+  | { type: 'SET_CHAT_SCOPE'; payload: ChatScope }
   | { type: 'SET_CHAT_ENGINE'; payload: ChatEngineId }
   | { type: 'SET_WEBUI_ENGINE'; payload: WebUiEngineId }
   | { type: 'SET_AGENT_TAB'; payload: AgentTabId }
@@ -74,7 +94,8 @@ type Action =
   | { type: 'DELETE_CHAT_SESSION'; payload: { modelId: string; sessionId: string } }
   | { type: 'RENAME_CHAT_SESSION'; payload: { modelId: string; sessionId: string; title: string } }
   | { type: 'ADD_MESSAGE'; payload: { modelId: string; sessionId: string; message: Message } }
-  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[]; warnings?: string[] } }
+  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[]; warnings?: string[]; piSteps?: PiStep[]; piTurnId?: string; piState?: Message['piState']; artifacts?: Message['artifacts'] } }
+  | { type: 'SET_CHAT_SESSION_PI_ID'; payload: { modelId: string; sessionId: string; piSessionId: string } }
   | { type: 'SET_MESSAGE_STREAMING'; payload: { modelId: string; sessionId: string; messageId: string; streaming: boolean; stats?: Message['stats'] } }
   | { type: 'REPLACE_MESSAGE_AND_TRUNCATE_AFTER'; payload: { modelId: string; sessionId: string; messageId: string; message: Message } }
   | { type: 'DELETE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string } }
@@ -132,6 +153,14 @@ type Action =
     }
   | {
       /**
+       * 清空日志累计派生的 `api-*` 用量条目。
+       * 后端在加载/切换模型时会清空 `API_TOKEN_USAGE`；前端若不跟着清，
+       * 上一个模型的 API 用量会一直挂在统计页，直到下一次外部请求覆盖它。
+       */
+      type: 'CLEAR_API_USAGE';
+    }
+  | {
+      /**
        * 引擎（NiNfer / Strata）用量的快照式写入。
        *
        * 引擎的请求记录本身是「全量快照」（最近 24 小时、按请求一条），
@@ -181,6 +210,10 @@ interface StoredAppState {
   usageByModel?: Record<string, ModelUsageStats>;
   chatSessions?: Record<string, ChatSession[]>;
   activeChatSessionIds?: Record<string, string>;
+  /** 当前对话归属（主对话 / Agent 工作区）。 */
+  chatScope?: ChatScope;
+  /** 旧版本可能落过盘的后端选择：只用于迁移，新版本不再持久化它。 */
+  chatEngine?: string;
   apiConfig?: Partial<Omit<ExternalApiConfig, 'apiKey'>> & { apiKey?: string };
   modelLoadConfigs?: Record<string, ModelLoadConfig>;
   modelLaunchMemories?: Record<string, ModelLaunchMemory>;
@@ -206,6 +239,18 @@ function loadStoredState(): StoredAppState {
   } catch {
     return {};
   }
+}
+
+/**
+ * 旧状态里的对话后端只保留三档合法值；不在三档内的值统一归一为 `main`，
+ * 避免旧 localStorage 把失效的字符串带进新类型。
+ */
+function normalizeStoredChatEngine(value: unknown): ChatEngineId {
+  return value === 'fast27b' || value === 'strata' ? value : 'main';
+}
+
+function storedChatScope(stored: StoredAppState): ChatScope {
+  return stored.chatScope === 'pi' ? 'pi' : 'main';
 }
 
 function sanitizeStoredSessions(sessionsByModel: Record<string, ChatSession[]>) {
@@ -238,6 +283,9 @@ function sanitizeStoredSessions(sessionsByModel: Record<string, ChatSession[]>) 
  * 就能到几 MB；localStorage 配额通常只有 5–10 MB，写满后 `setItem` 抛
  * QuotaExceededError，之后的会话与配置**全部**不再落盘。媒体只在本次运行内
  * 可用，重启后保留文字与「N 个附件」的说明；不让它挤掉真正需要持久化的会话。
+ *
+ * agent 产物的图片同样只留路径：`artifacts[].src` 是运行时按需读取的 data URL，
+ * 这里再剥一层，保证任何调用方都不会把 base64 写进 localStorage。
  */
 function stripPersistedMedia(sessionsByModel: Record<string, ChatSession[]>) {
   return Object.fromEntries(
@@ -246,10 +294,20 @@ function stripPersistedMedia(sessionsByModel: Record<string, ChatSession[]>) {
       sessions.map((session) => ({
         ...session,
         messages: session.messages.map((message) => {
-          if (!message.multimodalContent) return message;
-          const textParts = message.multimodalContent.filter((part) => part.type === 'text');
-          if (textParts.length === message.multimodalContent.length) return message;
-          return { ...message, multimodalContent: textParts.length > 0 ? textParts : undefined };
+          let next = message;
+          if (next.multimodalContent) {
+            const textParts = next.multimodalContent.filter((part) => part.type === 'text');
+            if (textParts.length !== next.multimodalContent.length) {
+              next = { ...next, multimodalContent: textParts.length > 0 ? textParts : undefined };
+            }
+          }
+          if (next.artifacts?.some((artifact) => artifact.src)) {
+            next = {
+              ...next,
+              artifacts: next.artifacts.map((artifact) => ({ ...artifact, src: undefined })),
+            };
+          }
+          return next;
         }),
       })),
     ]),
@@ -355,13 +413,64 @@ function storedLoadConfigFor(model: ModelInfo): ModelLoadConfig | undefined {
 // 此时把当时的 theme 视为用户的显式选择，否则默认跟随系统。
 const storedThemeMode = (mode: string | undefined, fallback: ThemeMode): ThemeMode =>
   (mode === 'system' || mode === 'light' || mode === 'dark') ? mode : fallback;
-const legacyThemeMode: ThemeMode = typeof window !== 'undefined'
-  && window.localStorage.getItem(THEME_MANUAL_FLAG) === '1'
+const legacyThemeMode: ThemeMode = readStoredFlag(THEME_MANUAL_FLAG) === '1'
   && (storedTheme === 'light' || storedTheme === 'dark')
   ? storedTheme
   : 'system';
 
+/** 只接受字面量对象，数组 / 字符串 / null 一律当空表，避免后续遍历时炸。 */
+function asRecord<T>(value: unknown): Record<string, T> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, T>;
+}
+
+/** 提示词预设：整体可能不是数组，单项也可能缺 id / title / prompt。 */
+function sanitizeStoredPresets(value: unknown): SystemPromptPreset[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((preset): preset is Partial<SystemPromptPreset> => Boolean(preset) && typeof preset === 'object')
+    .map((preset, index) => ({
+      id: typeof preset.id === 'string' && preset.id ? preset.id : `preset-${index}`,
+      title: typeof preset.title === 'string' ? preset.title.trim() || '未命名提示词' : '未命名提示词',
+      prompt: typeof preset.prompt === 'string' ? preset.prompt : '',
+      updatedAt: finiteNumber(preset.updatedAt, Date.now()),
+    }))
+    .filter((preset) => preset.prompt.trim().length > 0);
+}
+
+/** 启动记忆：条目可能是 null，`memory.config` 也可能是残缺对象。 */
+function sanitizeLaunchMemories(value: unknown): Record<string, ModelLaunchMemory> {
+  return Object.fromEntries(
+    Object.entries(asRecord<unknown>(value))
+      .filter(([, memory]) => Boolean(memory) && typeof memory === 'object')
+      .map(([modelId, memory]) => {
+        const entry = memory as Partial<ModelLaunchMemory>;
+        return [
+          modelId,
+          {
+            config: normalizeLoadConfig((entry.config ?? {}) as Partial<ModelLoadConfig>),
+            updatedAt: finiteNumber(entry.updatedAt, Date.now()),
+          },
+        ] as const;
+      })
+  );
+}
+
+/** 每个模型的「当前会话」映射：值必须是字符串，否则活动会话会指向 undefined。 */
+function sanitizeActiveSessions(value: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [modelId, sessionId] of Object.entries(asRecord<unknown>(value))) {
+    if (typeof sessionId === 'string') result[modelId] = sessionId;
+  }
+  return result;
+}
+
 const initialState: AppState = {
+  // 顶层界面：每次启动都落在 Agent 工作区——对话界面依赖已加载的模型，
+  // 空手进来只会看到一个用不了的输入框。
+  workspace: 'agent',
+  // 对话归属：默认主对话（Pi 工作区从侧边栏头像或 Agent 页入口进来）。
+  chatScope: storedChatScope(storedState),
   currentView: 'home',
   theme: storedTheme ?? 'light',
   themeMode: storedThemeMode(storedUi.themeMode, legacyThemeMode),
@@ -394,20 +503,9 @@ const initialState: AppState = {
     reasoningMode: storedState.chatConfig?.reasoningMode ?? 'auto',
     enabledTools: Array.isArray(storedState.chatConfig?.enabledTools) ? storedState.chatConfig.enabledTools : [],
   },
-  systemPromptPresets: (storedState.systemPromptPresets ?? [])
-    .filter((preset) => preset.prompt.trim().length > 0)
-    .map((preset) => ({
-      ...preset,
-      title: preset.title.trim() || '未命名提示词',
-      updatedAt: Number(preset.updatedAt || Date.now()),
-    })),
-  usageByModel: storedState.usageByModel ?? {},
-  modelLaunchMemories: Object.fromEntries(
-    Object.entries(storedState.modelLaunchMemories ?? {}).map(([modelId, memory]) => [
-      modelId,
-      { ...memory, config: normalizeLoadConfig(memory.config) },
-    ])
-  ),
+  systemPromptPresets: sanitizeStoredPresets(storedState.systemPromptPresets),
+  usageByModel: asRecord<ModelUsageStats>(storedState.usageByModel),
+  modelLaunchMemories: sanitizeLaunchMemories(storedState.modelLaunchMemories),
   recentModelUsage: Object.fromEntries(
     Object.entries(storedState.recentModelUsage ?? {})
       .filter(([, usedAt]) => Number.isFinite(Number(usedAt)))
@@ -416,31 +514,49 @@ const initialState: AppState = {
       .slice(0, 3)
   ),
   chatSessions: refreshLegacyAutoTitles(sanitizeStoredSessions(storedState.chatSessions ?? {})),
-  activeChatSessionIds: storedState.activeChatSessionIds ?? {},
+  activeChatSessionIds: sanitizeActiveSessions(storedState.activeChatSessionIds),
   // MCP 服务器配置以后端 config.json 为唯一真源，hydrate 时拉取，这里只给空初值。
   mcpServers: [],
   // 自带对话的后端选择（会话级，不持久化）：main = 主 llama-server。
-  chatEngine: 'main',
+  chatEngine: normalizeStoredChatEngine(storedState.chatEngine),
   // Agent 页 WebUI 标签的后端选择（会话级）：与对话页的后端各自独立。
   webuiEngine: 'main',
   // Agent 页标签（会话级）：默认 dsh 主框架。
-  agentTab: 'shiyi',
+  agentTab: 'pi',
 };
 
+/** 每日用量按**本地日期**分桶：`toISOString()` 是 UTC，在 UTC+8 的 00:00–08:00
+    会落到前一天，热力图与每日统计整体错位一天。复用 usageHeatmap 的口径。 */
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return dayKey(new Date());
+}
+
+/**
+ * 取有限数值：`Number('bad')` / `Number(Infinity)` 会得到 NaN / Infinity，
+ * 直接进 `Math.max` 仍是 NaN，最终被序列化进模型加载参数，报错点离数据源很远。
+ * 非法值统一回落 fallback，再按 [min, max] 收口。
+ */
+function finiteNumber(
+  value: unknown,
+  fallback: number,
+  min = Number.NEGATIVE_INFINITY,
+  max = Number.POSITIVE_INFINITY,
+): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
 }
 
 function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig> & { kvQuant?: string })): ModelLoadConfig {
   const migratedCtxLength = config.ctxLength === 327689 ? RECOMMENDED_CTX_LENGTH : config.ctxLength;
   const legacyKvQuant = 'kvQuant' in config && typeof config.kvQuant === 'string' ? config.kvQuant : 'f16';
   return {
-    ctxLength: Math.max(1, Number(migratedCtxLength ?? RECOMMENDED_CTX_LENGTH)),
-    gpuLayers: Math.max(0, Number(config.gpuLayers ?? 0)),
-    batchSize: Math.max(1, Number(config.batchSize ?? 512)),
-    physicalBatchSize: Math.max(1, Number(config.physicalBatchSize ?? 512)),
-    threads: Math.round(Number(config.threads ?? -1)),
-    parallel: Math.round(Number(config.parallel ?? -1)),
+    ctxLength: finiteNumber(migratedCtxLength ?? RECOMMENDED_CTX_LENGTH, RECOMMENDED_CTX_LENGTH, 1),
+    gpuLayers: finiteNumber(config.gpuLayers ?? 0, 0, 0),
+    batchSize: finiteNumber(config.batchSize ?? 512, 512, 1),
+    physicalBatchSize: finiteNumber(config.physicalBatchSize ?? 512, 512, 1),
+    threads: Math.round(finiteNumber(config.threads ?? -1, -1)),
+    parallel: Math.round(finiteNumber(config.parallel ?? -1, -1)),
     fastAttention: config.fastAttention ?? true,
     kvCache: config.kvCache ?? true,
     kvUnified: config.kvUnified ?? false,
@@ -452,24 +568,24 @@ function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig>
     cacheTypeVEnabled: config.cacheTypeVEnabled ?? legacyKvQuant !== 'f16',
     cacheTypeV: config.cacheTypeV ?? legacyKvQuant,
     ropeFreqBaseEnabled: config.ropeFreqBaseEnabled ?? false,
-    ropeFreqBase: Math.max(0, Number(config.ropeFreqBase ?? 0)),
+    ropeFreqBase: finiteNumber(config.ropeFreqBase ?? 0, 0, 0),
     ropeFreqScaleEnabled: config.ropeFreqScaleEnabled ?? false,
-    ropeFreqScale: Math.max(0, Number(config.ropeFreqScale ?? 0)),
+    ropeFreqScale: finiteNumber(config.ropeFreqScale ?? 0, 0, 0),
     seedEnabled: config.seedEnabled ?? false,
-    seed: Math.round(Number(config.seed ?? -1)),
+    seed: Math.round(finiteNumber(config.seed ?? -1, -1)),
     speculativeDecoding: (() => {
       const mode = config.speculativeDecoding as ModelLoadConfig['speculativeDecoding'];
       return mode === 'mtp' || mode === 'dspark' || mode === 'dflash' ? mode : 'off';
     })(),
     specDraftNMaxEnabled: config.specDraftNMaxEnabled ?? false,
-    specDraftNMax: Math.min(16, Math.max(1, Math.round(Number(config.specDraftNMax ?? 4)))),
+    specDraftNMax: Math.min(16, Math.max(1, Math.round(finiteNumber(config.specDraftNMax ?? 4, 4)))),
     chatTemplate: config.chatTemplate ?? '',
     rememberSettings: config.rememberSettings ?? true,
     showAdvancedSettings: config.showAdvancedSettings ?? false,
     idleAutoUnload: config.idleAutoUnload ?? false,
-    idleAutoUnloadMinutes: Math.max(1, Math.round(Number(config.idleAutoUnloadMinutes ?? 15))),
-    moeCpuLayers: Math.max(0, Number(config.moeCpuLayers ?? 0)),
-    reasoningBudget: Math.max(0, Math.round(Number(config.reasoningBudget ?? 0))),
+    idleAutoUnloadMinutes: Math.round(finiteNumber(config.idleAutoUnloadMinutes ?? 15, 15, 1)),
+    moeCpuLayers: finiteNumber(config.moeCpuLayers ?? 0, 0, 0),
+    reasoningBudget: Math.round(finiteNumber(config.reasoningBudget ?? 0, 0, 0)),
   };
 }
 
@@ -573,10 +689,28 @@ function hasStreamingMessage(sessionsByModel: Record<string, ChatSession[]>) {
   );
 }
 
+/** 设置中心里的分页：这些视图属于设置界面，不属于 Agent 工作区。 */
+const SETTINGS_VIEWS: ViewType[] = ['settings', 'kernel', 'usage', 'tools', 'skills', 'data'];
+
 function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case 'SET_VIEW':
-      return { ...state, currentView: action.payload };
+    case 'SET_WORKSPACE':
+      // 只换整棵界面树，当前这棵树里在看哪一页保持不变——
+      // 切到 Agent 工作区再切回对话，正在聊的那句不会被打断。
+      return { ...state, workspace: action.payload };
+    case 'SET_CHAT_SCOPE':
+      return { ...state, chatScope: action.payload };
+    case 'SET_VIEW': {
+      // SET_VIEW 兼容旧写法：'chat' 是"去对话界面"，其余按归属分流到
+      // Agent 工作区或设置中心。界面归属在这里定死，调用方不必各自记着。
+      if (action.payload === 'chat') {
+        return { ...state, workspace: 'chat' };
+      }
+      if (SETTINGS_VIEWS.includes(action.payload)) {
+        return { ...state, workspace: 'settings', currentView: action.payload };
+      }
+      return { ...state, workspace: 'agent', currentView: action.payload };
+    }
     case 'SET_CHAT_ENGINE':
       return { ...state, chatEngine: action.payload };
     case 'SET_WEBUI_ENGINE':
@@ -757,7 +891,20 @@ function appReducer(state: AppState, action: Action): AppState {
           ...(action.payload.reasoningContent !== undefined ? { reasoningContent: action.payload.reasoningContent } : {}),
           ...(action.payload.toolActivity !== undefined ? { toolActivity: action.payload.toolActivity } : {}),
           ...(action.payload.warnings !== undefined ? { warnings: action.payload.warnings } : {}),
+          ...(action.payload.piSteps !== undefined ? { piSteps: action.payload.piSteps } : {}),
+          ...(action.payload.piTurnId !== undefined ? { piTurnId: action.payload.piTurnId } : {}),
+          ...(action.payload.piState !== undefined ? { piState: action.payload.piState } : {}),
+          ...(action.payload.artifacts !== undefined ? { artifacts: action.payload.artifacts } : {}),
         } : m),
+      }));
+      return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
+    }
+    case 'SET_CHAT_SESSION_PI_ID': {
+      const sessions = state.chatSessions[action.payload.modelId] || [];
+      const nextSessions = updateSessionList(sessions, action.payload.sessionId, (session) => ({
+        ...session,
+        piSessionId: action.payload.piSessionId,
+        updatedAt: Date.now(),
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
     }
@@ -1070,6 +1217,15 @@ function appReducer(state: AppState, action: Action): AppState {
         },
       };
       return { ...state, usageByModel: { ...state.usageByModel, [modelId]: nextUsage } };
+    }
+    // 后端日志累计已清空（或服务刚启动）：移除残留的 api-* 条目。
+    // 没有可删条目时返回原 state，避免轮询每 2 秒制造一次新引用触发全应用重渲染。
+    case 'CLEAR_API_USAGE': {
+      const apiIds = Object.keys(state.usageByModel).filter((id) => id.startsWith('api-'));
+      if (apiIds.length === 0) return state;
+      const usageByModel = { ...state.usageByModel };
+      for (const id of apiIds) delete usageByModel[id];
+      return { ...state, usageByModel };
     }
     // 引擎后端：指标快照已是全量口径，直接覆盖该后端的累计条目。
     // 不累加的原因：快照每次轮询都会把同一批历史请求再算一遍，累加会让总量持续虚高。
@@ -1459,12 +1615,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!isDesktopRuntime()) return;
     let disposed = false;
     let timer: number | null = null;
+    // 连续失败次数：用于退避重试。曾经 catch 里直接 return，注释写「下个周期再试」，
+    // 实际却再也不会排下一轮——服务重启或一次 IPC 抖动之后，整个应用生命周期内
+    // 都不再采集 API 用量。
+    let failures = 0;
 
     const poll = async () => {
       if (disposed) return;
       try {
         const entries = await getApiTokenUsage();
+        failures = 0;
         if (disposed || !Array.isArray(entries)) return;
+        if (entries.length === 0) {
+          // 服务刚启动/刚换模型时后端累计为空，同步清掉前端残留的 api-* 条目。
+          dispatch({ type: 'CLEAR_API_USAGE' });
+          return;
+        }
         for (const entry of entries) {
           const modelId = `api-${entry.model_name}`;
           // 该模型在前端聊天统计里已计入的 token（真实模型 id，非 api- 前缀）。
@@ -1504,10 +1670,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
           });
         }
       } catch {
-        // 桌面运行时偶尔失效（服务刚重启）时静默跳过，下个周期再试。
-        return;
+        // 桌面运行时偶尔失效（服务刚重启 / IPC 抖动）：计数退避，下一轮继续。
+        failures += 1;
+      } finally {
+        // 无论成功、失败还是提前 return，都必须在 finally 里排下一轮，
+        // 否则一次失败就让轮询永久停摆。
+        if (!disposed) {
+          const delay = failures === 0 ? 2000 : Math.min(30_000, 2000 * 2 ** Math.min(failures, 4));
+          timer = window.setTimeout(poll, delay);
+        }
       }
-      timer = window.setTimeout(poll, 2000);
     };
     void poll();
 
@@ -1562,6 +1734,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         usageByModel: state.usageByModel,
         chatSessions: stripPersistedMedia(sanitizeStoredSessions(state.chatSessions)),
         activeChatSessionIds: state.activeChatSessionIds,
+        chatScope: state.chatScope,
         modelLoadConfigs,
         modelLaunchMemories: state.modelLaunchMemories,
         recentModelUsage: state.recentModelUsage,
@@ -1615,6 +1788,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.activeChatSessionIds,
     state.apiConfig,
     state.chatConfig,
+    state.chatScope,
     state.chatSessions,
     state.gridColumns,
     state.models,

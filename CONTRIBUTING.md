@@ -14,22 +14,26 @@
 ```
 Agent_LLM/
 ├── LICENSE                  MIT 许可
-├── README.md                → docs/README.md（极简入口）
+├── README.md                项目说明与上手（安装 / 运行 / 配置 / FAQ）
 ├── CHANGELOG.md             按 [Keep a Changelog] 记录所有可观察改动
 ├── CONTRIBUTING.md          本文件
+├── AGENTS.md                项目规则（中文优先、推理参数基线、构建产物保护）
 ├── .gitignore               根级忽略规则（IDE、OS、备份）
 ├── .editorconfig            跨编辑器统一缩进/换行
 ├── .gitattributes           行尾、diff、linguist 标记
+├── .github/                 CI（cargo check/test + npm build/lint）
 ├── docs/                    详细文档
-│   ├── README.md            启动速查
-│   ├── tech-spec.md         早期前端原型设计意图
-│   ├── TECHNICAL_REPORT.md  架构与数据流
-│   └── DEVELOPMENT_GUIDE.md 开发与构建
+│   ├── README.md            文档索引
+│   ├── guides/              指南与长期维护的报告
+│   ├── plans/               计划与设计稿（按版本推进，完成后归档）
+│   ├── reports/             专题报告与验证记录
+│   └── archive/             已完成或已放弃的文档（仅作历史参考）
+├── scripts/                 开发模式 / 一键启动、27B 启停、webui 资产打包
 └── app/                     实际项目（前端 + Tauri 后端）
     ├── src/                 React + TypeScript
     ├── src-tauri/           Rust 后端
-    ├── resources/           llama.cpp 运行时（打包进安装包）
-    └── package.json
+    ├── scripts/             回归测试（*.test.mjs）与打包脚本
+    └── resources/           llama.cpp 内核与引擎资源（不进仓库）
 ```
 
 ## 提交规范

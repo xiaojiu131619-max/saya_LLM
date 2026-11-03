@@ -276,7 +276,7 @@ export function ThoughtBlock({ content }: { content: string }) {
           className="relative overflow-hidden border-t border-dashed border-[var(--border)] dark:border-white/[0.06]"
           style={{ maxHeight: '3.6rem' }}
         >
-          <div className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[13px] leading-[var(--leading-code)] text-[var(--text-tertiary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
+          <div className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[length:var(--font-body)] leading-[var(--leading-code)] text-[var(--text-tertiary)] [overflow-wrap:anywhere] dark:text-[var(--text-secondary)]">
             {trimmed}
           </div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-[var(--surface-muted)] to-transparent dark:from-[var(--surface-raised)]" />
@@ -284,7 +284,7 @@ export function ThoughtBlock({ content }: { content: string }) {
       )}
 
       {expanded && (
-        <div className="border-t border-[var(--border)] px-3.5 py-3 font-mono text-[13px] leading-[var(--leading-code)] text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:border-white/[0.06]">
+        <div className="border-t border-[var(--border)] px-3.5 py-3 font-mono text-[length:var(--font-body)] leading-[var(--leading-code)] text-[var(--text-secondary)] [overflow-wrap:anywhere] dark:border-white/[0.06]">
           {trimmed}
         </div>
       )}
@@ -369,8 +369,8 @@ function InlineMarkdown({ content }: { content: string }) {
       const level = headingMatch[1].length;
       // 标题阶梯：靠字号与字距拉开层级（本机 Win10 无 Segoe UI Variable，不能靠可变字重）。
       const sizes: Record<number, string> = {
-        1: 'text-[20px] font-bold',
-        2: 'text-[17px] font-semibold',
+        1: 'text-[length:var(--font-display)] font-bold',
+        2: 'text-[length:var(--font-title)] font-semibold',
         3: 'text-[length:var(--font-subtitle)] font-semibold',
         4: 'text-[length:var(--font-chat)] font-semibold',
         5: 'text-[length:var(--font-body)] font-semibold',

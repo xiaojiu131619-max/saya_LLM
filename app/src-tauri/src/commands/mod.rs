@@ -1,4 +1,5 @@
 pub mod benchmark;
+pub mod canvas;
 pub mod config;
 pub mod dsh;
 pub mod env_check;
@@ -6,6 +7,7 @@ pub mod fast27b;
 pub mod hardware;
 pub mod mcp;
 pub mod model;
+pub mod pi_agent;
 pub mod server;
 pub mod storage;
 pub mod strata;
