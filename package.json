@@ -1,0 +1,24 @@
+{
+  "name": "agent_llm",
+  "version": "1.0.0",
+  "description": "Windows 本地大模型启动器。Tauri 2 + React 19 前端，Rust 后端，围绕 llama.cpp 的 `llama-server` 提供「内核管理 → 模型扫描 → 参数加载 → 对话 → 对外 API」的完整链路。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaojiu131619-max/saya_LLM.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/xiaojiu131619-max/saya_LLM/issues"
+  },
+  "homepage": "https://github.com/xiaojiu131619-max/saya_LLM#readme"
+}
