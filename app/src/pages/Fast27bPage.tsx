@@ -660,6 +660,15 @@ export default function Fast27bPage() {
     { id: "bonsai", label: "Bonsai" },
     { id: "saluki", label: "Saluki" },
   ];
+  /** 变体胶囊点不动时的具体原因（按命中顺序给出第一条），null 表示可点。 */
+  const capsuleDisabledReason = (exists: boolean) => {
+    if (!desktop) return "NiNfer 引擎只在桌面版可用：请用 agent-llm.exe 操作。";
+    if (busy) return "引擎操作进行中，等当前操作结束再切换。";
+    if (settingsDirty) return "高级配置有未保存的改动：先点「保存」或还原，再切换变体。";
+    if (!status) return "正在读取引擎状态，稍候再试。";
+    if (!exists) return "模型文件缺失：展开「高级配置」检查该变体的模型路径。";
+    return null;
+  };
   const modelTitle = selectedModel === "saluki" ? "Saluki 27B" : "Bonsai 27B";
   const modelSpec = selectedModel === "saluki" ? "MTP" : "DFlash2";
   const presetExists = (variant: Fast27bModelVariant) =>
@@ -688,17 +697,17 @@ export default function Fast27bPage() {
                 {variants.map(({ id, label }) => {
                   const active = selectedModel === id;
                   const exists = presetExists(id);
+                  const disabledReason = capsuleDisabledReason(exists);
                   return (
                     <button
                       key={id}
                       type="button"
                       aria-pressed={active}
-                      disabled={busy || settingsDirty || !status || !desktop || !exists}
+                      disabled={Boolean(disabledReason)}
                       onClick={() => void handleSelectModel(id)}
                       title={
-                        !exists
-                          ? "模型文件缺失，请展开高级配置检查路径"
-                          : `切换到 ${label} 27B（${id === "saluki" ? "MTP" : "DFlash2"}）`
+                        disabledReason
+                          ?? `切换到 ${label} 27B（${id === "saluki" ? "MTP" : "DFlash2"}）`
                       }
                       className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[length:var(--font-eyebrow)] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                         active
