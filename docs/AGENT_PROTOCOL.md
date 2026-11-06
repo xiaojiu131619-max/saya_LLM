@@ -32,7 +32,7 @@
 - 桥地址与 token 由 spawn 时环境变量注入（`PI_HOST_BRIDGE_URL` / `PI_HOST_BRIDGE_TOKEN`），
   **不得写进日志或落盘**。
 - 安装与版本（`services/pi_install.rs`）：npm registry 版本列表、在线安装到应用数据
-  目录、版本锁、回滚。Pi 不要求目标机装 Python——Node 由 dsh 链路同款方式托管。
+  目录、版本锁、回滚。Pi 不要求目标机装 Python——Node 由 `services/node_installer.rs` 托管。
 
 ## 3. 传输一：RPC JSONL（宿主 ↔ Pi）
 

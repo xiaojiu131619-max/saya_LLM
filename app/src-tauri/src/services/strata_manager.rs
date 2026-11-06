@@ -1,6 +1,6 @@
 //! 智慧模型（Strata 引擎）旁路进程管理。
 //!
-//! 与 fast27b_manager / dsh_manager 同一套进程管理规范，但启动形态不同：
+//! 与 fast27b_manager 同一套进程管理规范，但启动形态不同：
 //! strata 的推理内核 `strata.exe` 不直接对外提供 OpenAI 接口，必须由它自带的
 //! Python 网关托管——网关负责拉起内核、套 chat template、解析工具调用，再对外
 //! 暴露 `/v1/chat/completions`。所以这里 spawn 的是「Python 网关」，内核是它的
@@ -39,7 +39,7 @@ use crate::services::strata_metrics;
 // 程序路径来自应用配置并经启动前校验，无 shell、无命令字符串拼接。
 use std::process::Command as SpawnProcess;
 
-/// 日志环形缓冲上限（与 fast27b / dsh 一致）。
+/// 日志环形缓冲上限（与 fast27b 一致）。
 const LOG_CAP: usize = 5000;
 
 /// 探活轮询间隔（每 5 个 200ms tick 约 1 秒一次）。
@@ -328,8 +328,8 @@ pub fn probe_health(port: u16) -> Option<StrataHealth> {
 /// 读取网关 `/v1/models` 报出的模型 ID。
 ///
 /// 智慧模型的模型名由 run config 决定（S：`qwen3.8-flash-next-gyro-gyro-s`，
-/// M：`qwen3.8-flash-next-gyro-gyro-m`），应用配置里没有这一项——接入 dsh 时
-/// 必须按网关实际回报的 ID 写，写错会得到一个 404，而错误出在 dsh 侧，最难查。
+/// M：`qwen3.8-flash-next-gyro-gyro-m`），应用配置里没有这一项——
+/// 对外调用必须按网关实际回报的 ID 写，写错会得到一个 404。
 pub fn probe_model_ids(port: u16, api_key: &str) -> Vec<String> {
     let url = format!("http://127.0.0.1:{}/v1/models", port);
     let Ok(client) = reqwest::blocking::Client::builder()

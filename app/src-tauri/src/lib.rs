@@ -17,7 +17,7 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// 真正退出：先停止 llama-server、fast-27b、智慧模型、dsh、Pi 与 MCP 旁路进程，再退出进程。
+/// 真正退出：先停止 llama-server、fast-27b、智慧模型、Pi 与 MCP 旁路进程，再退出进程。
 fn quit_app(app: &tauri::AppHandle) {
     eprintln!("[app] quit requested, stopping server...");
     let _ = services::process_manager::stop_server();
@@ -25,7 +25,6 @@ fn quit_app(app: &tauri::AppHandle) {
     services::fast27b_manager::stop_fast27b_on_exit();
     services::strata_manager::stop_strata_on_exit();
     services::webui_bridge::stop();
-    services::dsh_manager::stop_dsh_on_exit();
     services::pi_agent::stop_on_exit();
     services::canvas_manager::stop_on_exit();
     commands::mcp::disconnect_all_on_exit();
@@ -123,20 +122,6 @@ pub fn run() {
             commands::updater::update_center_install,
             commands::updater::update_center_cancel,
             commands::updater::detect_system_proxy,
-            commands::dsh::dsh_env_check,
-            commands::dsh::dsh_get_status,
-            commands::dsh::dsh_install_node,
-            commands::dsh::dsh_install_package,
-            commands::dsh::dsh_uninstall,
-            commands::dsh::dsh_cancel_install,
-            commands::dsh::dsh_reveal_dir,
-            commands::dsh::dsh_start,
-            commands::dsh::dsh_stop,
-            commands::dsh::dsh_get_logs,
-            commands::dsh::dsh_clear_logs,
-            commands::dsh::dsh_bind_model,
-            commands::dsh::dsh_unbind_model,
-            commands::dsh::dsh_cleanup_data,
             commands::pi_agent::pi_agent_discover,
             commands::pi_agent::pi_agent_install,
             commands::pi_agent::pi_agent_get_status,
@@ -167,8 +152,6 @@ pub fn run() {
             commands::fast27b::fast27b_clear_logs,
             commands::fast27b::fast27b_save_config,
             commands::fast27b::fast27b_set_enabled,
-            commands::fast27b::fast27b_bind_dsh,
-            commands::fast27b::fast27b_unbind_dsh,
             commands::fast27b::fast27b_bridge_ensure,
             commands::fast27b::fast27b_bridge_status,
             commands::fast27b::fast27b_bridge_stop,
@@ -184,8 +167,6 @@ pub fn run() {
             commands::strata::strata_set_enabled,
             commands::strata::strata_get_metrics,
             commands::strata::strata_clear_metrics,
-            commands::strata::strata_bind_dsh,
-            commands::strata::strata_unbind_dsh,
             commands::canvas::canvas_get_config,
             commands::canvas::canvas_save_config,
             commands::canvas::canvas_get_status,

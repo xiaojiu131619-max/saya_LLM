@@ -1,6 +1,6 @@
 //! fast-27b 引擎（Bonsai / Saluki 27B 离线包）旁路进程管理。
 //!
-//! 与 dsh_manager / embedding_manager 同一套进程管理规范：
+//! 与 embedding_manager 同一套进程管理规范：
 //! - 启动：`ninfer-serve.exe <model> --host --port --api-key ...`（推理参数逐项对齐
 //!   `fast-llm/run/bonsai.bat` 与 `saluki.bat`，保留应用的鉴权与网络配置）；
 //! - 进程树：Job Object（KILL_ON_JOB_CLOSE）整树回收，应用退出时联动 stop_fast27b；
@@ -165,7 +165,7 @@ fn engine_search_path(engine_dir: &Path, inherited: Option<OsString>) -> Result<
     std::env::join_paths(paths).map_err(|error| format!("无法组装引擎 PATH：{}", error))
 }
 
-/// 当前运行配置（探活、dsh 绑定取 endpoint 与状态页模型名用）。
+/// 当前运行配置（探活与状态页模型名用）。
 #[derive(Debug, Clone)]
 struct ActiveConfig {
     port: u16,
@@ -248,7 +248,7 @@ const FAULT_SEED_TAIL_LINES: usize = 400;
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
-// Job Object（进程树回收，与 dsh_manager 同规范）
+// Job Object（进程树回收，与 embedding_manager 同规范）
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]

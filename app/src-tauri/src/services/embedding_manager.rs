@@ -8,7 +8,7 @@
 //! [--embd-normalize <n>]`。`--embeddings` 会把服务限定为只提供向量用途，
 //! 与对话/补全互斥（llama.cpp 明确要求只对专用嵌入模型使用）。
 //!
-//! 与 dsh_manager 同一套进程规范：Job Object（KILL_ON_JOB_CLOSE）整树回收、
+//! 与 fast27b / strata 同一套进程规范：Job Object（KILL_ON_JOB_CLOSE）整树回收、
 //! 健康轮询 `/health`、stdout/stderr 双读线程汇聚到本模块日志缓冲。
 
 use std::io::{BufRead, BufReader};
@@ -29,7 +29,7 @@ use serde::Serialize;
 use crate::models::server_config::ServerConfig;
 
 // ---------------------------------------------------------------------------
-// Job Object（进程树回收，与 process_manager / dsh_manager 同规范但独立实例）
+// Job Object（进程树回收，与 process_manager 同规范但独立实例）
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]

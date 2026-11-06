@@ -213,7 +213,7 @@ API Key 不再明文落盘；旧版回退文件 `%APPDATA%\AgentLLM\api_key` 在
 | `model_presets` | 每模型独立参数记忆 | — |
 | `tune_history` | 自动调参历史记录 | — |
 | `mcp_servers` | MCP 服务器列表（stdio / http / sse） | 空 |
-| `dsh` / `fast27b` / `strata` | 各引擎后端的接入配置（`dsh` 为旧版遗留字段） | — |
+| `fast27b` / `strata` / `canvas` | 各引擎与画布的接入配置 | — |
 | `theme` / `close_to_tray` / `auto_scan_on_startup` | 界面与启动行为 | — |
 
 ### 5.3 推理参数默认值
@@ -249,7 +249,7 @@ Agent_LLM/
 │   │   ├── lib/            Tauri 封装与工具（desktop.ts、显存估算与实测校准、媒体适配）
 │   │   └── context/        全局状态
 │   ├── src-tauri/
-│   │   ├── src/commands/   Tauri 命令（model / server / updater / config / pi_agent / dsh / strata / mcp / hardware…）
+│   │   ├── src/commands/   Tauri 命令（model / server / updater / config / pi_agent / strata / mcp / hardware…）
 │   │   ├── src/services/   进程管理、GGUF 解析、模型扫描、内核更新、显卡监测、引擎管理
 │   │   └── src/models/     配置与数据结构
 │   ├── scripts/            回归测试（*.test.mjs）与打包脚本
@@ -303,12 +303,11 @@ NVIDIA 走 NVML，检查驱动；AMD / Intel 走 DXGI + PDH 回退读取独显�
 
 - **仅 Windows 10/11 验证**。代码里有 `windows_subsystem = "windows"`、`creation_flags(0x08000000)` 隐藏子进程窗口、Windows 专属显存读取等实现；其他平台理论上能跑 Tauri，但不在支持范围。
 - **仓库与便携包不含模型、不含 llama.cpp 预编译二进制**。没有内核时应用无法加载任何模型。
-- **`npm run eval:v4.2` 当前不可用**。该脚本指向 `app/scripts/eval-v4.2.mjs`，但这个文件不在仓库中，执行会失败。
 - **三条推理后端不能并行**。显存互斥导致的硬限制，同时起会互相抢显存、双双掉速甚至 OOM。
 - **`scripts/stop-swift27b.bat` 的作用域是整个机器**：它会结束所有 `llama-server.exe` 进程，包括你正在用的主模型。
 - **Pi 是常驻 Node 子进程**：它跑在宿主拉起的 `pi --mode rpc` 里，关掉应用时进程树会被整体回收。技能库需单独指定；宿主只注入命中的 1–2 个技能正文，缺失时任务质量会下降。
 - **Pi 的命令执行不是 OS 级沙箱**：文件路径限制在会话工作区，命令按权限三档判定，但 `full` 档仍以当前用户权限执行；强隔离需要容器/VM。
-- **旧版 dsh（DeepSeek Harness）入口已从 Agent 页移除**，相关代码与配置字段暂时保留在仓库中，不再出现在界面上。
+- **旧版 dsh（DeepSeek Harness）已整体下线**（2026-11-06）：Agent 页入口、命令域、托管安装与配置字段全部移除；旧配置里的 `dsh` 段与 `%APPDATA%\AgentLLM\dsh-home` 可安全删除（托管 Node 运行时能力保留给画布复用）。
 - **大 MoE 模型在消费级显存上需要 `ncmoe` 卸载**，速度会明显低于全显存方案，这是权重搬运开销而非配置错误。
 - **长上下文质量没有官方背书**。以 27B 预设为例，其模型卡的 KLD 评测只覆盖 512 token；长上下文出现异常输出时先降 `-c` 复验。
 - **`mmproj` 必须与模型架构严格匹配**，同名系列的不同仓库可能是不兼容的投影器（如 27B 与 Flash-Next）。

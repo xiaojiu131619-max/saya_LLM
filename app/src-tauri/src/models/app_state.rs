@@ -212,8 +212,6 @@ pub struct AppConfig {
     /// 与 default_port（对话/VLM 服务）不同端口，才能同时运行两类模型；默认 8081。
     #[serde(default = "default_embedding_port")]
     pub embedding_port: u16,
-    /// dsh（DeepSeek Harness）接入配置（v0.4 新增，serde default 平滑迁移）。
-    pub dsh: crate::models::dsh_types::DshConfig,
     /// MCP（Model Context Protocol）服务器列表（v0.5 新增，serde default 平滑迁移）。
     /// 每个条目是一个本机 stdio 子进程；对话时其工具会并入 llama.cpp 的工具集。
     #[serde(default)]
@@ -258,7 +256,6 @@ impl Default for AppConfig {
             kernel_override_path: None,
             selected_kernel: None,
             embedding_port: default_embedding_port(),
-            dsh: crate::models::dsh_types::DshConfig::default(),
             mcp_servers: Vec::new(),
             fast27b: Fast27bConfig::default(),
             strata: StrataConfig::default(),
@@ -379,7 +376,7 @@ impl Fast27bModel {
         matches!(self, Self::Bonsai)
     }
 
-    /// OpenAI 端点的模型 id（`--model-id` 下发值 = `/v1/models` 回报 = dsh 绑定名）。
+    /// OpenAI 端点的模型 id（`--model-id` 下发值 = `/v1/models` 回报值）。
     pub fn model_id(self) -> &'static str {
         match self {
             Self::Bonsai => "bonsai",
@@ -473,8 +470,6 @@ pub struct Fast27bConfig {
     pub default_thinking_budget: u32,
     /// 官方 llama.cpp webui 同源桥端口（引擎没有网页界面，桥负责提供页面并抹平协议差异）。
     pub bridge_port: u16,
-    /// 引擎就绪后自动打开 dsh Web UI。
-    pub auto_open_dsh_web: bool,
 }
 
 impl Default for Fast27bConfig {
@@ -497,7 +492,6 @@ impl Default for Fast27bConfig {
             default_max_tokens: 10240,
             default_thinking_budget: 1024,
             bridge_port: 8095,
-            auto_open_dsh_web: true,
         }
     }
 }
@@ -957,7 +951,6 @@ mod fast27b_config_tests {
             port: 9104,
             lan: true,
             bridge_port: 9105,
-            auto_open_dsh_web: false,
             ..Fast27bConfig::default()
         };
         let switched = original.with_selected_model(Fast27bModel::Saluki);

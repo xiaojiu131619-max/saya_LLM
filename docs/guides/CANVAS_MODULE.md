@@ -9,7 +9,7 @@
 Agent 页「画布」标签
   └─ CanvasPanel（状态 / 设置 / 启动 / 停止 / 打开）
        ├─ canvas_manager（Rust）
-       │    ├─ 复用 dsh 的托管 Node（runtimes/）
+       │    ├─ 托管 Node 运行时（runtimes/，node_installer）
        │    ├─ 启动 comfyui-gateway（127.0.0.1:8190）
        │    └─ 启动静态服务（127.0.0.1:3210）
        └─ 独立 Tauri 窗口 → http://127.0.0.1:3210
@@ -30,7 +30,7 @@ Agent 页「画布」标签
   `UPDATE_ENABLED=0`；画布包由应用管理，避免网关 `git pull` 或改源码破坏外挂模块。
 - **启动时不做全量扫描。**
   `SCAN_ON_START=0`，否则 ComfyUI 未启动时扫描会拖住 `/health`，导致启动超时。网关就绪后由应用在后台调用 `/api/setup/scan`。
-- **Node 运行时复用 dsh。**
+- **Node 运行时由应用的托管安装器负责。**
   优先系统 Node（^22.19 || >=24），其次 `%APPDATA%/AgentLLM/runtimes/node-v*-win-x64`；都没有时由画布面板按需下载（约 35 MB），不需要用户手动安装。
 
 ## 3. 数据目录

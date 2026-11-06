@@ -99,10 +99,6 @@ pub struct StrataStatus {
     pub model_name: Option<String>,
     pub max_context: Option<u64>,
     pub pid: Option<u32>,
-    /// 当前 dsh 绑定（settings.yaml 实读；仅当指向本引擎端口时才有值）。
-    pub dsh_bound_model: Option<String>,
-    /// dsh Web 地址（按 dsh 配置端口构造）。
-    pub dsh_web_url: String,
     /// 网关自带的网页界面地址（`/`，strata 内置 WebUI）。
     pub webui_url: String,
 }
@@ -117,19 +113,6 @@ pub async fn strata_get_status(state: State<'_, AppState>) -> Result<StrataStatu
         .await
         .unwrap_or_default();
     let (python_exists, serve_exists, config_exists) = env_checks(&config);
-    // 绑定信息与 llama / fast27b 共用同一个提供方槽位，只有 baseURL 指向本引擎端口时
-    // 才算「智慧模型已接入 dsh」；否则会把别人的绑定误显示成自己的。
-    let (bound_model, bound_base_url) =
-        crate::services::dsh_config::read_binding();
-    let bound_is_strata = bound_base_url
-        .as_ref()
-        .map(|url| url.contains(&format!(":{}", config.port)))
-        .unwrap_or(false);
-    let dsh_port = state
-        .config
-        .lock()
-        .map(|config| config.dsh.dsh_port)
-        .unwrap_or(3080);
     let model_presets = [StrataModel::S, StrataModel::M]
         .into_iter()
         .map(|id| {
@@ -168,8 +151,6 @@ pub async fn strata_get_status(state: State<'_, AppState>) -> Result<StrataStatu
         model_name: runtime.model_name,
         max_context: runtime.max_context,
         pid: runtime.pid,
-        dsh_bound_model: if bound_is_strata { bound_model } else { None },
-        dsh_web_url: format!("http://127.0.0.1:{}", dsh_port),
         webui_url: format!("http://127.0.0.1:{}/", config.port),
     })
 }
@@ -327,127 +308,6 @@ pub fn strata_get_metrics() -> strata_metrics::StrataMetricsSnapshot {
 #[tauri::command]
 pub fn strata_clear_metrics() {
     strata_metrics::clear();
-}
-
-/// 把智慧模型接入 dsh（写入共享提供方槽位并设为默认模型）。
-///
-/// 与 fast27b 同一套流程，区别在模型 ID：fast-27b 的 ID 来自配置，
-/// 智慧模型的 ID 由 run config 决定，只能从网关 `/v1/models` 实读。
-#[tauri::command]
-pub async fn strata_bind_dsh(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<serde_json::Value, String> {
-    let config = strata_config_from_state(&state);
-    let base_url = format!("http://127.0.0.1:{}", config.port);
-    let api_key = config.api_key.clone();
-    let port = config.port;
-    let context_window = strata_manager::runtime_status()
-        .max_context
-        .and_then(|value| u32::try_from(value).ok());
-
-    app.emit(
-        "dsh:progress",
-        serde_json::json!({ "stage": "bind", "message": "正在校验 Strata 引擎 API..." }),
-    )
-    .ok();
-    let probe_key = api_key.clone();
-    let models = tokio::task::spawn_blocking(move || strata_manager::probe_model_ids(port, &probe_key))
-        .await
-        .map_err(|e| e.to_string())?;
-    let model_id = models.into_iter().next().ok_or_else(|| {
-        "Strata 引擎未运行或不可达：请先在本页启动引擎、等权重加载完成，再接入 dsh。".to_string()
-    })?;
-
-    // 真实小补全：dsh 拿到 200 但内容为空同样不可用（思考模型只回 reasoning_content 也算通过）。
-    app.emit(
-        "dsh:progress",
-        serde_json::json!({ "stage": "bind", "message": "正在校验本地模型 API（真实小补全）..." }),
-    )
-    .ok();
-    let verify_base = base_url.clone();
-    let verify_model = model_id.clone();
-    let verify_key = api_key.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::services::dsh_config::verify_model_completion(
-            &verify_base,
-            &verify_model,
-            Some(&verify_key),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // 停止 → 写入（自动备份 settings.yaml.bak）→ 原本在跑则重启。
-    let was_running = crate::services::dsh_manager::is_dsh_running();
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在停止 dsh 以写入配置..." }),
-        )
-        .ok();
-        crate::services::dsh_manager::stop_dsh()?;
-    }
-    app.emit(
-        "dsh:progress",
-        serde_json::json!({ "stage": "bind", "message": "正在写入 dsh 配置（已自动备份 settings.yaml.bak）..." }),
-    )
-    .ok();
-    let write_base = base_url.clone();
-    let write_model = model_id.clone();
-    let write_key = api_key.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::services::dsh_config::write_provider(
-            &write_base,
-            &write_model,
-            Some(&write_key),
-            context_window,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在重新启动 dsh..." }),
-        )
-        .ok();
-        crate::commands::dsh::spawn_dsh_with_events(&state, &app)?;
-    }
-
-    Ok(serde_json::json!({
-        "model_id": model_id,
-        "base_url": base_url,
-        "provider": crate::services::dsh_config::PROVIDER_ID,
-    }))
-}
-
-/// 解除 dsh 绑定（移除共享提供方槽位与默认模型设置），原本在运行则重启。
-/// 该槽位与 llama / fast-27b 共用，解除后它们需要各自重新接入。
-#[tauri::command]
-pub async fn strata_unbind_dsh(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let was_running = crate::services::dsh_manager::is_dsh_running();
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在停止 dsh 以移除配置..." }),
-        )
-        .ok();
-        crate::services::dsh_manager::stop_dsh()?;
-    }
-    tokio::task::spawn_blocking(crate::services::dsh_config::remove_provider)
-        .await
-        .map_err(|e| e.to_string())??;
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在重新启动 dsh..." }),
-        )
-        .ok();
-        crate::commands::dsh::spawn_dsh_with_events(&state, &app)?;
-    }
-    Ok(())
 }
 
 /// 清空智慧模型日志。

@@ -10,6 +10,8 @@
 
 ### 变更
 
+- **dsh（DeepSeek Harness）链路整体下线**：删除 `commands/dsh.rs`、`services/dsh_manager.rs`、`services/dsh_config.rs`、`models/dsh_types.rs` 与 15 条 Tauri 命令注册，`fast27b_bind_dsh` / `strata_bind_dsh` 及其状态字段、`AppConfig.dsh` 配置段、`auto_open_dsh_web` 一并移除。托管 Node 安装能力（画布依赖）拆分到新的 `services/node_installer.rs`，行为不变。release exe 体积 27.49 MB → 26.68 MB；`cargo test --lib` 260 通过（原 268，随 dsh 移走 8 条）。
+- **仓库整理**：删除画布发布用中间产物 `app/dist-canvas/`（4.7 MB，由 `scripts/build-canvas-pack.ps1` 重新生成）与 `.mimosa` 扫描缓存（95 MB）；移除失效的 `npm run eval:v4.2` 脚本项（指向不存在的文件）；`docs/plans/DSH_SPIKE_RECORD.md` 归入 `docs/archive/` 并更新索引；README / CANVAS_MODULE / AGENT_PROTOCOL 中「复用 dsh 托管 Node」「dsh 代码暂留」等已失真的描述同步修正。
 - **WebUI 迁入设置中心并升级为「WebUI 测试」页**：Agent 页的 WebUI 标签移入「设置中心 → WebUI 测试」，保留三后端选择（主模型 / NiNfer / Strata）与官方界面入口；新增「连通性测试」卡，经 Rust 端 `probe_local_openai_api`（仅回环地址、不走系统代理）探测当前后端 `/v1/models`，展示延迟、状态码与模型列表，不受浏览器跨域限制。Agent 页只剩 Pi 与画布两个标签，导航圆点改为跟随 Pi 内核运行状态。
 - **画布与 Pi 双向联动补全**：新增 `canvas_list_workflows` 命令（与 Pi 工具桥同一实现）；画布页「工作流」区列出网关工作流并支持一键「交给 Pi」——自动切到 Chat 的 Pi 工作区并预填一条用 `canvas_run` 运行该工作流的提示词；Pi 图片产物卡新增「画布续作」，打开（必要时启动）画布用产物图继续创作。
 - **NiNfer / Strata 融入 API 服务页**：API 服务页此前在 Strata 后端下整页回退为「主模型未运行」错误视图。现在跟随对话后端三档渲染：Strata 模式显示网关端口 / Base URL / 鉴权 / 在途请求（取指标快照 `active_requests`，不编造槽位分母）、接口在线但权重加载中给出专属提示；用量卡新增 `strataServiceUsage` 聚合（与 NiNfer 同一套解耦层口径）；「另一后端在跑」提示与跳转覆盖两个引擎。

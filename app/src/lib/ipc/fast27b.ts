@@ -72,8 +72,6 @@ export interface Fast27bStatus {
   default_thinking_budget: number;
   /** 官方 webui 同源桥端口（配置）。 */
   bridge_port: number;
-  /** 旧配置字段：dsh 已移除，保留字段以兼容后端配置。 */
-  auto_open_dsh_web: boolean;
 }
 
 /** fast27b 配置段（保存用）。 */
@@ -98,7 +96,6 @@ export interface Fast27bConfig {
   default_thinking_budget: number;
   /** 官方 llama.cpp webui 同源桥端口（浏览器打开 fast27b 网页界面用；占用时自动顺延）。 */
   bridge_port: number;
-  auto_open_dsh_web: boolean;
 }
 
 /** 同源桥信息：url 是浏览器里打开官方 webui 的地址。 */

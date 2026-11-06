@@ -431,8 +431,6 @@ export default function Fast27bPage() {
         default_max_tokens: maxTokensNumber,
         default_thinking_budget: thinkingBudgetNumber,
         bridge_port: bridgePortNumber,
-        // dsh 已移除；配置字段仍由后端保留，固定关闭自动打开。
-        auto_open_dsh_web: false,
       });
       setActionMessage("配置已保存，下次启动生效。");
       setSettingsDirty(false);

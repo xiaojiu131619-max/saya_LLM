@@ -7,8 +7,7 @@
 //! - `fast27b_get_logs`     读取 fast27b 日志环形缓冲
 //! - `fast27b_clear_logs`   清空 fast27b 日志
 //! - `fast27b_get_config` / `fast27b_save_config`  读取/保存 fast27b 配置段
-//! - `fast27b_bind_dsh`     把 fast27b 写为 dsh 默认提供方（与 llama 绑定共用 agent-llm-local 槽位）
-//! - `fast27b_unbind_dsh`   解除 dsh 绑定
+//! - `fast27b_bridge_ensure/status/stop`  官方 webui 同源桥（NiNfer 无内置页面）
 //! - `fast27b_bridge_ensure` / `fast27b_bridge_status` / `fast27b_bridge_stop`
 //!                         官方 llama.cpp webui 同源桥（fast27b 没有网页界面，靠桥提供页面）
 
@@ -19,8 +18,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::models::app_state::{AppState, Fast27bConfig, Fast27bModel};
 use crate::services::backend_gate::{self, Backend};
-use crate::services::dsh_config as dsh_config_service;
-use crate::services::{dsh_manager, fast27b_manager, fast27b_metrics, webui_bridge};
+use crate::services::{fast27b_manager, fast27b_metrics, webui_bridge};
 
 /// 从应用配置读取 fast27b 配置段。
 fn fast27b_config_from_state(state: &State<'_, AppState>) -> Fast27bConfig {
@@ -273,15 +271,9 @@ pub struct Fast27bStatus {
     pub default_thinking_budget: u32,
     /// 官方 webui 同源桥端口（配置）。
     pub bridge_port: u16,
-    /// 就绪后自动打开 dsh Web。
-    pub auto_open_dsh_web: bool,
-    /// 当前 dsh 绑定（settings.yaml 实读；仅当指向 fast27b 端口时才算 fast27b 的绑定）。
-    pub dsh_bound_model: Option<String>,
-    /// dsh Web 地址（按 dsh 配置端口构造）。
-    pub dsh_web_url: String,
 }
 
-/// 读取 fast27b 运行状态 + 配置 + dsh 绑定信息。
+/// 读取 fast27b 运行状态 + 配置。
 #[tauri::command]
 pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
     let config = fast27b_config_from_state(&state);
@@ -291,17 +283,6 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
         runtime.port = Some(config.port);
         runtime.lan = Some(config.lan);
     }
-    let (bound_model, bound_base_url) = dsh_config_service::read_binding();
-    // 绑定信息与 llama 共用 agent-llm-local 槽位：仅当 baseURL 指向 fast27b 端口时才算 fast27b 的绑定。
-    let bound_is_fast27b = bound_base_url
-        .as_ref()
-        .map(|url| url.contains(&format!(":{}", config.port)))
-        .unwrap_or(false);
-    let dsh_port = state
-        .config
-        .lock()
-        .map(|c| c.dsh.dsh_port)
-        .unwrap_or(crate::models::dsh_types::DSH_DEFAULT_PORT);
     let selected_model = config.selected_model();
     let resolved_model_path = config.model_path_for(selected_model);
     let resolved_engine_path = config.engine_path_for_launch();
@@ -337,9 +318,6 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
         default_max_tokens: config.default_max_tokens,
         default_thinking_budget: config.default_thinking_budget,
         bridge_port: config.bridge_port,
-        auto_open_dsh_web: config.auto_open_dsh_web,
-        dsh_bound_model: if bound_is_fast27b { bound_model } else { None },
-        dsh_web_url: format!("http://127.0.0.1:{}", dsh_port),
     }
 }
 
@@ -424,125 +402,5 @@ pub fn fast27b_bridge_status() -> Option<webui_bridge::BridgeInfo> {
 #[tauri::command]
 pub fn fast27b_bridge_stop() -> Result<(), String> {
     webui_bridge::stop();
-    Ok(())
-}
-
-/// 把 fast27b 引擎一键接入 dsh：
-/// 探活 → 真实小补全校验 →（运行中则先停止）→ 备份并写入 settings.yaml →（原在运行则）重启。
-/// 与 llama 的 dsh_bind_model 共用 agent-llm-local 提供方槽位：绑定即替换 dsh 默认模型。
-#[tauri::command]
-pub async fn fast27b_bind_dsh(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<serde_json::Value, String> {
-    let config = fast27b_config_from_state(&state);
-    let base_url = format!("http://127.0.0.1:{}", config.port);
-    // 绑定名与引擎 `--model-id` 同源（/v1/models 回报同值），否则 dsh 发起的请求会 404。
-    let model_id = String::from(config.selected_model().model_id());
-
-    // 1. fast27b 必须在线（带鉴权探活），避免把一个死端点写进 dsh 默认模型。
-    app.emit(
-        "dsh:progress",
-        serde_json::json!({ "stage": "bind", "message": "正在校验 fast27b 引擎 API..." }),
-    )
-    .ok();
-    let probe_port = config.port;
-    let probe_key = config.api_key.clone();
-    let reachable = tokio::task::spawn_blocking(move || {
-        fast27b_manager::probe_models_available(probe_port, &probe_key)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    if !reachable {
-        return Err("fast27b 引擎未运行或不可达：请先在本页启动引擎，再接入 dsh。".to_string());
-    }
-
-    // 2. 真实小补全校验（推理模型容忍仅 reasoning_content）。
-    app.emit(
-        "dsh:progress",
-        serde_json::json!({ "stage": "bind", "message": "正在校验本地模型 API（真实小补全）..." }),
-    )
-    .ok();
-    let verify_base = base_url.clone();
-    let verify_model = model_id.clone();
-    let verify_key = config.api_key.clone();
-    tokio::task::spawn_blocking(move || {
-        dsh_config_service::verify_model_completion(&verify_base, &verify_model, Some(&verify_key))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // 3. 停止 → 写入（备份）。
-    let was_running = dsh_manager::is_dsh_running();
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在停止 dsh 以写入配置..." }),
-        )
-        .ok();
-        dsh_manager::stop_dsh()?;
-    }
-    app
-        .emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在写入 dsh 配置（已自动备份 settings.yaml.bak）..." }),
-        )
-        .ok();
-    let write_base = base_url.clone();
-    let write_model = model_id.clone();
-    let write_key = config.api_key.clone();
-    let write_ctx = config.context_window;
-    tokio::task::spawn_blocking(move || {
-        dsh_config_service::write_provider(
-            &write_base,
-            &write_model,
-            Some(&write_key),
-            Some(write_ctx),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // 4. 原本在运行则重启。
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在重新启动 dsh..." }),
-        )
-        .ok();
-        crate::commands::dsh::spawn_dsh_with_events(&state, &app)?;
-    }
-
-    Ok(serde_json::json!({
-        "model_id": model_id,
-        "base_url": base_url,
-        "provider": dsh_config_service::PROVIDER_ID,
-    }))
-}
-
-/// 解除 dsh 绑定（移除 agent-llm-local 提供方与默认模型设置），原本在运行则重启。
-/// 注意：该槽位与 llama 绑定共用，解除后 llama 侧也需要重新绑定。
-#[tauri::command]
-pub async fn fast27b_unbind_dsh(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let was_running = dsh_manager::is_dsh_running();
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在停止 dsh 以移除配置..." }),
-        )
-        .ok();
-        dsh_manager::stop_dsh()?;
-    }
-    tokio::task::spawn_blocking(dsh_config_service::remove_provider)
-        .await
-        .map_err(|e| e.to_string())??;
-    if was_running {
-        app.emit(
-            "dsh:progress",
-            serde_json::json!({ "stage": "bind", "message": "正在重新启动 dsh..." }),
-        )
-        .ok();
-        crate::commands::dsh::spawn_dsh_with_events(&state, &app)?;
-    }
     Ok(())
 }

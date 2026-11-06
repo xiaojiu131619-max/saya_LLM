@@ -203,7 +203,7 @@ static SERVER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new(
 static SYSTEM_LOGS: Lazy<Mutex<Vec<SystemLogEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 /// 单个模型的 token 累计（来自 llama-server `slot print_timing` 日志行）。
-/// 对外 API / dsh / 应用内聊天请求都会产生这些日志行，在这里统一累计，
+/// 对外 API / 应用内聊天请求都会产生这些日志行，在这里统一累计，
 /// 前端据此把「经 llama-server 的全部 token 消耗」并入使用详情。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TokenUsageAgg {
@@ -1526,7 +1526,7 @@ fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
 }
 
 /// 当前生效的 llama-server 启动配置（进程未启动时可能为 None）。
-/// 供 dsh 接入等处读取真实上下文长度等参数，避免写死固定值。
+/// 供对话页等处读取真实上下文长度等参数，避免写死固定值。
 pub fn current_server_config() -> Option<ServerConfig> {
     LAST_SERVER_CONFIG
         .lock()

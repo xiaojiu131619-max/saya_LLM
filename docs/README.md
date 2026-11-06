@@ -32,7 +32,6 @@
 | [POST_0.5_BACKLOG.md](plans/POST_0.5_BACKLOG.md) | 0.5 之后完成清单：Chat 接入、会话自动启动、产物门、技能雷达、模型矩阵、Pi 分发 | 待排期 |
 | [DYNAMIC_GGUF_DRAFTER_PLAN.md](plans/DYNAMIC_GGUF_DRAFTER_PLAN.md) | 动态 GGUF Drafter（MTP / DSpark / DFlash） | Phase 1-3 已实施，Phase 4 待做 |
 | [WIN7_REPLICA_PLAN.md](plans/WIN7_REPLICA_PLAN.md) | Windows 7 复刻落地计划 | 未执行 |
-| [DSH_SPIKE_RECORD.md](plans/DSH_SPIKE_RECORD.md) | dsh Phase 0 技术验证记录 | 结论已定稿；代码多处引用其结论，**位置固定，勿移动** |
 
 ## reports/ —— 专题报告与验证记录
 
@@ -51,7 +50,8 @@
 
 | 文档 | 内容 | 终结原因 |
 | --- | --- | --- |
-| [DSH_AGENT_0.4_PLAN.md](archive/DSH_AGENT_0.4_PLAN.md) | v0.4 计划书：DeepSeek Harness 接入 | 已实现并随 v0.4.0 发布 |
+| [DSH_AGENT_0.4_PLAN.md](archive/DSH_AGENT_0.4_PLAN.md) | v0.4 计划书：DeepSeek Harness 接入 | 已实现并随 v0.4.0 发布；dsh 已于 2026-11-06 整体下线 |
+| [DSH_SPIKE_RECORD.md](archive/DSH_SPIKE_RECORD.md) | dsh Phase 0 技术验证记录（包版本锁定、pnpm 提速、Node 托管） | 同上；托管 Node 能力已迁到 `services/node_installer.rs` 供画布复用 |
 | [UI_LAYOUT_REDESIGN_PLAN.md](archive/UI_LAYOUT_REDESIGN_PLAN.md) | 界面重新排版计划 | 关联的整套重排最终回滚 |
 | [UI_REDESIGN_DS_EXECUTION.md](archive/UI_REDESIGN_DS_EXECUTION.md) | 界面重排执行计划书 | 同上 |
 | [UI_REDESIGN_ACCEPTANCE.md](archive/UI_REDESIGN_ACCEPTANCE.md) | 界面重排执行与回滚记录 | 结论：全部回滚，工作区未保留改动 |

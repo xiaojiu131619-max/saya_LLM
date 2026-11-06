@@ -23,15 +23,15 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 
 use crate::commands::config::get_app_data_root;
-use crate::models::dsh_types::{DshNodeInfo, DshNodeSource};
 use crate::services::canvas_host::{self, CanvasHostHandle};
-use crate::services::{dsh_installer, process_manager};
+use crate::services::node_installer::{self, NodeInfo, NodeSource};
+use crate::services::process_manager;
 
 /// 画布默认端口。不要使用 3000：本项目 dev server 占用 3000，且上游回退端口会改变 origin。
 pub const DEFAULT_CANVAS_PORT: u16 = 3210;
 /// 网关默认端口（与参考项目一致）。
 pub const DEFAULT_GATEWAY_PORT: u16 = 8190;
-/// 首次安装 Node 时使用的版本（与 dsh 的合规检查保持一致，避免再装一份 22.x）。
+/// 首次安装 Node 时使用的版本（与运行时的合规检查一致，避免再装一份 22.x）。
 const DEFAULT_NODE_VERSION: &str = "24.15.0";
 const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
@@ -261,18 +261,18 @@ pub fn save_config(config: CanvasConfig) -> Result<CanvasConfig, String> {
     Ok(config)
 }
 
-fn node_status() -> (CanvasNodeStatus, DshNodeInfo) {
-    let info = dsh_installer::resolve_node();
+fn node_status() -> (CanvasNodeStatus, NodeInfo) {
+    let info = node_installer::resolve_node();
     let source = match info.source {
-        DshNodeSource::System => "system",
-        DshNodeSource::Managed => "managed",
-        DshNodeSource::None => "missing",
+        NodeSource::System => "system",
+        NodeSource::Managed => "managed",
+        NodeSource::None => "missing",
     };
     let status = CanvasNodeStatus {
         source: source.to_string(),
         version: info.version.clone(),
         path: info.path.clone(),
-        ok: info.source != DshNodeSource::None,
+        ok: info.source != NodeSource::None,
     };
     (status, info)
 }
@@ -962,7 +962,7 @@ pub fn install_node(
     on_progress(format!(
         "开始安装托管 Node.js v{DEFAULT_NODE_VERSION}（只需一次）..."
     ));
-    let result = dsh_installer::install_node_portable(DEFAULT_NODE_VERSION, proxy_url, on_progress);
+    let result = node_installer::install_node_portable(DEFAULT_NODE_VERSION, proxy_url, on_progress);
     if result.is_ok() {
         clear_node_cache();
     }
