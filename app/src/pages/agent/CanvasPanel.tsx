@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import {
   AlertCircle,
+  Bot,
   CheckCircle2,
   Download,
   ExternalLink,
@@ -20,14 +21,15 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
+import { useApp } from '@/context/AppContext';
 import {
   DEFAULT_CANVAS_CONFIG,
   canvasClearLogs,
   canvasGetConfig,
   canvasGetStatus,
   canvasInstallNode,
-  canvasInstallPackFromUrl,
   canvasInstallPackFromZip,
+  canvasListWorkflows,
   canvasOpenBrowser,
   canvasOpenWindow,
   canvasRevealDataDir,
@@ -37,15 +39,9 @@ import {
   onCanvasInstallProgress,
   type CanvasConfig,
   type CanvasStatus,
+  type CanvasWorkflowEntry,
 } from '@/lib/desktop';
 import { isDesktopRuntime } from '@/lib/desktopRuntime';
-
-/** 画布模块的发布信息。未发布时只保留本地 zip 安装路径。 */
-const CANVAS_PACK_RELEASE = {
-  version: '0.24.7',
-  url: 'https://github.com/xiaojiu131619-max/saya_LLM/releases/download/canvas-v0.24.7/Agent_LLM_Canvas_v0.24.7.zip',
-  sha256: '42a4311b6f1ccc1d44ef1d730a05ed6a40d9fff833c16aad2ecd6a181cdd44e8',
-};
 
 type BusyKind = 'start' | 'stop' | 'node' | 'pack' | 'save' | null;
 
@@ -95,16 +91,18 @@ function SectionCard({
 
 export default function CanvasPanel() {
   const desktop = isDesktopRuntime();
+  const { dispatch } = useApp();
   const [status, setStatus] = useState<CanvasStatus | null>(null);
   const [config, setConfig] = useState<CanvasConfig>(DEFAULT_CANVAS_CONFIG);
   const [busy, setBusy] = useState<BusyKind>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<{ tone: 'error' | 'ok'; text: string } | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
-  const [packUrl, setPackUrl] = useState(CANVAS_PACK_RELEASE.url);
-  const [packSha, setPackSha] = useState(CANVAS_PACK_RELEASE.sha256);
-  const [showAdvancedPack, setShowAdvancedPack] = useState(false);
   const mounted = useRef(true);
+  // 网关工作流列表：画布运行时拉一次，可手动刷新；「交给 Pi」入口用它。
+  const [workflows, setWorkflows] = useState<CanvasWorkflowEntry[] | null>(null);
+  const [workflowsLoading, setWorkflowsLoading] = useState(false);
+  const [workflowsError, setWorkflowsError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!desktop) return;
@@ -170,6 +168,58 @@ export default function CanvasPanel() {
   const comfyReady = Boolean(status?.comfy_reachable);
   const canStart = packReady && nodeReady && !running;
   const gatewayReady = Boolean(status?.gateway_ready);
+
+  const loadWorkflows = useCallback(async () => {
+    if (!desktop) return;
+    setWorkflowsLoading(true);
+    setWorkflowsError(null);
+    try {
+      const list = await canvasListWorkflows();
+      if (mounted.current) setWorkflows(list);
+    } catch (error) {
+      if (mounted.current) {
+        setWorkflows(null);
+        setWorkflowsError(String(error));
+      }
+    } finally {
+      if (mounted.current) setWorkflowsLoading(false);
+    }
+  }, [desktop]);
+
+  // 网关就绪时静默拉一次工作流列表（不转圈）；列表块只在 gatewayReady 时渲染，
+  // 网关停止后自然消失，无需在 effect 里清状态。
+  useEffect(() => {
+    if (!desktop || !gatewayReady) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await canvasListWorkflows();
+        if (!cancelled) {
+          setWorkflows(list);
+          setWorkflowsError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setWorkflows(null);
+          setWorkflowsError(String(error));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [desktop, gatewayReady]);
+
+  /** 画布 → Pi：把工作流作为预填提示词送进 Chat 的 Pi 工作区。 */
+  const sendWorkflowToPi = (workflow: CanvasWorkflowEntry) => {
+    const prompt =
+      `请用 canvas_run 运行画布工作流「${workflow.name}」（ID：${workflow.id}）。` +
+      '先用 canvas_status 确认画布网关就绪；需要参数时用 canvas_get_workflow 查看该工作流的 schema，' +
+      '生成参数可以自拟；完成后把产物保存到工作区并告诉我结果。';
+    dispatch({ type: 'SET_CHAT_SCOPE', payload: 'pi' });
+    dispatch({ type: 'SET_VIEW', payload: 'chat' });
+    dispatch({ type: 'SET_PI_PROMPT_DRAFT', payload: prompt });
+  };
 
   const nodeLabel = useMemo(() => {
     if (!status) return '未检测';
@@ -258,17 +308,6 @@ export default function CanvasPanel() {
       }
     });
 
-  const handleDownloadPack = () =>
-    runAction('pack', async () => {
-      if (!packUrl.trim() || !packSha.trim()) {
-        throw new Error('请先填写画布模块下载地址和 SHA256 校验值。');
-      }
-      const next = await canvasInstallPackFromUrl(packUrl.trim(), packSha.trim());
-      if (mounted.current) {
-        setMessage({ tone: 'ok', text: `画布模块已安装${next.version ? `（v${next.version}）` : ''}。` });
-      }
-    });
-
   const handleSaveConfig = () =>
     runAction('save', async () => {
       const saved = await canvasSaveConfig(config);
@@ -322,17 +361,6 @@ export default function CanvasPanel() {
                 画布模块：{packLabel}
                 {!packReady && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {CANVAS_PACK_RELEASE.url && CANVAS_PACK_RELEASE.sha256 && (
-                      <button
-                        type="button"
-                        onClick={() => void handleDownloadPack()}
-                        disabled={busy !== null}
-                        className="inline-flex items-center gap-1 rounded-md bg-[var(--accent)] px-2 py-1 text-[length:var(--font-eyebrow)] font-medium text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                      >
-                        {busy === 'pack' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                        下载画布模块
-                      </button>
-                    )}
                     <button
                       type="button"
                       onClick={() => void handleInstallPackLocal()}
@@ -340,13 +368,6 @@ export default function CanvasPanel() {
                       className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[length:var(--font-eyebrow)] text-secondary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40"
                     >
                       <FolderOpen className="h-3 w-3" /> 从本地 zip 安装
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowAdvancedPack((value) => !value)}
-                      className="text-[length:var(--font-eyebrow)] text-[var(--accent)] hover:underline"
-                    >
-                      {showAdvancedPack ? '收起下载地址' : '修改下载地址'}
                     </button>
                   </div>
                 )}
@@ -356,37 +377,6 @@ export default function CanvasPanel() {
                 它负责真正执行工作流。
               </li>
             </ol>
-            {!packReady && showAdvancedPack && (
-              <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-3">
-                <label className="block">
-                  <span className="mb-1 block text-[length:var(--font-eyebrow)] text-secondary-custom">画布模块 zip 地址</span>
-                  <input
-                    value={packUrl}
-                    onChange={(event) => setPackUrl(event.target.value)}
-                    placeholder="https://.../Agent_LLM_Canvas_v0.24.6.zip"
-                    className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-primary-custom outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[length:var(--font-eyebrow)] text-secondary-custom">SHA256 校验值</span>
-                  <input
-                    value={packSha}
-                    onChange={(event) => setPackSha(event.target.value)}
-                    placeholder="64 位十六进制"
-                    className="mono-font w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-primary-custom outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void handleDownloadPack()}
-                  disabled={busy !== null}
-                  className="inline-flex items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                >
-                  {busy === 'pack' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                  下载并安装
-                </button>
-              </div>
-            )}
           </div>
         </SectionCard>
       )}
@@ -606,7 +596,23 @@ export default function CanvasPanel() {
       </SectionCard>
 
       {/* 工作流 */}
-      <SectionCard title="工作流" icon={Wand2}>
+      <SectionCard
+        title="工作流"
+        icon={Wand2}
+        actions={
+          gatewayReady ? (
+            <button
+              type="button"
+              onClick={() => void loadWorkflows()}
+              disabled={workflowsLoading}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[length:var(--font-eyebrow)] text-secondary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40"
+              title="重新读取网关工作流列表"
+            >
+              <RefreshCw className={`h-3 w-3 ${workflowsLoading ? 'animate-spin' : ''}`} /> 刷新
+            </button>
+          ) : undefined
+        }
+      >
         <div className="space-y-2 text-xs leading-6 text-secondary-custom">
           <p>
             画布内的「设置 → 添加工作流」可以扫描你 ComfyUI 的 <span className="mono-font">workflows</span> 目录，
@@ -614,7 +620,7 @@ export default function CanvasPanel() {
           </p>
           {gatewayReady && (
             <p className="text-primary-custom">
-              网关就绪，当前可用模型 {status?.model_count ?? 0} 个。打开画布后可在工作流列表里切换。
+              网关就绪，当前可用模型 {status?.model_count ?? 0} 个。工作流可以自己跑，也可以<span className="font-medium">交给 Pi</span>：Pi 会用画布工具运行它并把产物带回来。
             </p>
           )}
           {!comfyReady && (
@@ -623,6 +629,49 @@ export default function CanvasPanel() {
             </p>
           )}
         </div>
+
+        {gatewayReady && (
+          <div className="mt-3">
+            {workflowsError && (
+              <p className="rounded-md bg-[var(--state-danger-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--state-danger)]">
+                读取工作流失败：{workflowsError}
+              </p>
+            )}
+            {!workflowsError && workflows && workflows.length === 0 && (
+              <p className="rounded-md bg-[var(--surface-muted)] px-2 py-1.5 text-[length:var(--font-eyebrow)] leading-5 text-secondary-custom">
+                网关还没有工作流：在画布里「设置 → 添加工作流」扫描后回来刷新。
+              </p>
+            )}
+            {workflows && workflows.length > 0 && (
+              <ul className="space-y-1.5">
+                {workflows.map((workflow) => (
+                  <li
+                    key={workflow.id}
+                    className="flex min-w-0 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 transition-colors hover:bg-[var(--surface-hover)]"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-xs text-primary-custom" title={`${workflow.name}（${workflow.id}）`}>
+                      {workflow.name}
+                    </span>
+                    {workflow.enabled === false && (
+                      <span className="flex-shrink-0 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                        未启用
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => sendWorkflowToPi(workflow)}
+                      disabled={workflow.enabled === false}
+                      className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[length:var(--font-eyebrow)] text-secondary-custom transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45 disabled:cursor-not-allowed"
+                      title={`在 Chat 的 Pi 工作区预填一条提示词，让 Pi 用 canvas_run 运行「${workflow.name}」`}
+                    >
+                      <Bot className="h-3 w-3" /> 交给 Pi
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </SectionCard>
 
       {/* 进度 / 消息 */}

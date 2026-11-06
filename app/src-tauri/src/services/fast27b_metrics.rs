@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn parses_explicit_ms_seconds_minutes_and_k_rates() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         assert!(!state.ingest(1, START, NOW));
         assert!(state.ingest(1, DONE, NOW + 1900));
         let metric = &state.history[0];
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn duplicate_stdout_stderr_and_terminal_lines_count_once() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, START, NOW);
         state.ingest(1, START, NOW + 1);
         assert_eq!(state.snapshot(NOW).active_requests, 1);
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn restart_req_one_has_independent_identity_and_old_generation_is_ignored() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, DONE, NOW);
         let first_id = state.history[0].id.clone();
         state.begin_generation(3, Fast27bModel::Saluki, NOW + 1);
@@ -920,7 +920,7 @@ mod tests {
             "req#1 failed during generation | openai-chat | HTTP 500 | internal error",
             "req#1 rejected during prepare | openai-chat | HTTP 400 | invalid request",
         ] {
-            let mut state = state(Fast27bModel::Heretic);
+            let mut state = state(Fast27bModel::Bonsai);
             assert!(state.ingest(1, failure, NOW));
             assert!(!state.ingest(1, failure, NOW + 1));
             assert_eq!(state.snapshot(NOW).active_requests, 0);
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn tool_call_done_reason_records_call_count_for_timeline() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, START, NOW);
         assert!(state.ingest(1, &DONE.replace("stop token", "tool calls 3"), NOW + 1900));
         let metric = &state.history[0];
@@ -943,12 +943,12 @@ mod tests {
         assert_eq!(metric.tool_calls, Some(3));
 
         // 普通完成不携带工具调用数。
-        let mut state = super::tests::state(Fast27bModel::Heretic);
+        let mut state = super::tests::state(Fast27bModel::Bonsai);
         state.ingest(1, DONE, NOW);
         assert_eq!(state.history[0].tool_calls, None);
 
         // 「tool calls 0」不是有效的工具调用收尾，也不计次数。
-        let mut state = super::tests::state(Fast27bModel::Heretic);
+        let mut state = super::tests::state(Fast27bModel::Bonsai);
         state.ingest(1, &DONE.replace("stop token", "tool calls 0"), NOW);
         assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Failed);
         assert_eq!(state.history[0].tool_calls, None);
@@ -959,7 +959,7 @@ mod tests {
         let cancellation =
             "req#1 response failed during transport | HTTP 499 | client disconnected";
         for done_first in [false, true] {
-            let mut state = state(Fast27bModel::Heretic);
+            let mut state = state(Fast27bModel::Bonsai);
             state.ingest(1, START, NOW);
             if done_first {
                 state.ingest(1, DONE, NOW + 1900);
@@ -970,11 +970,11 @@ mod tests {
             assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Cancelled);
             assert_eq!(state.snapshot(NOW + 1902).active_requests, 0);
         }
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         let done_cancelled = DONE.replace("stop token", "cancelled");
         state.ingest(1, &done_cancelled, NOW);
         assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Cancelled);
-        let mut state = super::tests::state(Fast27bModel::Heretic);
+        let mut state = super::tests::state(Fast27bModel::Bonsai);
         state.ingest(
             1,
             "req#1 cancelled during generation | openai-chat | HTTP 499",
@@ -987,7 +987,7 @@ mod tests {
     #[test]
     fn worker_crash_fails_active_requests_without_inventing_requests() {
         let crash = "ERROR engine | worker crash: Paged KV reservation invariant was violated";
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         assert!(!state.ingest(1, crash, NOW));
         assert!(state.history.is_empty());
         state.begin_generation(2, Fast27bModel::Saluki, NOW);
@@ -1006,7 +1006,7 @@ mod tests {
             Fast27bRequestOutcome::Cancelled,
             Fast27bRequestOutcome::Failed,
         ] {
-            let mut state = state(Fast27bModel::Heretic);
+            let mut state = state(Fast27bModel::Bonsai);
             state.ingest(1, START, NOW);
             state.ingest(1, "req#2 failed during prepare | HTTP 503", NOW);
             assert_eq!(state.snapshot(NOW).active_requests, 1);
@@ -1017,7 +1017,7 @@ mod tests {
             assert_eq!(state.history.len(), 2);
             assert_eq!(state.history.back().unwrap().outcome, outcome);
         }
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, START, NOW);
         assert!(state.begin_generation(2, Fast27bModel::Saluki, NOW + 1));
         assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Failed);
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn drained_stop_keeps_completed_readings_and_cancels_only_remaining_active() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         for request_id in 1..=4 {
             state.ingest(
                 1,
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn incomplete_done_and_unrelated_logs_cannot_be_success() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         for line in [
             "[fast27b] 启动：req#1 started | 人工说明",
             "engine ready | bonsai2 | total 6.6s",
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn rolling_24_hours_and_count_cap_are_bounded_and_deduplicated() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, DONE, NOW - HISTORY_WINDOW_MS);
         assert_eq!(state.snapshot(NOW).requests.len(), 1);
         assert!(state.snapshot(NOW + 1).requests.is_empty());
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn persistence_roundtrip_keeps_terminal_history_but_not_active_requests() {
-        let mut original = state(Fast27bModel::Heretic);
+        let mut original = state(Fast27bModel::Bonsai);
         original.ingest(1, DONE, NOW);
         original.ingest(1, "req#2 started | openai-chat stream | 1 message", NOW + 1);
         let json = serde_json::to_string(&PersistedHistory::from_state(&original)).unwrap();
@@ -1194,7 +1194,7 @@ mod tests {
             expected - 346
         );
         assert_eq!(log_epoch_ms("没有时间戳的中文日志", NOW), NOW);
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, &log, at);
         assert_eq!(state.history[0].finished_at, at);
         assert_eq!(state.history[0].outcome, Fast27bRequestOutcome::Success);
@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn snapshot_serialization_matches_snake_case_contract() {
-        let mut state = state(Fast27bModel::Heretic);
+        let mut state = state(Fast27bModel::Bonsai);
         state.ingest(1, DONE, NOW);
         let snapshot = serde_json::to_value(state.snapshot(NOW)).unwrap();
         let object = snapshot.as_object().unwrap();
@@ -1232,7 +1232,7 @@ mod tests {
         ] {
             assert!(metric.contains_key(key), "缺少字段 {key}");
         }
-        assert_eq!(metric["model"], "heretic");
+        assert_eq!(metric["model"], "bonsai");
         assert_eq!(metric["outcome"], "success");
         assert!(metric["error"].is_null());
     }

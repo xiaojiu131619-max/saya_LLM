@@ -6,8 +6,6 @@ import {
   Copy,
   Cpu,
   Download,
-  ExternalLink,
-  Globe,
   Info,
   Pause,
   Play,
@@ -16,7 +14,6 @@ import {
   Square,
   Terminal,
   Trash2,
-  X,
 } from "lucide-react";
 import ToggleSwitch from "@/components/ToggleSwitch";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -25,16 +22,11 @@ import Fast27bPerformance from "@/features/fast27b/Fast27bPerformance";
 import { useFast27bMetrics } from "@/hooks/useFast27bMetrics";
 import { refreshEngineStatus, useEngineStatuses } from "@/hooks/useEngineStatuses";
 import "@/features/fast27b/fast27b.css";
-import { useApp } from "@/context/AppContext";
 import {
   isDesktopRuntime,
   listenDesktopEvent,
-  openExternalUrl,
 } from "@/lib/desktop";
 import {
-  dshGetStatus,
-  dshStart,
-  fast27bBindDsh,
   fast27bClearLogs,
   fast27bGetLogs,
   fast27bGetStatus,
@@ -44,7 +36,6 @@ import {
   fast27bSetEnabled,
   fast27bStart,
   fast27bStop,
-  fast27bUnbindDsh,
   type Fast27bStatus,
   type Fast27bModelVariant,
 } from "@/lib/desktop";
@@ -80,37 +71,14 @@ function classifyLogLine(line: string): LogTone {
   return "default";
 }
 
-/** 轮询等待 dsh Web 就绪；超时返回 null（由调用方决定如何提示）。 */
-async function waitForDshReady(
-  timeoutMs = 40000,
-): Promise<{ running: boolean; webUrl: string | null } | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const status = await dshGetStatus();
-      if (status?.runtime.running && status.runtime.web_url) {
-        return { running: true, webUrl: status.runtime.web_url };
-      }
-    } catch {
-      // 轮询失败继续等
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  return null;
-}
-
 export default function Fast27bPage() {
-  const { dispatch } = useApp();
   const busyRef = useRef(false);
   const editorsInitializedRef = useRef(false);
   const logViewportRef = useRef<HTMLDivElement>(null);
   const engineStatuses = useEngineStatuses();
   const status = engineStatuses.fast27b;
   const metrics = useFast27bMetrics();
-  const [activeTab, setActiveTab] = useState<"overview" | "performance" | "api">("overview");
-  // 胶囊里的 Fast 通道：预留位（后续 9B 小模型），现在只显示一块空页面。
-  // 与 selectedModel 分开：它不改变引擎的模型槽位，也不触发任何配置写入。
-  const [fastView, setFastView] = useState(false);
+  const [activeTab, setActiveTab] = useState<"overview" | "performance">("overview");
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
@@ -118,7 +86,7 @@ export default function Fast27bPage() {
   const [stopping, setStopping] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [switchingModel, setSwitchingModel] = useState(false);
-  const [binding, setBinding] = useState(false);
+
   const [saving, setSaving] = useState(false);
   const [fast27bLogs, setFast27bLogs] = useState<string[]>([]);
   const [logsLive, setLogsLive] = useState(true);
@@ -127,23 +95,22 @@ export default function Fast27bPage() {
   // 可编辑配置（从 status 初始化；「保存配置」落盘）。
   const [enginePath, setEnginePath] = useState("");
   const [selectedModel, setSelectedModel] =
-    useState<Fast27bModelVariant>("heretic");
+    useState<Fast27bModelVariant>("bonsai");
   const [modelPaths, setModelPaths] = useState<
     Record<Fast27bModelVariant, string>
-  >({ heretic: "", saluki: "" });
+  >({ bonsai: "", saluki: "" });
   const modelPath = modelPaths[selectedModel];
   const [port, setPort] = useState("8094");
   const [lan, setLan] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [contextWindow, setContextWindow] = useState("262144");
-  const [draftTokens, setDraftTokens] = useState("4");
-  const [defaultMaxTokens, setDefaultMaxTokens] = useState("32768");
-  const [thinkingBudget, setThinkingBudget] = useState("8192");
+  const [draftTokens, setDraftTokens] = useState("6");
+  const [defaultMaxTokens, setDefaultMaxTokens] = useState("10240");
+  const [thinkingBudget, setThinkingBudget] = useState("1024");
   const [bridgePort, setBridgePort] = useState("8095");
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
-  const [openingDsh, setOpeningDsh] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   // 「工作中」计时起点：进入加载态时定一次，之后交给 WorkingBadge 走表。
   const [loadStartedAt, setLoadStartedAt] = useState<number | null>(null);
@@ -162,7 +129,6 @@ export default function Fast27bPage() {
   // 引擎失效：进程还在、/v1/models 也可能还是 200，但引擎日志已判 worker 崩溃 / 连续 503。
   const degraded = status?.degraded ?? false;
   const needsRestart = status?.requires_restart ?? false;
-  const boundModel = status?.dsh_bound_model ?? null;
   const engineEnabled = status?.enabled ?? true;
   // 加载态：引擎在跑但接口还没就绪，或者刚点了启动。
   const loading = (running && !apiReady) || starting;
@@ -177,8 +143,8 @@ export default function Fast27bPage() {
     setEnginePath(next.engine_path);
     setSelectedModel(next.selected_model);
     setModelPaths({
-      heretic:
-        next.model_presets.find((preset) => preset.id === "heretic")
+      bonsai:
+        next.model_presets.find((preset) => preset.id === "bonsai")
           ?.model_path ?? "",
       saluki:
         next.model_presets.find((preset) => preset.id === "saluki")
@@ -206,7 +172,7 @@ export default function Fast27bPage() {
     return () => window.clearTimeout(timer);
   }, [status, applyStatusToEditors]);
 
-  // 日志：1 秒轮询（与 dsh/llama 日志同范式），可暂停。
+  // 日志：1 秒轮询（与 llama 日志同范式），可暂停。
   useEffect(() => {
     if (!isDesktopRuntime() || !logsOpen) return;
     let disposed = false;
@@ -276,25 +242,6 @@ export default function Fast27bPage() {
     if (el && logsLive) el.scrollTop = el.scrollHeight;
   }, [fast27bLogs, logsLive, logsOpen]);
 
-  /** 确保 dsh 在跑（不在跑则拉起并等待就绪）；返回就绪后的 Web 地址或 null。 */
-  const ensureDshRunning = async (): Promise<string | null> => {
-    const before = await dshGetStatus();
-    if (before?.runtime.running && before.runtime.web_url) {
-      return before.runtime.web_url;
-    }
-    if (before && !before.package.installed) {
-      throw new Error("dsh 尚未安装：请先到 Agent 页完成安装");
-    }
-    await dshStart();
-    const ready = await waitForDshReady();
-    if (!ready) {
-      throw new Error(
-        "dsh 在 40 秒内未就绪：请到 Agent（智能体）页查看 dsh 运行日志",
-      );
-    }
-    return ready.webUrl;
-  };
-
   const handleSelectModel = async (model: Fast27bModelVariant) => {
     if (busyRef.current || model === selectedModel || settingsDirty) return;
     const previousModel = selectedModel;
@@ -302,10 +249,10 @@ export default function Fast27bPage() {
     setSwitchingModel(true);
     setSelectedModel(model);
     setActionMessage(null);
-    if (running) setProgressMessage(`正在切换到 ${model === "heretic" ? "Heretic" : "Saluki"} 27B，重新加载引擎…`);
+    if (running) setProgressMessage(`正在切换到 ${model === "bonsai" ? "Bonsai" : "Saluki"} 27B，重新加载引擎…`);
     try {
       await fast27bSelectModel(model);
-      setActionMessage(`已切换到 ${model === "heretic" ? "Heretic" : "Saluki"} 27B${running ? "，正在加载引擎，API 就绪后即可使用。" : "，点击启动即可运行。"}`);
+      setActionMessage(`已切换到 ${model === "bonsai" ? "Bonsai" : "Saluki"} 27B${running ? "，正在加载引擎，API 就绪后即可使用。" : "，点击启动即可运行。"}`);
     } catch (error) {
       setSelectedModel(previousModel);
       setActionMessage(`模型切换失败：${String(error)}`);
@@ -337,7 +284,7 @@ export default function Fast27bPage() {
     setStarting(true);
     setRuntimeMessage(null);
     setProgressMessage(
-      `正在加载 ${selectedModel === "saluki" ? "Saluki" : "Heretic"} 27B…`,
+      `正在加载 ${selectedModel === "saluki" ? "Saluki" : "Bonsai"} 27B…`,
     );
     try {
       await fast27bStart();
@@ -402,76 +349,6 @@ export default function Fast27bPage() {
     }
   };
 
-  const handleBind = async () => {
-    if (busyRef.current) return;
-    if (!engineEnabled) {
-      setActionMessage("引擎已停用：请先开启引擎开关。");
-      return;
-    }
-    busyRef.current = true;
-    setBinding(true);
-    setActionMessage(null);
-    setProgressMessage("正在把 NiNfer 接入 dsh...");
-    try {
-      const result = await fast27bBindDsh();
-      if (result) {
-        setActionMessage(
-          `已接入模型 ${result.model_id}（${result.provider}），已设为 dsh 默认模型。`,
-        );
-      }
-      await refreshStatusOnly();
-    } catch (error) {
-      setActionMessage(`接入失败：${String(error)}`);
-    } finally {
-      setBinding(false);
-      setProgressMessage(null);
-      busyRef.current = false;
-    }
-  };
-
-  const handleUnbind = async () => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBinding(true);
-    setActionMessage(null);
-    setProgressMessage("正在解除接入...");
-    try {
-      await fast27bUnbindDsh();
-      setActionMessage(
-        "已解除接入：dsh 配置已回滚（备份保留在 settings.yaml.bak）。",
-      );
-      await refreshStatusOnly();
-    } catch (error) {
-      setActionMessage(`解除失败：${String(error)}`);
-    } finally {
-      setBinding(false);
-      setProgressMessage(null);
-      busyRef.current = false;
-    }
-  };
-
-  const handleOpenDshWeb = async () => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setActionMessage(null);
-    setOpeningDsh(true);
-    setProgressMessage("正在确认 dsh Web 状态…");
-    try {
-      const webUrl = await ensureDshRunning();
-      if (!webUrl) {
-        throw new Error("dsh Web 地址未知");
-      }
-      setProgressMessage(null);
-      await openExternalUrl(webUrl);
-    } catch (error) {
-      setProgressMessage(null);
-      setActionMessage(`打开 dsh Web 失败：${String(error)}`);
-    } finally {
-      setOpeningDsh(false);
-      busyRef.current = false;
-    }
-  };
-
   const handleSaveConfig = async () => {
     if (busyRef.current) return;
     const portNumber = Number(port);
@@ -493,8 +370,8 @@ export default function Fast27bPage() {
       setActionMessage("保存失败：上下文窗口必须是正整数。");
       return;
     }
-    if (!Number.isInteger(draftNumber) || draftNumber < 0 || draftNumber > 5) {
-      setActionMessage("保存失败：推测解码草稿长度必须在 0-5 之间。");
+    if (!Number.isInteger(draftNumber) || draftNumber < 1 || draftNumber > 15) {
+      setActionMessage("保存失败：推测解码草稿长度必须在 1-15 之间。");
       return;
     }
     // 0 = 不传 --default-max-tokens（交回引擎自身默认）；非 0 必须是正整数，
@@ -545,7 +422,7 @@ export default function Fast27bPage() {
         model_path: modelPath.trim(),
         selected_model: selectedModel,
         saluki_model_path: modelPaths.saluki.trim(),
-        heretic_model_path: modelPaths.heretic.trim(),
+        bonsai_model_path: modelPaths.bonsai.trim(),
         port: portNumber,
         lan,
         api_key: apiKey.trim(),
@@ -554,11 +431,10 @@ export default function Fast27bPage() {
         default_max_tokens: maxTokensNumber,
         default_thinking_budget: thinkingBudgetNumber,
         bridge_port: bridgePortNumber,
-        auto_open_dsh_web: status?.auto_open_dsh_web ?? true,
+        // dsh 已移除；配置字段仍由后端保留，固定关闭自动打开。
+        auto_open_dsh_web: false,
       });
-      setActionMessage(
-        "配置已保存，下次启动生效；DSH 接入如有变化请重新接入。",
-      );
+      setActionMessage("配置已保存，下次启动生效。");
       setSettingsDirty(false);
       await refreshStatusOnly();
     } catch (error) {
@@ -745,7 +621,7 @@ export default function Fast27bPage() {
   const primaryButton =
     "inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
   const busy =
-    starting || stopping || restarting || switchingModel || binding || saving || openingDsh;
+    starting || stopping || restarting || switchingModel || saving;
   const desktop = isDesktopRuntime();
   const selectedPreset = status?.model_presets.find(
     (preset) => preset.id === selectedModel,
@@ -755,7 +631,7 @@ export default function Fast27bPage() {
   );
   const apiBaseUrl = `http://127.0.0.1:${status?.port ?? port}/v1`;
   const apiModelId = status?.model_id
-    ?? (selectedModel === "saluki" ? "underdog-saluki-27b" : "qwen3.8-27b");
+    ?? (selectedModel === "saluki" ? "saluki" : "bonsai");
   // 只留三个真正会影响体感的手动项；桥端口/默认输出上限/思考预算沿用保存值，
   // 需要改的场景太少，摆出来只会让人以为必须调。
   const fields = [
@@ -767,19 +643,13 @@ export default function Fast27bPage() {
       min: 1,
     },
     {
-      label: "草稿长度（0–5）",
+      label: "草稿长度（1–15）",
       value: draftTokens,
       update: setDraftTokens,
-      min: 0,
-      max: 5,
+      min: 1,
+      max: 15,
     },
   ];
-
-  const openWebui = () => {
-    dispatch({ type: "SET_WEBUI_ENGINE", payload: "fast27b" });
-    dispatch({ type: "SET_AGENT_TAB", payload: "webui" });
-    dispatch({ type: "SET_VIEW", payload: "agent" });
-  };
 
   const tabs = [
     { id: "overview", label: "概览", icon: Info },
@@ -787,10 +657,10 @@ export default function Fast27bPage() {
   ] as const;
 
   const variants: Array<{ id: Fast27bModelVariant; label: string }> = [
-    { id: "heretic", label: "Heretic" },
+    { id: "bonsai", label: "Bonsai" },
     { id: "saluki", label: "Saluki" },
   ];
-  const modelTitle = selectedModel === "saluki" ? "Saluki 27B" : "Heretic 27B";
+  const modelTitle = selectedModel === "saluki" ? "Saluki 27B" : "Bonsai 27B";
   const modelSpec = selectedModel === "saluki" ? "MTP" : "DFlash2";
   const presetExists = (variant: Fast27bModelVariant) =>
     status
@@ -816,7 +686,7 @@ export default function Fast27bPage() {
                 className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] p-0.5"
               >
                 {variants.map(({ id, label }) => {
-                  const active = !fastView && selectedModel === id;
+                  const active = selectedModel === id;
                   const exists = presetExists(id);
                   return (
                     <button
@@ -824,10 +694,7 @@ export default function Fast27bPage() {
                       type="button"
                       aria-pressed={active}
                       disabled={busy || settingsDirty || !status || !desktop || !exists}
-                      onClick={() => {
-                        setFastView(false);
-                        void handleSelectModel(id);
-                      }}
+                      onClick={() => void handleSelectModel(id)}
                       title={
                         !exists
                           ? "模型文件缺失，请展开高级配置检查路径"
@@ -844,30 +711,10 @@ export default function Fast27bPage() {
                     </button>
                   );
                 })}
-                {/* Fast：预留位，后续接入 9B 小模型；现在只打开一块空页面，不碰引擎。
-                    再点一次可退出——引擎变体按钮在引擎未就绪时是禁用的，
-                    只靠「点变体退出」会让用户卡在 Fast 页出不来。 */}
-                <button
-                  type="button"
-                  aria-pressed={fastView}
-                  onClick={() => setFastView((current) => !current)}
-                  title={fastView
-                    ? "返回 NiNfer 引擎视图"
-                    : "Fast · 预留位（后续接入 9B 小模型），当前为空页面"}
-                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[length:var(--font-eyebrow)] transition-colors ${
-                    fastView
-                      ? "bg-[var(--surface-raised)] text-[var(--accent)] shadow-[var(--shadow-card)]"
-                      : "text-secondary-custom hover:text-primary-custom"
-                  }`}
-                >
-                  Fast
-                </button>
               </div>
             </div>
             <p className="mt-0.5 text-xs leading-5 text-secondary-custom">
-              {fastView
-                ? "Fast 通道预留中：后续接入 9B 小模型，当前界面留白。"
-                : "Heretic · DFlash2 / Saluki · MTP 双变体，启动、监测与接入集中管理。"}
+              Bonsai · DFlash2 / Saluki · MTP 双变体，启动、监测与接入集中管理。
             </p>
           </div>
         </div>
@@ -879,11 +726,10 @@ export default function Fast27bPage() {
               type="button"
               role="tab"
               id={`ninfer-tab-${id}`}
-              aria-selected={!fastView && activeTab === id}
-              disabled={fastView}
+              aria-selected={activeTab === id}
               onClick={() => setActiveTab(id)}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                !fastView && activeTab === id
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs transition-colors ${
+                activeTab === id
                   ? "bg-[var(--surface-selected)] text-primary-custom"
                   : "text-secondary-custom hover:bg-[var(--surface-hover)]"
               }`}
@@ -894,21 +740,6 @@ export default function Fast27bPage() {
           ))}
         </div>
 
-        {/* Fast 预留位：空页面，不放任何假数据（后续接入 9B 小模型时在这里填）。 */}
-        {fastView ? (
-          <div
-            className="flex min-h-[320px] flex-col items-center justify-center gap-2 rounded-[var(--radius-panel)] border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center"
-            aria-label="Fast 通道"
-          >
-            <span className="text-[length:var(--font-subtitle)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-tertiary)]">
-              Fast
-            </span>
-            <span className="text-xs leading-5 text-[var(--text-tertiary)]">
-              通道预留中 · 后续接入 9B 小模型
-            </span>
-          </div>
-        ) : (
-          <>
         {activeTab === "overview" && (
           <div className="space-y-4">
             <section aria-label="运行状态" className={panel}>
@@ -1045,60 +876,6 @@ export default function Fast27bPage() {
               </p>
             </section>
 
-            <section
-              aria-label="接入与对话"
-              className="grid divide-y divide-[var(--border)] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] md:grid-cols-2 md:divide-x md:divide-y-0"
-            >
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-                <div className="min-w-0">
-                  <h2 className="text-xs font-semibold text-primary-custom">DSH</h2>
-                  <p
-                    className="mt-1 truncate text-[length:var(--font-eyebrow)] text-secondary-custom"
-                    title={boundModel ?? "接入后设为默认模型"}
-                  >
-                    {boundModel ? `已接入 · ${boundModel}` : "智能体默认模型"}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void (boundModel ? handleUnbind() : handleBind())}
-                    disabled={busy || !desktop || (!boundModel && (!apiReady || !engineEnabled))}
-                    className={secondaryButton}
-                    title="接入会替换 DSH 当前默认模型，与模型页共用同一提供方槽位"
-                  >
-                    {binding ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : boundModel ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
-                    {boundModel ? "解除" : "接入 DSH"}
-                  </button>
-                  <button
-                    onClick={() => void handleOpenDshWeb()}
-                    disabled={busy || !desktop}
-                    className={secondaryButton}
-                    title="打开 DSH 网页；未运行时会先自动启动"
-                  >
-                    {openingDsh ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
-                    打开
-                  </button>
-                </div>
-              </div>
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-                <div>
-                  <h2 className="text-xs font-semibold text-primary-custom">WebUI</h2>
-                  <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
-                    直接与当前模型对话
-                  </p>
-                </div>
-                <button
-                  onClick={openWebui}
-                  disabled={busy || !apiReady || !desktop}
-                  className={secondaryButton}
-                  title={apiReady ? "打开应用内 WebUI" : "请先启动引擎并等待 API 就绪"}
-                >
-                  <Globe className="h-3.5 w-3.5" />
-                  打开 WebUI
-                </button>
-              </div>
-            </section>
-
             <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} compact />
 
             {(actionMessage || (!loading && runtimeMessage)) && (
@@ -1129,7 +906,7 @@ export default function Fast27bPage() {
                 <div id="ninfer-config" className="space-y-3 border-t border-[var(--border)] p-4">
                   <div className="grid gap-3 sm:grid-cols-2">
                     <label className="block text-xs">
-                      <span className="mb-1 block text-secondary-custom">引擎路径（ninfer-serve-86.exe）</span>
+                      <span className="mb-1 block text-secondary-custom">引擎路径（ninfer-serve.exe）</span>
                       <input
                         value={enginePath}
                         onChange={(event) => {
@@ -1141,10 +918,10 @@ export default function Fast27bPage() {
                         className={`${editorField} mono-font`}
                       />
                     </label>
-                    {(["heretic", "saluki"] as const).map((model) => (
+                    {(["bonsai", "saluki"] as const).map((model) => (
                       <label key={model} className="block text-xs">
                         <span className="mb-1 block text-secondary-custom">
-                          {model === "heretic" ? "Heretic" : "Saluki"} 模型文件（.ninfer）
+                          {model === "bonsai" ? "Bonsai" : "Saluki"} 模型文件（.ninfer）
                         </span>
                         <input
                           value={modelPaths[model]}
@@ -1282,8 +1059,6 @@ export default function Fast27bPage() {
           <div id="ninfer-panel-performance" role="tabpanel" aria-labelledby="ninfer-tab-performance">
             <Fast27bPerformance metrics={metrics} desktop={desktop} selectedModel={selectedModel} />
           </div>
-        )}
-          </>
         )}
 
         <ConfirmDialog

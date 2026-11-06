@@ -11,7 +11,7 @@ const tooltipStyle = {
   borderRadius: 'var(--radius-lg)', color: 'var(--text-primary)', fontSize: 'var(--font-caption)',
 };
 const axisStyle = { fill: 'var(--text-tertiary)', fontSize: 'var(--font-eyebrow)', fontFamily: 'var(--font-mono)' };
-const modelLabels = { heretic: 'Heretic 27B', saluki: 'Saluki 27B' };
+const modelLabels = { bonsai: 'Bonsai 27B', saluki: 'Saluki 27B' };
 
 function timeLabel(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -68,7 +68,7 @@ export default function Fast27bPerformance({ metrics, desktop, selectedModel, co
     <div className="fast27b-performance-toolbar">
       <div>
         <h2 className="flex items-center gap-2 text-[length:var(--font-body)] font-semibold text-primary-custom"><Activity className="h-4 w-4 text-[var(--accent)]" />{modelLabels[selectedModel]} · 性能监测</h2>
-        <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">{desktop ? '对话、DSH 与外部 API 的真实运行数据' : '桌面端启动引擎后开始采集'}{(metrics?.active_requests ?? 0) > 0 && <span className="ml-2 text-[var(--accent)]">{metrics?.active_requests} 个请求进行中</span>}</p>
+        <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">{desktop ? '对话与外部 API 的真实运行数据' : '桌面端启动引擎后开始采集'}{(metrics?.active_requests ?? 0) > 0 && <span className="ml-2 text-[var(--accent)]">{metrics?.active_requests} 个请求进行中</span>}</p>
       </div>
       <div className="fast27b-range" role="group" aria-label="统计时间范围">{([1, 6, 24] as const).map((hours) => <button key={hours} type="button" aria-pressed={range === hours} onClick={() => setRange(hours)}>{hours} 小时</button>)}</div>
     </div>
@@ -83,7 +83,7 @@ export default function Fast27bPerformance({ metrics, desktop, selectedModel, co
       <section className="fast27b-chart-panel fast27b-model-performance" aria-label="当前模型性能">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="flex items-center gap-1.5 text-[length:var(--font-caption)] font-semibold text-primary-custom"><Layers3 className="h-3.5 w-3.5 text-[var(--accent)]" />{modelLabels[selectedModel]}</h3>
-          <span className="fast27b-spec-badge">{selectedModel === 'heretic' ? 'DFlash2' : 'MTP'}</span>
+          <span className="fast27b-spec-badge">{selectedModel === 'bonsai' ? 'DFlash2' : 'MTP'}</span>
         </div>
         <div className="fast27b-model-facts">
           <div><span>草稿接受率</span><strong>{formatFast27bRate(summary.draftRate)}</strong></div>

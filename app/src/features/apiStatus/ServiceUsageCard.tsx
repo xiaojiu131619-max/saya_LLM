@@ -145,7 +145,7 @@ export default function ServiceUsageCard({ stats, note }: {
             {stats.initial}
           </span>
           <div className="min-w-0">
-            <h2 className="truncate text-[length:var(--font-title)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
+            <h2 className="heading-plain truncate text-[length:var(--font-title)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
               {stats.title}
             </h2>
             <div className="mt-0.5 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">

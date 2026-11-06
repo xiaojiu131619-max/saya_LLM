@@ -23,7 +23,9 @@
 .model-tile--loaded { border-color: var(--state-success-border); }
 .model-tile--selected, .model-tile--selected:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
 .model-tile-specs { background: color-mix(in srgb, var(--surface-muted) 55%, var(--surface)); }
-.model-tile-status { color: var(--text-secondary); }
+/* 状态标签是固定的短文案（已加载/加载中/待机…），走破晓像素 12px；
+   letter-spacing 归零，像素字距被拉伸会失去点阵锐度。 */
+.model-tile-status { color: var(--text-secondary); font-family: var(--font-pixel); letter-spacing: 0; }
 .model-tile-status--loaded { color: var(--state-success); }
 .model-tile-status--loading { color: var(--state-warning); }
 .model-tile-status--error { color: var(--state-danger); }

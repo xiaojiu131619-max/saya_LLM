@@ -327,9 +327,9 @@ pub fn probe_health(port: u16) -> Option<StrataHealth> {
 
 /// 读取网关 `/v1/models` 报出的模型 ID。
 ///
-/// 智慧模型的模型名由 run config 决定（`qwen3.8-flash-next-gyro-gyro-m`），
-/// 应用配置里没有这一项——接入 dsh 时必须按网关实际回报的 ID 写，
-/// 写错会得到一个 404，而错误出在 dsh 侧，最难查。
+/// 智慧模型的模型名由 run config 决定（S：`qwen3.8-flash-next-gyro-gyro-s`，
+/// M：`qwen3.8-flash-next-gyro-gyro-m`），应用配置里没有这一项——接入 dsh 时
+/// 必须按网关实际回报的 ID 写，写错会得到一个 404，而错误出在 dsh 侧，最难查。
 pub fn probe_model_ids(port: u16, api_key: &str) -> Vec<String> {
     let url = format!("http://127.0.0.1:{}/v1/models", port);
     let Ok(client) = reqwest::blocking::Client::builder()

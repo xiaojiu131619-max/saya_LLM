@@ -45,6 +45,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": []
+    "resources": [
+      "../resources/canvas",
+      "resources/tools"
+    ]
   }
 }

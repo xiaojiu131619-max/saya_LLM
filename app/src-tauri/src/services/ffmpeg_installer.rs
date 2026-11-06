@@ -154,6 +154,33 @@ fn find_binary(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 读取已安装 ffmpeg 的版本标识；未安装或无法运行返回 None。
+///
+/// BtbN 是滚动构建（tag 恒为 `latest`），所以这里取 `-version` 首行里的构建标识
+/// （如 `7.1.1-full_build-www.gyan.dev`）作为展示版本，仅供界面显示与
+/// 「是否已安装」判断，不参与大小比较。
+///
+/// 复用 `validate_media_binary`：它已经用参数列表方式启动、带 CREATE_NO_WINDOW
+/// 与输出校验，避免再引入一个可被指摘的启动点。
+pub fn installed_version() -> Option<String> {
+    let exe = auto_updater::resource_dir().join("ffmpeg.exe");
+    if !exe.is_file() {
+        return None;
+    }
+    let first_line = validate_media_binary(&exe, "ffmpeg").ok()?;
+    let token = first_line
+        .strip_prefix("ffmpeg version ")?
+        .split_whitespace()
+        .next()?
+        .trim_start_matches('n')
+        .to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
 /// 功能性验证：实际执行 `-version`，确认能跑且身份正确。
 /// 这比只看文件大小更可靠——一个损坏或被替换的二进制无法通过。
 fn validate_media_binary(exe: &Path, stem: &str) -> Result<String, String> {

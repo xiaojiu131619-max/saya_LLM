@@ -2,12 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Brain,
-  Check,
   CheckCircle2,
   CircleSlash,
   Copy,
-  ExternalLink,
-  Globe,
   Gauge,
   Loader2,
   Play,
@@ -16,7 +13,6 @@ import {
   Settings2,
   Square,
   TriangleAlert,
-  X,
 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
 import ToggleSwitch from '@/components/ToggleSwitch';
@@ -24,23 +20,22 @@ import WorkingBadge from '@/components/WorkingBadge';
 import StrataPerformance from '@/features/strata/StrataPerformance';
 // 与 NiNfer 统计面板共用同一套卡片/图表样式：同一设计语言，两份 CSS 迟早会漂移。
 import '@/features/fast27b/fast27b.css';
-import { useApp } from '@/context/AppContext';
 import { useStrataStatus } from '@/hooks/useStrataStatus';
 import { refreshStrataStatus } from '@/lib/desktopState';
-import { isDesktopRuntime, openExternalUrl, dshGetStatus, dshStart } from '@/lib/desktop';
+import { isDesktopRuntime } from '@/lib/desktop';
 import { listenDesktopEvent } from '@/lib/ipc/system';
 import {
-  strataBindDsh,
   strataClearLogs,
   strataGetLogs,
   strataGetMetrics,
   strataRestart,
   strataSaveConfig,
+  strataSelectModel,
   strataSetEnabled,
   strataStart,
   strataStop,
-  strataUnbindDsh,
   type StrataMetricsSnapshot,
+  type StrataModelVariant,
   type StrataStatus,
 } from '@/lib/ipc/strata';
 
@@ -53,25 +48,6 @@ const TABS: Array<{ id: TabId; label: string; icon: typeof Brain }> = [
   { id: 'settings', label: '设置', icon: Settings2 },
 ];
 
-/** 轮询等待 dsh Web 就绪；超时返回 null（与 NiNfer 页同款，40 秒）。 */
-async function waitForDshReady(
-  timeoutMs = 40000,
-): Promise<{ running: boolean; webUrl: string | null } | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const status = await dshGetStatus();
-      if (status?.runtime.running && status.runtime.web_url) {
-        return { running: true, webUrl: status.runtime.web_url };
-      }
-    } catch {
-      // 轮询失败继续等
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  return null;
-}
-
 const PRIMARY_BUTTON =
   'inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-40';
 const SECONDARY_BUTTON =
@@ -81,19 +57,16 @@ const INPUT =
   'w-full rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs text-primary-custom outline-none focus:border-[var(--accent)] disabled:opacity-50';
 
 export default function StrataPage() {
-  const { dispatch } = useApp();
   const status = useStrataStatus();
   const desktop = isDesktopRuntime();
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [switchingModel, setSwitchingModel] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [binding, setBinding] = useState(false);
-  const [openingDsh, setOpeningDsh] = useState(false);
   const [metrics, setMetrics] = useState<StrataMetricsSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsLive, setLogsLive] = useState(true);
@@ -105,7 +78,9 @@ export default function StrataPage() {
   const editorsReady = useRef(false);
   const [pythonPath, setPythonPath] = useState('');
   const [workDir, setWorkDir] = useState('');
-  const [configPath, setConfigPath] = useState('');
+  const [selectedModel, setSelectedModel] = useState<StrataModelVariant>('m');
+  const [sConfigPath, setSConfigPath] = useState('');
+  const [mConfigPath, setMConfigPath] = useState('');
   const [port, setPort] = useState('8082');
   const [lan, setLan] = useState(false);
   const [apiKey, setApiKey] = useState('');
@@ -118,13 +93,14 @@ export default function StrataPage() {
   const apiReachable = status?.api_reachable ?? false;
   const modelLoaded = status?.model_loaded ?? false;
   const enabled = status?.enabled ?? true;
-  const busy = starting || stopping || restarting || saving;
-  const boundModel = status?.dsh_bound_model ?? null;
+  const busy = starting || stopping || restarting || switchingModel || saving;
 
   const applyToEditors = useCallback((next: StrataStatus) => {
     setPythonPath(next.python_path);
     setWorkDir(next.work_dir);
-    setConfigPath(next.config_path);
+    setSelectedModel(next.selected_model);
+    setSConfigPath(next.s_config_path);
+    setMConfigPath(next.m_config_path);
     setPort(String(next.port));
     setLan(next.lan);
     setApiKey(next.api_key);
@@ -199,7 +175,7 @@ export default function StrataPage() {
     };
   }, [desktop]);
 
-  // 日志：1 秒轮询（与 dsh / llama / fast27b 日志同范式），可暂停。
+  // 日志：1 秒轮询（与 llama / fast27b 日志同范式），可暂停。
   useEffect(() => {
     if (!desktop || activeTab !== 'logs') return;
     let disposed = false;
@@ -241,82 +217,6 @@ export default function StrataPage() {
       window.clearInterval(timer);
     };
   }, [desktop]);
-
-  /** 确保 dsh 在跑（不在跑则拉起并等待就绪）；返回就绪后的 Web 地址。 */
-  const ensureDshRunning = async (): Promise<string> => {
-    const before = await dshGetStatus();
-    if (before?.runtime.running && before.runtime.web_url) {
-      return before.runtime.web_url;
-    }
-    if (before && !before.package.installed) {
-      throw new Error('dsh 尚未安装：请先到 Agent 页完成安装');
-    }
-    await dshStart();
-    const ready = await waitForDshReady();
-    if (!ready?.webUrl) {
-      throw new Error('dsh 在 40 秒内未就绪：请到 Agent（智能体）页查看 dsh 运行日志');
-    }
-    return ready.webUrl;
-  };
-
-  const handleBind = async () => {
-    setBinding(true);
-    setActionMessage(null);
-    setProgressMessage('正在把 Strata 接入 dsh…');
-    try {
-      const result = await strataBindDsh();
-      if (result) {
-        setActionMessage(
-          `已接入模型 ${result.model_id}（${result.provider}），已设为 dsh 默认模型。`,
-        );
-      }
-      void refreshStrataStatus();
-    } catch (error) {
-      setActionMessage(`接入失败：${String(error)}`);
-    } finally {
-      setBinding(false);
-      setProgressMessage(null);
-    }
-  };
-
-  const handleUnbind = async () => {
-    setBinding(true);
-    setActionMessage(null);
-    setProgressMessage('正在解除接入…');
-    try {
-      await strataUnbindDsh();
-      setActionMessage('已解除接入：dsh 配置已回滚（备份保留在 settings.yaml.bak）。');
-      void refreshStrataStatus();
-    } catch (error) {
-      setActionMessage(`解除失败：${String(error)}`);
-    } finally {
-      setBinding(false);
-      setProgressMessage(null);
-    }
-  };
-
-  const handleOpenDshWeb = async () => {
-    setOpeningDsh(true);
-    setActionMessage(null);
-    setProgressMessage('正在确认 dsh Web 状态…');
-    try {
-      const webUrl = await ensureDshRunning();
-      setProgressMessage(null);
-      await openExternalUrl(webUrl);
-    } catch (error) {
-      setProgressMessage(null);
-      setActionMessage(`打开 dsh Web 失败：${String(error)}`);
-    } finally {
-      setOpeningDsh(false);
-    }
-  };
-
-  /** 打开应用内 WebUI 标签（strata 网关自带网页界面，不需要同源桥）。 */
-  const openWebui = () => {
-    dispatch({ type: 'SET_WEBUI_ENGINE', payload: 'strata' });
-    dispatch({ type: 'SET_AGENT_TAB', payload: 'webui' });
-    dispatch({ type: 'SET_VIEW', payload: 'agent' });
-  };
 
   const handleCopy = async (value: string, key: string) => {
     try {
@@ -370,6 +270,31 @@ export default function StrataPage() {
     }
   };
 
+  /** 切换 S / M 模型：只改 run config，运行中禁止（首次加载十几分钟，不能静默重启）。 */
+  const handleSelectModel = async (model: StrataModelVariant) => {
+    if (busy || dirty || model === selectedModel) return;
+    if (running) {
+      setErrorMessage('请先停止 Strata，再切换 S / M 模型。');
+      return;
+    }
+    setSwitchingModel(true);
+    setErrorMessage(null);
+    try {
+      await strataSelectModel(model);
+      setSelectedModel(model);
+      const preset = status?.model_presets.find((item) => item.id === model);
+      if (preset) {
+        if (model === 's') setSConfigPath(preset.config_path);
+        else setMConfigPath(preset.config_path);
+      }
+      await refreshStrataStatus();
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setSwitchingModel(false);
+    }
+  };
+
   const handleToggleEnabled = async (next: boolean) => {
     try {
       // 只切开关，不带整份配置：拿 3 秒前的 status 快照回写会把刚保存的
@@ -385,11 +310,16 @@ export default function StrataPage() {
     setSaving(true);
     setErrorMessage(null);
     try {
+      const sPath = sConfigPath.trim();
+      const mPath = mConfigPath.trim();
       await strataSaveConfig({
         enabled,
         python_path: pythonPath.trim(),
         work_dir: workDir.trim(),
-        config_path: configPath.trim(),
+        config_path: selectedModel === 's' ? sPath : mPath,
+        selected_model: selectedModel,
+        s_config_path: sPath,
+        m_config_path: mPath,
         port: Number(port) || 0,
         lan,
         api_key: apiKey.trim(),
@@ -408,6 +338,10 @@ export default function StrataPage() {
     }
   };
 
+  const activeConfigPath = selectedModel === 's' ? sConfigPath : mConfigPath;
+  const activePreset = status?.model_presets.find((preset) => preset.id === selectedModel);
+  const activeConfigExists = activePreset?.exists ?? status?.config_exists ?? false;
+
   const envIssues = useMemo(() => {
     if (!status) return [];
     const issues: string[] = [];
@@ -417,11 +351,11 @@ export default function StrataPage() {
     if (!status.serve_exists) {
       issues.push(`源码目录下没找到 serve/server.py：${status.work_dir}`);
     }
-    if (!status.config_exists) {
-      issues.push(`启动配置不存在：${status.config_path}`);
+    if (!activeConfigExists) {
+      issues.push(`启动配置不存在：${activeConfigPath || status.config_path}`);
     }
     return issues;
-  }, [status]);
+  }, [status, activeConfigExists, activeConfigPath]);
 
   const stateBadge = (() => {
     if (!enabled) {
@@ -443,14 +377,60 @@ export default function StrataPage() {
         ? 'border-[var(--state-warning-border)] text-[var(--state-warning)]'
         : 'border-[var(--border)] text-[var(--text-tertiary)]';
 
+  const modelOptions: Array<{ id: StrataModelVariant; label: string; detail: string }> = [
+    { id: 's', label: 'S', detail: 'Gyro-S · 58 GiB · 102K 上下文' },
+    { id: 'm', label: 'M', detail: 'Gyro-M · 92 GiB · 102K 上下文' },
+  ];
+  const selectedModelDetail =
+    modelOptions.find((option) => option.id === selectedModel)?.detail ?? '';
+
   return (
     <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
       <div className="mx-auto max-w-5xl space-y-4 pb-6">
         <PageHeader
           icon={Brain}
           title="Strata"
-          description="Qwen3.8-Flash-Next 90GiB MoE 引擎，慢加载、强推理，与 NiNfer 互补。"
+          description={`Qwen3.8-Flash-Next MoE 引擎 · ${selectedModelDetail}，慢加载、强推理，与 NiNfer 互补。`}
           className="mb-4"
+          actions={
+            <div
+              role="group"
+              aria-label="切换 Strata 模型变体"
+              className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] p-0.5"
+            >
+              {modelOptions.map(({ id, label }) => {
+                const active = selectedModel === id;
+                const preset = status?.model_presets.find((item) => item.id === id);
+                const exists = preset?.exists ?? true;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={active}
+                    disabled={busy || dirty || running || !desktop || !status || !exists}
+                    onClick={() => void handleSelectModel(id)}
+                    title={
+                      !exists
+                        ? '该模型的 run config 不存在，请到「设置」检查路径'
+                        : running
+                          ? '请先停止 Strata 再切换模型'
+                          : dirty
+                            ? '请先保存当前配置'
+                            : `切换到 ${label} 模型`
+                    }
+                    className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[length:var(--font-eyebrow)] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                      active
+                        ? 'bg-[var(--surface-raised)] text-[var(--accent)] shadow-[var(--shadow-card)]'
+                        : 'text-secondary-custom hover:text-primary-custom'
+                    }`}
+                  >
+                    {switchingModel && active && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          }
         />
 
         <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Strata 视图">
@@ -516,7 +496,10 @@ export default function StrataPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-[length:var(--font-subtitle)] font-semibold text-primary-custom">
-                    {status?.model_name ?? 'Qwen3.8-Flash-Next（Gyro-M）'}
+                    {status?.model_name
+                      ?? (selectedModel === 's'
+                        ? 'Qwen3.8-Flash-Next（Gyro-S）'
+                        : 'Qwen3.8-Flash-Next（Gyro-M · ABL）')}
                   </div>
                   <div className="mt-0.5 text-xs text-[var(--text-tertiary)]">
                     {status?.max_context
@@ -585,7 +568,7 @@ export default function StrataPage() {
                   />
                   <div className="mt-1.5 leading-5 text-[var(--text-tertiary)]">
                     {progressMessage
-                      ?? '首次加载 90GiB 专家权重需要十几分钟，之后热启动约半分钟。这段时间可以先做别的。'}
+                      ?? `首次加载 ${selectedModel === 's' ? 'S' : 'M'} 模型权重需要十几分钟，之后热启动约半分钟。这段时间可以先做别的。`}
                   </div>
                 </div>
               )}
@@ -606,86 +589,6 @@ export default function StrataPage() {
                 </div>
               )}
             </section>
-
-            <section
-              aria-label="接入与对话"
-              className="grid divide-y divide-[var(--border)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] md:grid-cols-2 md:divide-x md:divide-y-0"
-            >
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-                <div className="min-w-0">
-                  <h2 className="text-xs font-semibold text-primary-custom">DSH</h2>
-                  <p
-                    className="mt-1 truncate text-[length:var(--font-eyebrow)] text-secondary-custom"
-                    title={boundModel ?? '接入后设为默认模型'}
-                  >
-                    {boundModel ? `已接入 · ${boundModel}` : '智能体默认模型'}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void (boundModel ? handleUnbind() : handleBind())}
-                    disabled={binding || !desktop || (!boundModel && (!apiReady || !enabled))}
-                    className={SECONDARY_BUTTON}
-                    title="接入会替换 DSH 当前默认模型，与模型页、NiNfer 共用同一提供方槽位"
-                  >
-                    {binding ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : boundModel ? (
-                      <X className="h-3.5 w-3.5" />
-                    ) : (
-                      <Check className="h-3.5 w-3.5" />
-                    )}
-                    {boundModel ? '解除' : '接入 DSH'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleOpenDshWeb()}
-                    disabled={openingDsh || !desktop}
-                    className={SECONDARY_BUTTON}
-                    title="打开 DSH 网页；未运行时会先自动启动"
-                  >
-                    {openingDsh ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    )}
-                    打开
-                  </button>
-                </div>
-              </div>
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3">
-                <div>
-                  <h2 className="text-xs font-semibold text-primary-custom">WebUI</h2>
-                  <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
-                    直接与当前模型对话
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={openWebui}
-                  disabled={!apiReady || !desktop}
-                  className={SECONDARY_BUTTON}
-                  title={
-                    apiReady
-                      ? '打开应用内 WebUI（strata 网关自带的网页界面）'
-                      : '请先启动引擎并等权重加载完成'
-                  }
-                >
-                  <Globe className="h-3.5 w-3.5" />
-                  打开 WebUI
-                </button>
-              </div>
-            </section>
-
-            {actionMessage && (
-              <div
-                role="status"
-                className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-secondary-custom"
-              >
-                {actionMessage}
-              </div>
-            )}
 
             <section aria-label="接入信息" className={PANEL}>
               <div className="mb-3 text-xs font-medium text-secondary-custom">接入信息</div>
@@ -731,13 +634,22 @@ export default function StrataPage() {
               </p>
             </section>
 
-            <StrataPerformance metrics={metrics} desktop={desktop} compact />
+            <StrataPerformance
+              metrics={metrics}
+              desktop={desktop}
+              compact
+              modelLabel={selectedModel === 's' ? 'Gyro-S' : 'Gyro-M'}
+            />
           </div>
         )}
 
         {activeTab === 'performance' && (
           <div id="strata-panel-performance" role="tabpanel" aria-labelledby="strata-tab-performance">
-            <StrataPerformance metrics={metrics} desktop={desktop} />
+            <StrataPerformance
+              metrics={metrics}
+              desktop={desktop}
+              modelLabel={selectedModel === 's' ? 'Gyro-S' : 'Gyro-M'}
+            />
           </div>
         )}
 
@@ -803,13 +715,6 @@ export default function StrataPage() {
                   set: setWorkDir,
                   ok: status?.serve_exists,
                 },
-                {
-                  label: '启动配置（run config）',
-                  hint: '由 strata launch 生成，记录 exe、引擎参数与模型名；本应用只读取。',
-                  value: configPath,
-                  set: setConfigPath,
-                  ok: status?.config_exists,
-                },
               ].map((field) => (
                 <label key={field.label} className="block">
                   <div className="mb-1 flex items-center gap-1.5 text-xs text-secondary-custom">
@@ -836,6 +741,42 @@ export default function StrataPage() {
                   </div>
                 </label>
               ))}
+
+              {([
+                { id: 's' as const, label: 'S 模型 run config', value: sConfigPath, set: setSConfigPath },
+                { id: 'm' as const, label: 'M 模型 run config', value: mConfigPath, set: setMConfigPath },
+              ]).map((field) => {
+                const preset = status?.model_presets.find((item) => item.id === field.id);
+                return (
+                  <label key={field.id} className="block">
+                    <div className="mb-1 flex items-center gap-1.5 text-xs text-secondary-custom">
+                      <span>{field.label}</span>
+                      {selectedModel === field.id && (
+                        <span className="text-[length:var(--font-eyebrow)] text-[var(--accent)]">当前</span>
+                      )}
+                      {preset?.exists === true && (
+                        <CheckCircle2 className="h-3 w-3 text-[var(--state-success)]" />
+                      )}
+                      {preset?.exists === false && (
+                        <TriangleAlert className="h-3 w-3 text-[var(--state-warning)]" />
+                      )}
+                    </div>
+                    <input
+                      value={field.value}
+                      onChange={(event) => {
+                        field.set(event.target.value);
+                        setDirty(true);
+                      }}
+                      disabled={running}
+                      className={INPUT}
+                      spellCheck={false}
+                    />
+                    <div className="mt-1 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
+                      由 strata launch 生成，切换模型时启用对应文件；本应用只读取，不改写引擎参数。
+                    </div>
+                  </label>
+                );
+              })}
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
@@ -867,7 +808,7 @@ export default function StrataPage() {
                     inputMode="numeric"
                   />
                   <div className="mt-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-                    按首次加载留余量：90GiB 权重实测约 18 分钟。
+                    按首次加载留余量：S 约 13 分钟、M 约 18 分钟。
                   </div>
                 </label>
               </div>

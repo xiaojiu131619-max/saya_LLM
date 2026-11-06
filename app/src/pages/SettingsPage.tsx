@@ -5,6 +5,7 @@ import {
   FolderPlus,
   Globe2,
   Keyboard,
+  Loader2,
   Monitor,
   MonitorSmartphone,
   Moon,
@@ -18,7 +19,18 @@ import BrandLogo from '@/components/BrandLogo';
 import { SettingRow, SettingSection } from '@/components/SettingSection';
 import PageHeader from '@/components/PageHeader';
 import type { ThemeMode } from '@/types';
-import { getDesktopConfig, isDesktopRuntime, setCloseToTray, setDesktopProxyUrl } from '@/lib/desktop';
+import {
+  addDesktopModelDir,
+  detectSystemProxy,
+  getDesktopConfig,
+  isDesktopRuntime,
+  pickModelDirectory,
+  scanDesktopModels,
+  setCloseToTray,
+  setDesktopProxyUrl,
+  toFrontendModel,
+} from '@/lib/desktop';
+import { FONT_SCALE_LEVELS, fontScaleToIndex, normalizeFontScale } from '@/lib/uiScale';
 
 /**
  * 通用分段选择器：2~3 个互斥选项。
@@ -83,15 +95,37 @@ function ThemeModeSelector({ value, onChange }: { value: ThemeMode; onChange: (m
 
 export default function SettingsPage() {
   const { state, dispatch } = useApp();
-  // 软件代理（对核心更新检查与下载生效）。空 = 直连。
+  // 网络代理（对核心更新检查与下载生效）。空 = 直连。
   const [proxyInput, setProxyInput] = useState('');
   const [proxyMessage, setProxyMessage] = useState<string | null>(null);
+  // 模型目录：设置页直接选择，免去先跳数据管理页再选目录。
+  const [dirBusy, setDirBusy] = useState(false);
+  const [dirMessage, setDirMessage] = useState<string | null>(null);
+  // 字体档位：拖动只改草稿，点「确定」才真正应用，避免一边拖动一边整页跳字号。
+  // null = 没有草稿，直接跟随已应用值；外部重置时也会自动回到当前值。
+  const [fontScaleDraft, setFontScaleDraft] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void getDesktopConfig()
-      .then((config) => {
-        if (!cancelled && config) setProxyInput(config.proxy_url ?? '');
+      .then(async (config) => {
+        if (cancelled || !config) return;
+        const saved = (config.proxy_url ?? '').trim();
+        if (saved) {
+          setProxyInput(saved);
+          return;
+        }
+        // 没有显式配置时，沿用 Windows 系统代理：用户已经在系统里挂好梯子，
+        // 不该再让他在应用里重复填一遍端口。
+        try {
+          const detected = await detectSystemProxy();
+          if (cancelled || !detected) return;
+          setProxyInput(detected);
+          await setDesktopProxyUrl(detected);
+          if (!cancelled) setProxyMessage(`已自动读取并应用 Windows 系统代理：${detected}`);
+        } catch {
+          // 读不到系统代理就保持直连，不影响其它设置。
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -114,10 +148,65 @@ export default function SettingsPage() {
     try {
       await setDesktopProxyUrl(value || null);
       setProxyMessage(value
-        ? '软件代理已保存，对核心更新检查与下载立即生效。'
-        : '软件代理已清除，恢复直连。');
+        ? '网络代理已保存，核心更新检查与下载会立即使用该代理。'
+        : '已清空手动代理配置；下次启动会重新读取 Windows 系统代理。');
     } catch (error) {
-      setProxyMessage(`软件代理保存失败：${String(error)}`);
+      setProxyMessage(`网络代理保存失败：${String(error)}`);
+    }
+  };
+
+  const handleUseSystemProxy = async () => {
+    try {
+      const detected = await detectSystemProxy();
+      if (!detected) {
+        setProxyMessage('没有检测到 Windows 系统代理（系统设置里未启用），当前为直连。');
+        return;
+      }
+      setProxyInput(detected);
+      await setDesktopProxyUrl(detected);
+      setProxyMessage(`已应用系统代理：${detected}`);
+    } catch (error) {
+      setProxyMessage(`读取系统代理失败：${String(error)}`);
+    }
+  };
+
+  // 字体滑块按档位索引移动；百分比始终取档位表，避免直接写 number 时出现刻度外值。
+  const fontScaleDraftValue = fontScaleDraft ?? state.fontScale;
+  const fontScaleIndex = fontScaleToIndex(fontScaleDraftValue);
+  const fontScalePercent = FONT_SCALE_LEVELS[fontScaleIndex];
+  const fontScaleDirty = fontScaleDraftValue !== state.fontScale;
+
+  const handleFontScaleChange = (index: number) => {
+    const next = FONT_SCALE_LEVELS[Math.min(FONT_SCALE_LEVELS.length - 1, Math.max(0, Math.round(index)))];
+    setFontScaleDraft(normalizeFontScale(next));
+  };
+
+  const handleApplyFontScale = () => {
+    dispatch({ type: 'SET_FONT_SCALE', payload: normalizeFontScale(fontScaleDraftValue) });
+    setFontScaleDraft(null);
+  };
+
+  const handleAddModelDir = async () => {
+    if (!isDesktopRuntime()) {
+      setDirMessage('选择本地模型目录需要在桌面版中使用。');
+      return;
+    }
+    const selected = await pickModelDirectory();
+    if (!selected) return;
+    setDirBusy(true);
+    try {
+      const dirs = await addDesktopModelDir(selected);
+      dispatch({ type: 'SET_MODEL_DIRS', payload: dirs });
+      const models = (await scanDesktopModels(true)).map(toFrontendModel);
+      dispatch({ type: 'UPSERT_MODELS', payload: models });
+      dispatch({ type: 'PRUNE_USAGE', payload: models.map((model) => model.id) });
+      setDirMessage(models.length > 0
+        ? `已添加目录并重新扫描，共发现 ${models.length} 个本地模型。`
+        : '目录已添加，但暂未发现 GGUF 模型。');
+    } catch (error) {
+      setDirMessage(`添加模型目录失败：${String(error)}`);
+    } finally {
+      setDirBusy(false);
     }
   };
 
@@ -141,6 +230,46 @@ export default function SettingsPage() {
                 value={state.themeMode}
                 onChange={(mode) => dispatch({ type: 'SET_THEME_MODE', payload: mode })}
               />
+            </SettingRow>
+            <div className="border-t border-[var(--border-subtle)]" />
+            <SettingRow
+              label="字体大小"
+              description={`当前 ${state.fontScale}%；拖动后点「确定」生效，15 级调节，范围 75%–150%。`}
+            >
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div className="w-36 flex-shrink-0">
+                  <input
+                    type="range"
+                    min={0}
+                    max={FONT_SCALE_LEVELS.length - 1}
+                    step={1}
+                    value={fontScaleIndex}
+                    onChange={(event) => handleFontScaleChange(Number(event.target.value))}
+                    aria-label="字体大小"
+                    title={`字体大小：${fontScalePercent}%`}
+                    className="ui-range w-full cursor-pointer"
+                    style={{
+                      background: `linear-gradient(to right, var(--accent) ${(fontScaleIndex / (FONT_SCALE_LEVELS.length - 1)) * 100}%, var(--surface-hover) ${(fontScaleIndex / (FONT_SCALE_LEVELS.length - 1)) * 100}%)`,
+                    }}
+                  />
+                  <div className="mt-1 flex items-center justify-between text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+                    <span>小</span>
+                    <span>正常</span>
+                    <span>大</span>
+                  </div>
+                </div>
+                <span className="mono-font w-11 flex-shrink-0 text-right text-xs font-medium text-[var(--text-primary)]">
+                  {fontScalePercent}%
+                </span>
+                <button
+                  type="button"
+                  onClick={handleApplyFontScale}
+                  disabled={!fontScaleDirty}
+                  className="flex h-8 flex-shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  确定
+                </button>
+              </div>
             </SettingRow>
             <div className="border-t border-[var(--border-subtle)]" />
             <SettingRow
@@ -205,16 +334,31 @@ export default function SettingsPage() {
             <SettingRow
               label="模型目录"
               description={state.modelDirs.length > 0
-                ? `已配置 ${state.modelDirs.length} 个模型目录；增删与引擎/日志/归档目录都在数据管理页。`
-                : '尚未配置模型目录，请到数据管理页添加包含 .gguf 文件的目录。'}
+                ? `已配置 ${state.modelDirs.length} 个模型目录；可直接在此继续添加，增删详情在数据管理页。`
+                : '尚未配置模型目录，点击「选择目录」添加包含 .gguf 文件的目录。'}
             >
-              <button
-                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'data' })}
-                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
-              >
-                前往数据管理 <ChevronRight className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleAddModelDir()}
+                  disabled={dirBusy}
+                  className="flex min-h-9 items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                >
+                  {dirBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderPlus className="h-3.5 w-3.5" />}
+                  选择目录
+                </button>
+                <button
+                  type="button"
+                  onClick={() => dispatch({ type: 'SET_VIEW', payload: 'data' })}
+                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-xs text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
+                >
+                  数据管理 <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </SettingRow>
+            {dirMessage && (
+              <p className="break-words text-xs text-secondary-custom">{dirMessage}</p>
+            )}
             {state.modelDirs.length > 0 && (
               <>
                 <div className="border-t border-[var(--border-subtle)]" />
@@ -231,8 +375,8 @@ export default function SettingsPage() {
 
           <SettingSection title="网络代理" icon={Globe2} delay={0.12}>
             <SettingRow
-              label="软件代理"
-              description="核心更新检查与下载不走系统代理；挂了梯子但下载仍慢时，填入本机代理端口（如 http://127.0.0.1:7890）。留空为直连。"
+              label="网络代理"
+              description="默认自动读取 Windows 系统代理；手动填写后优先使用填入的地址。留空保存会清空手动配置，下次启动仍按系统代理读取。"
             >
               <div className="flex items-center gap-2">
                 <input
@@ -240,8 +384,15 @@ export default function SettingsPage() {
                   onChange={(event) => setProxyInput(event.target.value)}
                   placeholder="http://127.0.0.1:7890"
                   className="mono-font h-9 w-56 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-3 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-black/20"
-                  aria-label="软件代理地址"
+                  aria-label="网络代理地址"
                 />
+                <button
+                  type="button"
+                  onClick={() => void handleUseSystemProxy()}
+                  className="flex h-9 flex-shrink-0 items-center rounded-md border border-[var(--border)] px-3 text-xs font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--accent)]"
+                >
+                  读取系统代理
+                </button>
                 <button
                   onClick={() => void handleSaveProxy()}
                   className="flex h-9 flex-shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"

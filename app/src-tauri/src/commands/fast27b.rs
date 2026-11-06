@@ -32,17 +32,17 @@ fn fast27b_config_from_state(state: &State<'_, AppState>) -> Fast27bConfig {
 }
 
 fn options_from_config(config: &Fast27bConfig) -> fast27b_manager::Fast27bStartOptions {
+    let model = config.selected_model();
     fast27b_manager::Fast27bStartOptions {
-        engine_path: PathBuf::from(&config.engine_path),
-        model_path: PathBuf::from(&config.model_path),
-        model_variant: config.selected_model(),
+        engine_path: PathBuf::from(config.engine_path_for_launch()),
+        // 旧版 Heretic / Underdog 路径会被自动替换为当前调优文件。
+        model_path: PathBuf::from(config.model_path_for(model)),
+        model_variant: model,
         port: config.port,
         lan: config.lan,
         api_key: config.api_key.clone(),
-        // 与 build_args 的收口一致，避免环境变量窗口按未收口的上下文计算。
-        context_window: config
-            .context_window
-            .min(config.selected_model().max_context_window()),
+        // 与 build_args 的收口一致，避免上下文上限按未收口的配置计算。
+        context_window: config.context_window.min(model.max_context_window()),
         draft_tokens: config.draft_tokens,
         default_max_tokens: config.default_max_tokens,
         default_thinking_budget: config.default_thinking_budget,
@@ -179,7 +179,7 @@ pub async fn fast27b_restart(state: State<'_, AppState>, app: AppHandle) -> Resu
     .map_err(|e| format!("fast27b 重启任务异常：{e}"))?
 }
 
-/// 一键选择 Heretic / Saluki；先校验目标资源再保存，运行中通过现有重启/就绪事件重载。
+/// 一键选择 Bonsai / Saluki；先校验目标资源再保存，运行中通过现有重启/就绪事件重载。
 #[tauri::command]
 pub async fn fast27b_select_model(
     state: State<'_, AppState>,
@@ -302,13 +302,16 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
         .lock()
         .map(|c| c.dsh.dsh_port)
         .unwrap_or(crate::models::dsh_types::DSH_DEFAULT_PORT);
+    let selected_model = config.selected_model();
+    let resolved_model_path = config.model_path_for(selected_model);
+    let resolved_engine_path = config.engine_path_for_launch();
     Fast27bStatus {
         runtime,
         enabled: config.enabled,
-        engine_path: config.engine_path.clone(),
-        model_path: config.model_path.clone(),
-        selected_model: config.selected_model(),
-        model_presets: [Fast27bModel::Heretic, Fast27bModel::Saluki]
+        engine_path: resolved_engine_path.clone(),
+        model_path: resolved_model_path.clone(),
+        selected_model,
+        model_presets: [Fast27bModel::Bonsai, Fast27bModel::Saluki]
             .into_iter()
             .map(|id| {
                 let model_path = config.model_path_for(id);
@@ -321,10 +324,10 @@ pub fn fast27b_get_status(state: State<'_, AppState>) -> Fast27bStatus {
                 }
             })
             .collect(),
-        engine_exists: !config.engine_path.trim().is_empty()
-            && std::path::Path::new(&config.engine_path).exists(),
-        model_exists: !config.model_path.trim().is_empty()
-            && std::path::Path::new(&config.model_path).exists(),
+        engine_exists: !resolved_engine_path.trim().is_empty()
+            && std::path::Path::new(&resolved_engine_path).exists(),
+        model_exists: !resolved_model_path.trim().is_empty()
+            && std::path::Path::new(&resolved_model_path).exists(),
         api_key: config.api_key.clone(),
         context_window: config.context_window,
         context_window_effective: config
@@ -368,7 +371,8 @@ pub fn fast27b_save_config(
     let mut guard = state.config.lock().map_err(|e| e.to_string())?;
     let mut new_config = (*guard).clone();
     if fast27b_manager::is_fast27b_running()
-        && (guard.fast27b.model_path != config.model_path
+        && (config.model_path_for(config.selected_model())
+            != guard.fast27b.model_path_for(guard.fast27b.selected_model())
             || guard.fast27b.selected_model() != config.selected_model())
     {
         return Err("请先停止引擎，再切换模型或修改模型路径。".to_string());

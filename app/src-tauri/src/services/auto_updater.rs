@@ -766,9 +766,20 @@ pub(crate) fn build_client(proxy_url: Option<&str>, timeout_secs: u64, connect_t
 }
 
 fn github_api_json(path: &str, proxy_url: Option<&str>) -> Result<serde_json::Value, String> {
+    github_api_json_with(path, proxy_url, 60, 30)
+}
+
+/// 可调超时的版本：更新中心的「检查更新」只需要短超时，
+/// 不能沿用下载级别的 60s（网络不通时会把界面拖住几分钟）。
+fn github_api_json_with(
+    path: &str,
+    proxy_url: Option<&str>,
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
     // 单条 release 的 JSON 可达数百 KB（上千个资产），
     // 读取整个响应必须留足时间，否则会在流中断时报“解码失败”。
-    let client = build_client(proxy_url, 60, 30)?;
+    let client = build_client(proxy_url, timeout_secs, connect_timeout_secs)?;
     let url = format!("https://api.github.com/repos/ggml-org/llama.cpp/{}", path);
     // 网络抖动或偶发中断重试一次；未认证限流（403）不重试。
     let mut last_error = String::new();
@@ -905,7 +916,21 @@ fn pick_latest_build_release(
 }
 
 pub fn check_latest_release(proxy_url: Option<&str>) -> Result<ReleaseInfo, String> {
-    let json = github_api_json("releases?per_page=15", proxy_url)?;
+    check_latest_release_with(proxy_url, 60, 30)
+}
+
+/// 同 `check_latest_release`，但允许调用方指定网络超时（更新中心检查用短超时）。
+pub(crate) fn check_latest_release_with(
+    proxy_url: Option<&str>,
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+) -> Result<ReleaseInfo, String> {
+    let json = github_api_json_with(
+        "releases?per_page=15",
+        proxy_url,
+        timeout_secs,
+        connect_timeout_secs,
+    )?;
 
     let (host_backend, gpu_name) = detect_host_gpu_backend();
     let cuda_version = detect_cuda_version();

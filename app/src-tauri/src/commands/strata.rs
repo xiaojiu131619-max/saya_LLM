@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::models::app_state::{AppState, StrataConfig};
+use crate::models::app_state::{AppState, StrataConfig, StrataModel};
 use crate::services::backend_gate::{self, Backend};
 use crate::services::strata_manager;
 use crate::services::strata_metrics;
@@ -55,6 +55,16 @@ fn env_checks(config: &StrataConfig) -> (bool, bool, bool) {
     (python_exists, serve_exists, config_exists)
 }
 
+/// 可选模型变体及其 run config 状态。
+#[derive(Debug, Clone, Serialize)]
+pub struct StrataModelPreset {
+    pub id: StrataModel,
+    pub label: String,
+    pub short_label: String,
+    pub config_path: String,
+    pub exists: bool,
+}
+
 /// 运行状态 + 配置回显 + 环境校验。
 #[derive(Debug, Serialize)]
 pub struct StrataStatus {
@@ -63,6 +73,10 @@ pub struct StrataStatus {
     pub python_path: String,
     pub work_dir: String,
     pub config_path: String,
+    pub selected_model: StrataModel,
+    pub model_presets: Vec<StrataModelPreset>,
+    pub s_config_path: String,
+    pub m_config_path: String,
     pub port: u16,
     pub lan: bool,
     pub api_key: String,
@@ -116,11 +130,28 @@ pub async fn strata_get_status(state: State<'_, AppState>) -> Result<StrataStatu
         .lock()
         .map(|config| config.dsh.dsh_port)
         .unwrap_or(3080);
+    let model_presets = [StrataModel::S, StrataModel::M]
+        .into_iter()
+        .map(|id| {
+            let config_path = config.config_path_for(id);
+            StrataModelPreset {
+                id,
+                label: id.label().to_string(),
+                short_label: id.short_label().to_string(),
+                exists: !config_path.trim().is_empty() && Path::new(&config_path).is_file(),
+                config_path,
+            }
+        })
+        .collect();
     Ok(StrataStatus {
         enabled: config.enabled,
         python_path: config.python_path.clone(),
         work_dir: config.work_dir.clone(),
         config_path: config.config_path.clone(),
+        selected_model: config.selected_model(),
+        model_presets,
+        s_config_path: config.config_path_for(StrataModel::S),
+        m_config_path: config.config_path_for(StrataModel::M),
         port: config.port,
         lan: config.lan,
         api_key: config.api_key.clone(),
@@ -457,6 +488,7 @@ pub fn strata_save_config(
     let birth_arg_changed = guard.strata.python_path != config.python_path
         || guard.strata.work_dir != config.work_dir
         || guard.strata.config_path != config.config_path
+        || guard.strata.selected_model() != config.selected_model()
         || guard.strata.port != config.port
         || guard.strata.lan != config.lan
         || guard.strata.api_key != config.api_key
@@ -470,6 +502,36 @@ pub fn strata_save_config(
     new_config.strata = config;
     crate::commands::config::persist_config_public(&new_config)?;
     *guard = new_config;
+    Ok(())
+}
+
+/// 一键切换 S / M 模型：只切换 run config 路径，不改写引擎参数。
+///
+/// 与 NiNfer 不同，Strata 首次加载要十几分钟，运行中切换不自动重启；先校验目标
+/// 配置存在，再要求用户手动停止后启动，避免界面看起来换了模型而进程还是旧的。
+#[tauri::command]
+pub fn strata_select_model(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    model: StrataModel,
+) -> Result<(), String> {
+    let mut guard = state.config.lock().map_err(|error| error.to_string())?;
+    let previous = guard.strata.clone();
+    let selected = previous.with_selected_model(model);
+    strata_manager::validate_options(&options_from_config(&selected))?;
+    if strata_manager::is_strata_running() && selected.config_path != previous.config_path {
+        return Err("请先停止 Strata，再切换 S / M 模型。".to_string());
+    }
+    let mut next = (*guard).clone();
+    next.strata = selected;
+    crate::commands::config::persist_config_public(&next)?;
+    *guard = next;
+    drop(guard);
+    app.emit(
+        "strata:model",
+        serde_json::json!({ "model": model, "label": model.label() }),
+    )
+    .ok();
     Ok(())
 }
 

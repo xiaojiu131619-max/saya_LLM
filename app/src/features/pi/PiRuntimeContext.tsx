@@ -18,16 +18,22 @@ import {
   piAgentPermissionAnswer,
   piAgentRun,
   piAgentSelectSkills,
+  piAgentStop,
   piResolveArtifacts,
-  piTextDelta,
-  piThinkingDelta,
-  piToolStep,
   subscribePiAgent,
   type PiAgentEventPayload,
   type PiAgentStatus,
   type PiPermissionRequest,
 } from '@/lib/ipc/pi';
 import {
+  describePiFailure,
+  piFailureMessage,
+  piTextDelta,
+  piThinkingDelta,
+  piToolStep,
+} from '@/lib/piEvents';
+import {
+  PI_AUTO_SESSION_ID,
   PI_CONFIG_CHANGED_EVENT,
   ensurePiForSession,
   hydratePiConfig,
@@ -37,6 +43,7 @@ import {
   type PiConfig,
 } from '@/lib/piConfig';
 import type { MessageStats, PiStep } from '@/types';
+import { AGENT_SCOPE_MODEL_ID } from '@/types';
 
 /**
  * Pi 的全局运行时。
@@ -66,6 +73,10 @@ type PiRunState = {
   lastDeltaTs: number | null;
   /** Pi message_update 自带的累计 usage（provider 上报）。 */
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number } | null;
+  /** 本轮失败原因（Pi 用 turn_end/message_end 的 stopReason 表达，没有 error 事件）。 */
+  failure: string | null;
+  /** 本轮使用的模型端点，用于把失败原因写成可操作提示。 */
+  baseUrl: string;
 };
 
 export interface PiTaskInput {
@@ -85,7 +96,7 @@ interface PiRuntimeValue {
   sendTask: (input: PiTaskInput) => Promise<void>;
   cancelTask: () => Promise<void>;
   prewarm: (piSessionId: string) => Promise<void>;
-  startSession: (piSessionId: string) => Promise<PiAgentStatus>;
+  startSession: (piSessionId: string, coldStart?: boolean) => Promise<PiAgentStatus>;
   refreshStatus: () => Promise<void>;
   reloadConfig: () => Promise<void>;
 }
@@ -100,7 +111,7 @@ export function usePiRuntime() {
 }
 
 export function PiRuntimeProvider({ children }: { children: ReactNode }) {
-  const { dispatch } = useApp();
+  const { dispatch, state } = useApp();
   const [status, setStatus] = useState<PiAgentStatus | null>(null);
   const [config, setConfig] = useState<PiConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +124,11 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
   const ensureChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const prewarmSeqRef = useRef(0);
   const pendingPrewarmRef = useRef<string | null>(null);
+  // 自动启动优先复用最近一次 Pi 会话，避免开机先起 pi-auto、进对话又重启一次。
+  const chatSessionsRef = useRef(state.chatSessions);
+  useEffect(() => {
+    chatSessionsRef.current = state.chatSessions;
+  }, [state.chatSessions]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -150,15 +166,78 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
     };
   }, [refreshStatus, reloadConfig]);
 
-  const startSession = useCallback(async (piSessionId: string) => {
+  const startSession = useCallback(async (piSessionId: string, coldStart = true) => {
     const next = ensureChainRef.current
       .catch(() => undefined)
-      .then(() => ensurePiForSession(piSessionId));
+      .then(() => ensurePiForSession(piSessionId, coldStart));
     ensureChainRef.current = next;
     const result = await next;
     setStatus(result);
     return result;
   }, []);
+
+  /**
+   * 随应用启动 Pi。
+   *
+   * 开关打开：应用启动时拉起一个常驻实例（固定 pi-auto 会话，工作区稳定）；
+   * 开关在运行中打开/关闭也即时生效——打开就启动，关闭就停止，之后不再自动拉起。
+   * 关闭状态下手动点「启动」仍然可用（那是用户的显式动作）。
+   */
+  const autoStartPrevRef = useRef<boolean | null>(null);
+
+  /** 自动启动用的会话：最近一次 Pi 对话；没有历史时退回到固定的 pi-auto。 */
+  const autoSessionId = useCallback(() => {
+    const bucket = chatSessionsRef.current[AGENT_SCOPE_MODEL_ID.pi] ?? [];
+    const latest = [...bucket]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .find((session) => Boolean(session.piSessionId));
+    return latest?.piSessionId || PI_AUTO_SESSION_ID;
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const apply = async (enabled: boolean) => {
+      if (disposed) return;
+      if (enabled) {
+        try {
+          await startSession(autoSessionId(), true);
+          if (!disposed) setError(null);
+        } catch (reason) {
+          if (disposed) return;
+          setError(
+            `Pi 自动启动失败：${String(reason instanceof Error ? reason.message : reason)}`,
+          );
+        }
+        return;
+      }
+      try {
+        await piAgentStop();
+      } catch {
+        // 没在运行时停止会报错，忽略即可
+      }
+      if (disposed) return;
+      setStatus((prev) => (prev ? { ...prev, running: false, pid: null } : prev));
+    };
+
+    const sync = () => {
+      const enabled = loadPiConfig().autoStart;
+      const previous = autoStartPrevRef.current;
+      autoStartPrevRef.current = enabled;
+      // 启动时本来就是关闭状态：按「关闭不启动 Pi」处理，什么都不做。
+      if (previous === null && !enabled) return;
+      if (previous === enabled) return;
+      void apply(enabled);
+    };
+
+    const timer = window.setTimeout(sync, 0);
+    window.addEventListener(PI_CONFIG_CHANGED_EVENT, sync);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      window.removeEventListener(PI_CONFIG_CHANGED_EVENT, sync);
+    };
+  }, [autoSessionId, startSession]);
 
   const prewarm = useCallback(
     async (piSessionId: string) => {
@@ -170,13 +249,15 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       }
       const current = statusRef.current;
       if (current?.running && current.session_id === piSessionId) return;
+      // 「随应用启动」关掉后，切会话不应该把 Pi 偷偷拉起来。
+      if (!current?.running && !loadPiConfig().autoStart) return;
 
       const seq = prewarmSeqRef.current + 1;
       prewarmSeqRef.current = seq;
       setStartingSessionId(piSessionId);
       setError(null);
       try {
-        await startSession(piSessionId);
+        await startSession(piSessionId, loadPiConfig().autoStart);
       } catch (reason) {
         if (prewarmSeqRef.current === seq) {
           setError(
@@ -317,15 +398,34 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       // TTFT/生成耗时由增量事件时刻推算；生成耗时包含工具执行间隙。
       const stats = finalizeStats(run);
 
+      // 失败但一个字都没吐：把原因写进气泡。否则用户只看到一条空白回复，
+      // 以为「发了没反应」，而真正的原因（多半是连不上模型端点）被丢掉了。
+      const failure = run.failure;
+      if (failure && !run.assistantText.trim()) {
+        dispatch({
+          type: 'UPDATE_MESSAGE',
+          payload: {
+            modelId: run.sessionModelId,
+            sessionId: run.sessionId,
+            messageId: run.messageId,
+            content: describePiFailure(failure, run.baseUrl),
+          },
+        });
+      }
+
+      const warnings = [gateWarning, failure].filter(
+        (item): item is string => Boolean(item),
+      );
+
       dispatch({
         type: 'UPDATE_MESSAGE',
         payload: {
           modelId: run.sessionModelId,
           sessionId: run.sessionId,
           messageId: run.messageId,
-          piState: gateWarning ? 'aborted' : state,
+          piState: gateWarning || failure ? 'aborted' : state,
           ...(stats ? { stats } : {}),
-          ...(gateWarning ? { warnings: [gateWarning] } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
         },
       });
       dispatch({
@@ -353,6 +453,51 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       // usage 先记：最终累计值常在「没有增量」的 message_update 上到达。
       if (type === 'message_update') {
         recordUsage(run, event.usage);
+      }
+
+      // Pi 自动重试：失败一轮会先 agent_end(willRetry=true) 再 auto_retry_start。
+      // 这里必须显式记下「还在重试」，否则会被当成正常收尾提前结束。
+      if (type === 'auto_retry_start') {
+        const attempt = Number(event.attempt ?? 0);
+        const maxAttempts = Number(event.maxAttempts ?? 0);
+        const reason = String(event.errorMessage ?? '模型请求失败');
+        run.failure = reason;
+        pushStep(
+          run,
+          `模型请求失败（${reason}），正在重试 ${attempt}/${maxAttempts}…`,
+          'warn',
+          `retry:${attempt}`,
+        );
+        return;
+      }
+
+      // 重试成功必须清掉上一轮记下的失败，否则本轮会被误判成 aborted。
+      // Pi 的事件顺序是 message_end → auto_retry_end → turn_end → agent_end，
+      // 清在这里能赶在 agent_end 收尾之前生效。
+      if (type === 'auto_retry_end') {
+        const attempt = Number(event.attempt ?? 0);
+        if (event.success === true) {
+          run.failure = null;
+          pushStep(run, `重试成功（第 ${attempt} 次）`, 'ok', `retry:end:${attempt}`);
+        } else {
+          const detail = String(event.finalError ?? run.failure ?? '模型请求失败');
+          run.failure = detail;
+          pushStep(run, `重试失败：${detail}`, 'err', `retry:end:${attempt}`);
+        }
+        return;
+      }
+
+      const failure = piFailureMessage(event);
+      if (failure) {
+        run.failure = failure;
+      }
+
+      if (type === 'agent_settled' || (type === 'agent_end' && event.willRetry !== true)) {
+        // 失败也算收尾：finalizeRun 会把原因写进气泡。
+        const state = cancelRequestedRef.current || run.failure ? 'aborted' : 'done';
+        cancelRequestedRef.current = false;
+        void finalizeRun(state);
+        return;
       }
 
       const text = piTextDelta(event);
@@ -428,15 +573,9 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (type === 'agent_settled' || type === 'agent_end') {
-        const state = cancelRequestedRef.current ? 'aborted' : 'done';
-        cancelRequestedRef.current = false;
-        void finalizeRun(state);
-        return;
-      }
-
       if (type === 'error') {
         const detail = event.message ?? event.error ?? '未知错误';
+        run.failure = String(detail);
         pushStep(run, `错误：${String(detail)}`, 'err', 'error');
         void finalizeRun('aborted');
       }
@@ -496,15 +635,18 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         firstDeltaTs: null,
         lastDeltaTs: null,
         usage: null,
+        failure: null,
+        baseUrl: '',
       };
       cancelRequestedRef.current = false;
       pendingPrewarmRef.current = null;
       try {
-        const next = await startSession(input.piSessionId);
+        const next = await startSession(input.piSessionId, loadPiConfig().autoStart);
         setStatus(next);
         const cfg = await hydratePiConfig(loadPiConfig());
         savePiConfig(cfg);
         setConfig(cfg);
+        run.baseUrl = cfg.baseUrl;
 
         let skillContext = '';
         let selectedSkills: string[] = [];

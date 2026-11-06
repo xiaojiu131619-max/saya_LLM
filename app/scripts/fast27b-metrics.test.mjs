@@ -8,7 +8,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.Scri
 const { fast27bPerformanceData, summarizeFast27bRequests } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 const now = Date.UTC(2026, 9, 13, 12);
 const metric = (id, overrides = {}) => ({
-  id, request_id: 1, model: 'heretic', started_at: now - 2000, finished_at: now - 1000,
+  id, request_id: 1, model: 'bonsai', started_at: now - 2000, finished_at: now - 1000,
   outcome: 'success', prompt_tokens: 100, output_tokens: 40, ttft_ms: 200, total_ms: 1200,
   decode_tps: 40, prefill_tps: 500, cache_tokens: 25, draft_accepted: 12, draft_proposed: 20,
   error: null, ...overrides,

@@ -2,10 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { isDesktopRuntime } from '../desktopRuntime';
 
 /**
- * fast27b 引擎（三元量化 Bonsai-2-27B 离线包）启动通道的 IPC 传输层。
+ * fast27b 引擎（Bonsai / Saluki 27B 离线包）启动通道的 IPC 传输层。
  */
 
-export type Fast27bModelVariant = 'heretic' | 'saluki';
+export type Fast27bModelVariant = 'bonsai' | 'saluki';
 
 export interface Fast27bModelPreset {
   id: Fast27bModelVariant;
@@ -72,11 +72,8 @@ export interface Fast27bStatus {
   default_thinking_budget: number;
   /** 官方 webui 同源桥端口（配置）。 */
   bridge_port: number;
+  /** 旧配置字段：dsh 已移除，保留字段以兼容后端配置。 */
   auto_open_dsh_web: boolean;
-  /** 当前 dsh 绑定（仅当指向 fast27b 端口时返回）。 */
-  dsh_bound_model: string | null;
-  /** dsh Web 地址。 */
-  dsh_web_url: string;
 }
 
 /** fast27b 配置段（保存用）。 */
@@ -88,7 +85,8 @@ export interface Fast27bConfig {
   selected_model: Fast27bModelVariant;
   /** Saluki 槽位路径；旧配置里的 swift_model_path 由后端别名兼容。 */
   saluki_model_path: string;
-  heretic_model_path: string;
+  /** Bonsai 槽位路径；旧配置里的 heretic_model_path 由后端别名兼容。 */
+  bonsai_model_path: string;
   port: number;
   lan: boolean;
   api_key: string;
@@ -108,12 +106,6 @@ export interface WebuiBridgeInfo {
   url: string;
   port: number;
   upstream_port: number;
-}
-
-export interface Fast27bBindResult {
-  model_id: string;
-  base_url: string;
-  provider: string;
 }
 
 /** 起（或复用）fast27b 的官方 webui 同源桥。 */
@@ -215,16 +207,4 @@ export async function fast27bSaveConfig(config: Fast27bConfig) {
 export async function fast27bSetEnabled(enabled: boolean) {
   if (!isDesktopRuntime()) return;
   await invoke('fast27b_set_enabled', { enabled });
-}
-
-/** 把 fast27b 引擎一键接入 dsh（写入 provider 并设为默认模型）。 */
-export async function fast27bBindDsh() {
-  if (!isDesktopRuntime()) return null;
-  return invoke<Fast27bBindResult>('fast27b_bind_dsh');
-}
-
-/** 解除 fast27b 的 dsh 绑定（与 llama 绑定共用同一提供方槽位）。 */
-export async function fast27bUnbindDsh() {
-  if (!isDesktopRuntime()) return;
-  await invoke('fast27b_unbind_dsh');
 }

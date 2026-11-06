@@ -12,7 +12,8 @@ export default function ColumnToggle() {
         className={`relative rounded-lg p-2 transition-colors active:scale-95 ${
           state.gridColumns === 1 ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]'
         }`}
-        title="单列"
+        title="列表模式"
+        aria-label="列表模式"
       >
         <Square className={`relative z-10 h-4 w-4 ${state.gridColumns === 1 ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`} />
       </button>
@@ -22,7 +23,8 @@ export default function ColumnToggle() {
         className={`relative rounded-lg p-2 transition-colors active:scale-95 ${
           state.gridColumns === 2 ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]'
         }`}
-        title="多列"
+        title="卡片模式"
+        aria-label="卡片模式"
       >
         <LayoutGrid className={`relative z-10 h-4 w-4 ${state.gridColumns === 2 ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`} />
       </button>

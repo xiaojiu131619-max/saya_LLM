@@ -60,6 +60,25 @@ export async function getDesktopServerStatus() {
   return invoke<boolean>('get_server_status');
 }
 
+/**
+ * 对任意本地 OpenAI 兼容后端做一次 GET /v1/models 探测（仅回环地址）。
+ * 「WebUI 测试」页用：主模型端口、NiNfer 同源桥、Strata 网关都适用。
+ */
+export async function probeLocalOpenAiApi(url: string, apiKey?: string | null): Promise<PingResult> {
+  if (!isDesktopRuntime()) {
+    return {
+      reachable: false,
+      latencyMs: null,
+      statusCode: null,
+      healthOk: false,
+      modelsOk: false,
+      models: [],
+      error: '浏览器预览环境无法探测本地服务。',
+    };
+  }
+  return invoke<PingResult>('probe_local_openai_api', { url, apiKey: apiKey ?? null });
+}
+
 export async function getServerApiKey() {
   if (!isDesktopRuntime()) return null;
   return invoke<string | null>('get_server_api_key');
@@ -91,7 +110,7 @@ export async function clearDesktopServerLogs() {
   await invoke('clear_server_logs');
 }
 
-/** 读取自当前模型加载以来经 llama-server 的 token 累计（含对外 API / dsh 请求）。 */
+/** 读取自当前模型加载以来经 llama-server 的 token 累计（含对外 API 请求）。 */
 export async function getApiTokenUsage() {
   if (!isDesktopRuntime()) return [];
   return invoke<TokenUsageAgg[]>('api_token_usage');

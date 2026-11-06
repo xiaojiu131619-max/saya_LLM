@@ -3,6 +3,28 @@
 @tailwind utilities;
 
 /* =============================================================
+   随包字体（OFL-1.1）
+   - 得意黑 Smiley Sans Oblique：页面主标题 / 展示标题
+   - 破晓像素 PoxiaoPixel：12px 固定短标签（状态、徽章）
+   桌面端离线可用，禁止改成 CDN 引用（见 docs/guides/UI_DESIGN_GUIDE.md D-58）。
+   ============================================================= */
+@font-face {
+  font-family: "Smiley Sans Oblique";
+  src: url("./assets/fonts/smiley-sans-oblique.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Poxiao Pixel";
+  src: url("./assets/fonts/poxiao-pixel-12px.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* =============================================================
    Win11 Fluent Design Token
    - 亮/暗色双 token，由 `<html class="dark">` 切换
    - 系统主题色 `--accent` 由 AppContext 从 Rust 端读出后注入；
@@ -16,6 +38,10 @@
       "Microsoft YaHei", system-ui, -apple-system, "PingFang SC", sans-serif;
     --font-mono: "Cascadia Mono", "Cascadia Code", "JetBrains Mono",
       ui-monospace, "SFMono-Regular", "Consolas", monospace;
+    /* 展示字体：只给页面主标题与展示标题；动态文本缺字时回退 Segoe UI。 */
+    --font-brand: "Smiley Sans Oblique", var(--font-sans);
+    /* 像素字体：只给 12px 及整数倍的固定短标签。 */
+    --font-pixel: "Poxiao Pixel", var(--font-mono);
 
     --radius-sm: 4px;
     --radius-md: 4px;
@@ -28,16 +54,21 @@
 
     /* 字号刻度：唯一口径。UI 里不要再写 text-[Npx]。
        micro 10px = 时间戳/徽章/行内提示这类微型文字；
-       hero 40px = 仪表盘巨型指标（对应 WinUI Title Large），与 display 之间存在真实断层。 */
-    --font-micro: 10px;
-    --font-eyebrow: 11px;
-    --font-caption: 12px;
-    --font-body: 14px;
-    --font-chat: 15px;
-    --font-subtitle: 16px;
-    --font-title: 18px;
-    --font-display: 22px;
-    --font-hero: 40px;
+       hero 40px = 仪表盘巨型指标（对应 WinUI Title Large），与 display 之间存在真实断层。
+       用 rem 表达：根字号由 --ui-font-scale 统一缩放，令牌与 Tailwind 字号保持同一节奏。 */
+    --ui-font-scale: 1;
+    /* 字号只缩放文字：这些令牌乘 --ui-font-scale，根字号仍固定 16px，rem 间距不跟着变。 */
+    --font-micro: calc(0.625rem * var(--ui-font-scale, 1));
+    --font-eyebrow: calc(0.6875rem * var(--ui-font-scale, 1));
+    --font-caption: calc(0.75rem * var(--ui-font-scale, 1));
+    --font-body: calc(0.875rem * var(--ui-font-scale, 1));
+    --font-chat: calc(0.9375rem * var(--ui-font-scale, 1));
+    --font-subtitle: calc(1rem * var(--ui-font-scale, 1));
+    --font-title: calc(1.125rem * var(--ui-font-scale, 1));
+    --font-display: calc(1.375rem * var(--ui-font-scale, 1));
+    /* 页面大标题：比区块标题明显高一档，对应参考站 28px 左右的编辑式标题。 */
+    --font-page-title: calc(1.75rem * var(--ui-font-scale, 1));
+    --font-hero: calc(2.5rem * var(--ui-font-scale, 1));
 
     /* 行高：界面 1.5；中文长段落 1.78（原先 leading-8 = 2.0 偏松）；代码 1.6。 */
     --leading-tight: 1.25;
@@ -53,6 +84,17 @@
     --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
     --shadow-flyout: 0 8px 16px rgba(0, 0, 0, 0.14);
     --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.22);
+
+    /* 动效档位与曲线：数值取自 Fluent 2 tokens（durations / curves）。
+       悬停 100、展开 150、浮层 200、弹窗 250–300；超过 300 的档位不采用。 */
+    --duration-faster: 100ms;
+    --duration-fast: 150ms;
+    --duration-normal: 200ms;
+    --duration-gentle: 250ms;
+    --duration-slow: 300ms;
+    --curve-decelerate: cubic-bezier(0.33, 0, 0.1, 1);
+    --curve-easy: cubic-bezier(0.33, 0, 0.67, 1);
+    --curve-accelerate: cubic-bezier(0.9, 0.1, 1, 0.2);
 
     --titlebar-bg: rgba(252, 252, 252, 0.58);
     --acrylic-bg: rgba(252, 252, 252, 0.42);
@@ -141,7 +183,12 @@
   }
 
   * { border-color: var(--border); }
-  html { scroll-behavior: smooth; }
+  /* 根字号固定：只让 --font-* 与 text-* 的字号乘 --ui-font-scale，
+     不让 rem 间距、侧栏宽度、卡片尺寸跟着字体档位一起变大变小。 */
+  html {
+    font-size: 16px;
+    scroll-behavior: smooth;
+  }
 
   /* 浏览器模式"假壁纸"：只有非 Tauri 桌面（无真实壁纸）时才需要。
      桌面模式由 window-vibrancy 提供真实 Mica/Acrylic，本层在 Tauri 窗体下不可见。
@@ -365,24 +412,53 @@
   }
 
   .display-title {
-    font-size: var(--font-display);
+    font-family: var(--font-brand);
+    font-size: var(--font-page-title);
     font-weight: 700;
     line-height: var(--leading-tight);
     letter-spacing: var(--tracking-display);
+    text-transform: uppercase;
     color: var(--text-primary);
   }
 
   /* 页面主标题：PageHeader 的 h1 消费这个类。
      此前该类全仓库未定义，导致 11 个页面的主标题无任何规则、
      实际继承 body 的 14px/400——比同页 15px/600 的区块标题更小更轻。
-     层级口径：页面主标题 (--font-title 18px/600) > 区块标题 (15px/600) > 正文 (14px)。 */
+     层级口径：页面主标题 (--font-title 18px/600) > 区块标题 (15px/600) > 正文 (14px)。
+     字体走展示字体；缺字自动回退 Segoe UI（D-59）。 */
   .page-title {
-    font-size: var(--font-title);
+    font-family: var(--font-brand);
+    font-size: var(--font-page-title);
     font-weight: 600;
     line-height: var(--leading-tight);
     letter-spacing: var(--tracking-tight);
+    text-transform: uppercase;
     color: var(--text-primary);
   }
+
+  /* 大标题统一走展示字体（得意黑），英文自动大写；小标题走像素字体，正文回原字体。 */
+  .heading-brand {
+    font-family: var(--font-brand);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-tight);
+  }
+
+  h2,
+  h3 {
+    font-family: var(--font-pixel);
+    letter-spacing: 0;
+  }
+
+  /* 模型名属于内容，不是小标题：保持原字体，避免像素字缺字与长名称模糊。 */
+  .model-tile h3,
+  .heading-plain {
+    font-family: var(--font-sans);
+    letter-spacing: normal;
+  }
+
+  /* 需要单独指定字体时用这两个类，不要再写 font-family 字面量。 */
+  .font-brand { font-family: var(--font-brand); }
+  .font-pixel { font-family: var(--font-pixel); letter-spacing: 0; }
 
   .panel {
     border: 1px solid var(--border-subtle);
@@ -446,12 +522,26 @@
   .model-toolbar-view-controls { grid-template-columns: minmax(0, 1fr) auto auto; }
 
   /* 列宽随实际内容区收缩，极窄窗口也不产生横向溢出。 */
+  /* 固定列宽，卡片不再被 1fr 拉满；行列间距同为 0.625rem，多余空间只在两侧留白。 */
   .model-grid--multi {
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 215px), 1fr));
+    /* 卡片随内容区宽度连续缩放并铺满整行：最小 209px（约 -10%），
+       列宽用 1fr 吸收剩余空间，不再用 space-between 把列距拉得很大。 */
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 209px), 1fr));
     gap: 0.625rem;
   }
 
+  /* 极窄内容区退化为单列，避免固定 232px 轨道横向溢出。 */
+  @media (max-width: 720px) {
+    .model-grid--multi {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
   .model-tile {
+    position: relative;
+    overflow: hidden;
+    /* 明确锁定 3:4（宽:高）；不依赖构建器是否生成 aspect-[3/4]。 */
+    aspect-ratio: 3 / 4;
     border-radius: var(--radius-panel);
     border: 1px solid var(--border-subtle);
     background: var(--surface);
@@ -461,6 +551,21 @@
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
     box-shadow: var(--shadow-card);
   }
+
+  /* 量化线场：现在它就是品牌标志本身，不再只是背景水印。
+     60 列 × 30 段铺满正方形封面，细线作背景肌理、粗线拼出 logo；
+     因此不再做向下渐隐，也不再整体压到低透明度。 */
+  .model-line-field {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity var(--duration-normal) var(--curve-easy);
+  }
+  .model-tile:hover .model-line-field,
+  .model-tile:focus-within .model-line-field { opacity: 1; }
+  .model-tile > *:not(.model-line-field) { position: relative; z-index: 1; }
 
   .model-load-summary-metrics { display: grid; min-width: 0; gap: 0.375rem; }
   .model-load-summary-pills {
@@ -676,6 +781,40 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+
+  /* 设置页字体档位滑杆：与模型参数滑杆保持同一套视觉语言。 */
+  .ui-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-hover);
+    outline: none;
+  }
+  .ui-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--surface);
+    background: var(--accent);
+    box-shadow: var(--shadow-card);
+    cursor: pointer;
+    transition: transform var(--duration-faster) var(--curve-easy);
+  }
+  .ui-range:hover::-webkit-slider-thumb { transform: scale(1.1); }
+  .ui-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--surface);
+    background: var(--accent);
+    box-shadow: var(--shadow-card);
+    cursor: pointer;
+  }
+  .ui-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ui-range:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .chat-composer-input,
   input, textarea {

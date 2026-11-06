@@ -13,9 +13,9 @@ export const FAST27B_SERVICE_ID = 'engine:fast27b';
 export const FAST27B_SERVICE_COLOR = '#0ea5e9';
 export const FAST27B_SERVICE_LABEL = 'NiNfer';
 export const FAST27B_DEFAULT_PORT = 8094;
-export const FAST27B_DEFAULT_MODEL_ID = 'qwen3.8-27b';
-/** Saluki 槽位的模型 id（start-saluki-best.bat 同款，引擎未上报时的兜底）。 */
-export const FAST27B_SALUKI_MODEL_ID = 'underdog-saluki-27b';
+export const FAST27B_DEFAULT_MODEL_ID = 'bonsai';
+/** Saluki 槽位的模型 id（引擎未上报时的兜底）。 */
+export const FAST27B_SALUKI_MODEL_ID = 'saluki';
 export const FAST27B_DEFAULT_CONTEXT_WINDOW = 262144;
 /** 引擎启动参数硬编码 --max-concurrency 1，界面上不可配置。 */
 export const FAST27B_MAX_CONCURRENCY = 1;
@@ -94,7 +94,7 @@ export function useEngineStatuses(): EngineStatusMap {
  */
 export interface EngineServiceView {
   label: string;
-  /** Saluki 27B / Heretic 27B */
+  /** Saluki 27B / Bonsai 27B */
   modelLabel: string;
   /** 进程存活。 */
   running: boolean;
@@ -128,8 +128,6 @@ export interface EngineServiceView {
   draftTokens: number;
   defaultMaxTokens: number;
   bridgePort: number;
-  dshBoundModel: string | null;
-  dshWebUrl: string;
   /** 引擎可用的有效上下文上限：设备 KV 池优先（它才是真正卡住长上下文的那个数）。 */
   effectiveCtxTotal: number;
 }
@@ -140,7 +138,7 @@ export function fast27bServiceView(status: Fast27bStatus | null): EngineServiceV
   const faultKind = status?.fault_kind ?? null;
   return {
     label: FAST27B_SERVICE_LABEL,
-    modelLabel: status?.selected_model === 'saluki' ? 'Saluki 27B' : 'Heretic 27B',
+    modelLabel: status?.selected_model === 'saluki' ? 'Saluki 27B' : 'Bonsai 27B',
     running: Boolean(status?.running),
     serviceable: Boolean(status?.running) && !status?.degraded,
     apiReachable: Boolean(status?.api_reachable),
@@ -165,14 +163,12 @@ export function fast27bServiceView(status: Fast27bStatus | null): EngineServiceV
     enabled: Boolean(status?.enabled),
     enginePath: status?.engine_path ?? '',
     modelPath: status?.model_path ?? '',
-    selectedModel: status?.selected_model ?? 'heretic',
+    selectedModel: status?.selected_model ?? 'bonsai',
     engineExists: Boolean(status?.engine_exists),
     modelExists: Boolean(status?.model_exists),
     draftTokens: status?.draft_tokens ?? 0,
     defaultMaxTokens: status?.default_max_tokens ?? 0,
     bridgePort: status?.bridge_port ?? 0,
-    dshBoundModel: status?.dsh_bound_model ?? null,
-    dshWebUrl: status?.dsh_web_url ?? '',
     effectiveCtxTotal: poolTokens && poolTokens > 0 ? poolTokens : contextWindow,
   };
 }

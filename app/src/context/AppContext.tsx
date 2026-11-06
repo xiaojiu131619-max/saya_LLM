@@ -26,6 +26,8 @@ import { autoTuneManager, ensureAutoTuneRuntime } from '@/lib/autoTuneRuntime';
 import { canApplyAutoTune, tuneRecordPatch, type AutoTuneAuthorization } from '@/lib/autoTuneTask';
 import type { AutoTuneResult } from '@/lib/ipc/model';
 import { activateMainModel, clearMainLoadedModels } from '@/lib/modelState';
+import { normalizeFontScale } from '@/lib/uiScale';
+import { DEMO_MODELS } from '@/lib/demoModels';
 
 /**
  * 把 hex 颜色朝白（amount > 0）或黑（amount < 0）线性混合。
@@ -67,13 +69,15 @@ type Action =
   | { type: 'SET_CHAT_ENGINE'; payload: ChatEngineId }
   | { type: 'SET_WEBUI_ENGINE'; payload: WebUiEngineId }
   | { type: 'SET_AGENT_TAB'; payload: AgentTabId }
+  | { type: 'SET_PI_PROMPT_DRAFT'; payload: string | null }
   | { type: 'SET_THEME'; payload: ThemeType }
   | { type: 'TOGGLE_THEME' }
   | { type: 'SET_THEME_MODE'; payload: ThemeMode }
   | { type: 'SET_SYNC_SYSTEM_ACCENT'; payload: boolean }
   | { type: 'SET_ACRYLIC_MODE'; payload: boolean }
-  // 界面偏好：减少动画、发送快捷键。
+  // 界面偏好：减少动画、字体缩放、发送快捷键。
   | { type: 'SET_REDUCE_MOTION'; payload: boolean }
+  | { type: 'SET_FONT_SCALE'; payload: number }
   | { type: 'SET_ENTER_TO_SEND'; payload: boolean }
   // 数据维护：清空全部对话历史、清空使用统计、界面偏好恢复默认值。
   | { type: 'CLEAR_ALL_CHAT_HISTORY' }
@@ -222,7 +226,7 @@ interface StoredAppState {
   modelThemeGroups?: Record<string, string>;
   modelApiNames?: Record<string, string>;
   modelCustomLogos?: Record<string, string>;
-  ui?: Partial<Pick<AppState, 'theme' | 'themeMode' | 'syncSystemAccent' | 'acrylicMode' | 'reduceMotion' | 'enterToSend' | 'sidebarCollapsed' | 'sidebarWidth' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
+  ui?: Partial<Pick<AppState, 'theme' | 'themeMode' | 'syncSystemAccent' | 'acrylicMode' | 'reduceMotion' | 'fontScale' | 'enterToSend' | 'sidebarCollapsed' | 'sidebarWidth' | 'sortBy' | 'gridColumns' | 'serverPort'>> & {
     themePreferenceVersion?: number;
   };
 }
@@ -477,6 +481,7 @@ const initialState: AppState = {
   syncSystemAccent: storedUi.syncSystemAccent ?? true,
   acrylicMode: storedUi.acrylicMode ?? false,
   reduceMotion: storedUi.reduceMotion ?? false,
+  fontScale: normalizeFontScale(storedUi.fontScale),
   enterToSend: storedUi.enterToSend ?? true,
   sidebarCollapsed: storedUi.sidebarCollapsed ?? false,
   sidebarWidth: clampSidebarWidth(storedUi.sidebarWidth),
@@ -519,10 +524,12 @@ const initialState: AppState = {
   mcpServers: [],
   // 自带对话的后端选择（会话级，不持久化）：main = 主 llama-server。
   chatEngine: normalizeStoredChatEngine(storedState.chatEngine),
-  // Agent 页 WebUI 标签的后端选择（会话级）：与对话页的后端各自独立。
+  // 设置 → 测试页的 WebUI 后端选择（会话级）：与对话页的后端各自独立。
   webuiEngine: 'main',
-  // Agent 页标签（会话级）：默认 dsh 主框架。
+  // Agent 页标签（会话级）：默认 Pi 工作区。
   agentTab: 'pi',
+  // 画布「交给 Pi」的预填提示词（会话级）：由入口写入、ChatPage 消费后清空。
+  piPromptDraft: null,
 };
 
 /** 每日用量按**本地日期**分桶：`toISOString()` 是 UTC，在 UTC+8 的 00:00–08:00
@@ -690,7 +697,7 @@ function hasStreamingMessage(sessionsByModel: Record<string, ChatSession[]>) {
 }
 
 /** 设置中心里的分页：这些视图属于设置界面，不属于 Agent 工作区。 */
-const SETTINGS_VIEWS: ViewType[] = ['settings', 'kernel', 'usage', 'tools', 'skills', 'data'];
+const SETTINGS_VIEWS: ViewType[] = ['settings', 'kernel', 'usage', 'tools', 'skills', 'data', 'webui'];
 
 function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -717,6 +724,8 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, webuiEngine: action.payload };
     case 'SET_AGENT_TAB':
       return { ...state, agentTab: action.payload };
+    case 'SET_PI_PROMPT_DRAFT':
+      return { ...state, piPromptDraft: action.payload };
     case 'SET_THEME':
       return { ...state, theme: action.payload };
     case 'TOGGLE_THEME': {
@@ -744,6 +753,8 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, acrylicMode: action.payload };
     case 'SET_REDUCE_MOTION':
       return { ...state, reduceMotion: action.payload };
+    case 'SET_FONT_SCALE':
+      return { ...state, fontScale: normalizeFontScale(action.payload) };
     case 'SET_ENTER_TO_SEND':
       return { ...state, enterToSend: action.payload };
     case 'CLEAR_ALL_CHAT_HISTORY':
@@ -763,6 +774,7 @@ function appReducer(state: AppState, action: Action): AppState {
         syncSystemAccent: true,
         acrylicMode: false,
         reduceMotion: false,
+        fontScale: 100,
         enterToSend: true,
         sidebarCollapsed: false,
         // 文案承诺「侧边栏宽度恢复出厂值」，就必须一起重置，否则用户拖动过的宽度会留着。
@@ -1283,6 +1295,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     stateRef.current = state;
   }, [state]);
 
+  // 浏览器开发预览：`?demo=1` 注入示例模型，方便在没有 GGUF 的机器上检查卡片样式。
+  // 桌面端不注入，真实模型列表不受影响。
+  useEffect(() => {
+    if (typeof window === 'undefined' || isDesktopRuntime()) return;
+    if (new URLSearchParams(window.location.search).get('demo') !== '1') return;
+    dispatch({ type: 'UPSERT_MODELS', payload: DEMO_MODELS });
+    // UPSERT 会合并本地保存的分组主题色；示例数据要按脚本里的颜色展示，逐卡再定一次。
+    for (const model of DEMO_MODELS) {
+      dispatch({ type: 'SET_MODEL_THEME_COLOR', payload: { modelId: model.id, color: model.themeColorSolid } });
+    }
+    dispatch({ type: 'MARK_MODEL_RECENTLY_USED', payload: { modelId: 'demo-llama' } });
+    dispatch({ type: 'REMEMBER_MODEL_LAUNCH_CONFIG', payload: { modelId: 'demo-qwen', config: DEMO_MODELS[0].loadConfig } });
+  }, [dispatch]);
+
   useEffect(() => {
     autoTuneManager.setApplicationHandler((authorization, result) => {
       dispatch({ type: 'APPLY_AUTO_TUNE', payload: { authorization, result } });
@@ -1382,6 +1408,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (typeof document === 'undefined') return;
     document.documentElement.classList.toggle('reduce-motion', state.reduceMotion);
   }, [state.reduceMotion]);
+
+  /**
+   * 字体缩放：只改根字号，token 与 Tailwind 的 rem 字号一起缩放，
+   * 避免「令牌字号变了、text-sm 没变」的分裂。
+   */
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.style.setProperty('--ui-font-scale', String(state.fontScale / 100));
+  }, [state.fontScale]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -1603,7 +1638,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [state.activeModelId, dispatch]);
 
-  // 轮询 llama-server 日志累计的 token 用量（含对外 API / dsh 等非前端聊天请求）。
+  // 轮询 llama-server 日志累计的 token 用量（含对外 API 等非前端聊天请求）。
   // key = `api-<model_name>`；为避免把已在前端聊天统计里计入的 token 重复累加，
   // 先从日志总额里扣掉前端聊天统计（state.usageByModel 里非 api- 前缀同模型名的 total）。
   const usageByModelRef = useRef(state.usageByModel);
@@ -1749,6 +1784,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           syncSystemAccent: state.syncSystemAccent,
           acrylicMode: state.acrylicMode,
           reduceMotion: state.reduceMotion,
+          fontScale: state.fontScale,
           enterToSend: state.enterToSend,
           sidebarCollapsed: state.sidebarCollapsed,
           sidebarWidth: state.sidebarWidth,
@@ -1804,6 +1840,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.syncSystemAccent,
     state.acrylicMode,
     state.reduceMotion,
+    state.fontScale,
     state.enterToSend,
     state.usageByModel,
   ]);

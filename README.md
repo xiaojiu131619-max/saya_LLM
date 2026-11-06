@@ -22,7 +22,7 @@ Windows 本地大模型启动器。Tauri 2 + React 19 前端，Rust 后端，围
 | 想给局域网其他设备用 | API 服务：一键开放 OpenAI / Anthropic 兼容接口，Bearer Token 鉴权，实时指标 |
 | 想让本地模型跑智能体任务 | Agent 页：配置 Pi 内核，Chat 的 Pi 工作区用本地模型连续执行任务并记录产物 |
 
-除主模型（`llama-server`）外，还托管两条引擎后端：**NiNfer**（`fast27b` 页）与 **Strata**（智慧模型）。三者共享显存，应用内做了硬互斥——启动任一个前先停掉另外两个。
+除主模型（`llama-server`）外，还托管两条引擎后端：**NiNfer**（`fast27b` 页，Bonsai / Saluki 双模型）与 **Strata**（智慧模型，S / M 双模型）。三者共享显存，应用内做了硬互斥——启动任一个前先停掉另外两个。
 
 界面分三个工作区：**模型**、**对话**、**设置**。API 服务、Agent、NiNfer、Strata、llama 日志都不是独立窗口，而是切换在模型工作区里的子视图。
 

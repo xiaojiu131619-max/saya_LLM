@@ -5,13 +5,17 @@ import {
   piAgentGetStatus,
   piAgentRun,
   piAgentSelectSkills,
+  subscribePiAgent,
+  type PiAgentStatus,
+} from '@/lib/ipc/pi';
+import {
+  describePiFailure,
+  piFailureMessage,
   piTextDelta,
   piThinkingDelta,
   piToolStep,
-  subscribePiAgent,
-  type PiAgentStatus,
   type PiToolStep,
-} from '@/lib/ipc/pi';
+} from '@/lib/piEvents';
 import { ensurePiForSession, hydratePiConfig, loadPiConfig } from '@/lib/piConfig';
 import { isDesktopRuntime } from '@/lib/desktopRuntime';
 
@@ -46,6 +50,8 @@ export default function PiFloatApp() {
   const [permissionWaiting, setPermissionWaiting] = useState(false);
   const [thinkingChars, setThinkingChars] = useState(0);
   const runIdRef = useRef('');
+  const failureRef = useRef('');
+  const baseUrlRef = useRef('');
   const seqRef = useRef(1);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
 
@@ -81,6 +87,12 @@ export default function PiFloatApp() {
       onEvent: (payload) => {
         if (!runIdRef.current || (payload.runId && payload.runId !== runIdRef.current)) return;
         const event = payload.event;
+        const type = String(event.type ?? '');
+        const failure = piFailureMessage(event);
+        if (failure) failureRef.current = failure;
+        // 自动重试：agent_end 不是终点；重试成功要清掉上一轮的失败记录。
+        if (type === 'auto_retry_end' && event.success === true) failureRef.current = '';
+        if (type === 'auto_retry_start') return;
         const text = piTextDelta(event);
         if (text !== null) {
           setEntries((prev) => {
@@ -92,8 +104,9 @@ export default function PiFloatApp() {
           });
           return;
         }
-        if (piThinkingDelta(event) !== null) {
-          setThinkingChars((chars) => chars + 1);
+        const thinking = piThinkingDelta(event);
+        if (thinking !== null) {
+          setThinkingChars((chars) => chars + thinking.length);
           return;
         }
         const step = piToolStep(event);
@@ -111,13 +124,25 @@ export default function PiFloatApp() {
           });
           return;
         }
-        const type = String(event.type ?? '');
-        if (type === 'agent_settled' || type === 'agent_end' || type === 'error') {
+        const finished =
+          type === 'agent_settled' ||
+          type === 'error' ||
+          (type === 'agent_end' && event.willRetry !== true);
+        if (finished) {
           setBusy(false);
           setPermissionWaiting(false);
           runIdRef.current = '';
-          if (type === 'error') {
-            setError(`Pi 错误：${String(event.message ?? event.error ?? '未知错误')}`);
+          const reason =
+            type === 'error'
+              ? String(event.message ?? event.error ?? '未知错误')
+              : failureRef.current;
+          failureRef.current = '';
+          if (reason) {
+            setError(
+              type === 'error'
+                ? `Pi 错误：${reason}`
+                : describePiFailure(reason, baseUrlRef.current || '（未配置引擎地址）'),
+            );
           }
         }
       },
@@ -150,6 +175,7 @@ export default function PiFloatApp() {
     const text = draft.trim();
     if (!text || busy) return;
     setError(null);
+    failureRef.current = '';
     setBusy(true);
     setThinkingChars(0);
     setEntries((prev) => [
@@ -169,6 +195,7 @@ export default function PiFloatApp() {
       const started = await ensurePiForSession(FLOAT_SESSION);
       setStatus(started);
       const config = await hydratePiConfig(loadPiConfig());
+      baseUrlRef.current = config.baseUrl;
       let skillContext = '';
       if (config.skillRoutingEnabled && config.skillsDir.trim()) {
         try {
@@ -194,6 +221,9 @@ export default function PiFloatApp() {
     } catch {
       // Pi 可能已退出
     }
+    // 中止不是失败：丢掉本轮的 runId 与失败记录，后续 aborted 事件不再回写。
+    runIdRef.current = '';
+    failureRef.current = '';
     setBusy(false);
   }, []);
 

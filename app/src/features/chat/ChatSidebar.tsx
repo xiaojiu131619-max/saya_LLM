@@ -37,6 +37,13 @@ interface ChatSidebarProps {
   canChat: boolean;
   /** 当前对话归属：主对话 / Agent 工作区。 */
   scope: ChatScope;
+  /**
+   * 引擎后端身份（主对话切到 NiNfer / Strata 时非空）。
+   * 身份区跟随引擎显示；不传则按 GGUF 模型显示。
+   */
+  engineIdentity?: { label: string; displayName: string; serviceable: boolean } | null;
+  /** 引擎模式下点身份卡的去处（对应引擎专页）。 */
+  onOpenEnginePage?: () => void;
   /** 两段式切换回调（主对话 ↔ Agent 工作区）。 */
   onSelectScope: (scope: ChatScope) => void;
   collapsed: boolean;
@@ -76,6 +83,8 @@ export default function ChatSidebar({
   activeModel,
   canChat,
   scope,
+  engineIdentity = null,
+  onOpenEnginePage,
   onSelectScope,
   collapsed,
   collapseLocked = false,
@@ -107,8 +116,22 @@ export default function ChatSidebar({
   gpuPercent,
 }: ChatSidebarProps) {
   const expandedTransition = { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const };
-  const modelStatusLabel = canChat ? '可用' : activeModel ? '已加载' : '未加载';
-  const modelStatusDotClass = canChat ? 'bg-[var(--state-success)]' : activeModel ? 'bg-[var(--accent)]' : 'bg-[var(--text-tertiary)]';
+  // 引擎模式下身份区跟随后端走：显示引擎名与启动状态，点击进引擎专页。
+  const engineMode = Boolean(engineIdentity);
+  const modelStatusLabel = canChat
+    ? '可用'
+    : engineIdentity
+      ? '未启动'
+      : activeModel
+        ? '已加载'
+        : '未加载';
+  const modelStatusDotClass = canChat
+    ? 'bg-[var(--state-success)]'
+    : engineIdentity
+      ? 'bg-[var(--text-tertiary)]'
+      : activeModel
+        ? 'bg-[var(--accent)]'
+        : 'bg-[var(--text-tertiary)]';
   const scopeProfile = chatScopeProfile(scope);
   const nextScope: ChatScope = scope === 'main' ? 'pi' : 'main';
   const scopeSwitchLabel = scope === 'main' ? '切换到 Pi 工作区' : '切换到主对话';
@@ -220,9 +243,11 @@ export default function ChatSidebar({
             aria-label={scopeSwitchLabel}
           >
             {scope === 'main'
-              ? collapsed
-                ? (activeModel?.family?.[0]?.toUpperCase() ?? <BrandLogo size={18} />)
-                : (activeModel?.family?.slice(0, 2).toUpperCase() ?? <BrandLogo size={20} />)
+              ? engineIdentity
+                ? engineIdentity.label.slice(0, collapsed ? 1 : 2).toUpperCase()
+                : collapsed
+                  ? (activeModel?.family?.[0]?.toUpperCase() ?? <BrandLogo size={18} />)
+                  : (activeModel?.family?.slice(0, 2).toUpperCase() ?? <BrandLogo size={20} />)
               : <Bot className="h-[18px] w-[18px]" />}
             <span
               aria-hidden="true"
@@ -239,9 +264,13 @@ export default function ChatSidebar({
                 </div>
                 <div className="truncate text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                   {scope === 'main'
-                    ? canChat
-                      ? activeModel?.name ?? '模型已连接'
-                      : '模型未连接'
+                    ? engineIdentity
+                      ? canChat
+                        ? engineIdentity.displayName
+                        : `${engineIdentity.label} 引擎未启动`
+                      : canChat
+                        ? activeModel?.name ?? '模型已连接'
+                        : '模型未连接'
                     : 'Pi 内核 · 独立会话'}
                 </div>
               </motion.div>
@@ -356,11 +385,15 @@ export default function ChatSidebar({
       <div className={`border-t border-black/[0.055] dark:border-white/[0.055] ${collapsed ? 'px-2.5 py-2' : narrow ? 'px-2 py-2.5' : 'px-3 py-3'}`}>
         <button
           type="button"
-          onClick={onOpenModelLoad}
+          onClick={engineMode && onOpenEnginePage ? onOpenEnginePage : onOpenModelLoad}
           className={`mb-2 min-w-0 rounded-[var(--radius-field)] bg-black/[0.035] text-left transition-colors hover:bg-black/[0.06] dark:bg-white/[0.035] dark:hover:bg-white/[0.065] ${
             collapsed ? 'flex h-12 w-full flex-col items-center justify-center gap-1 px-1 py-1 text-center' : narrow ? 'w-full px-2 py-2' : 'w-full px-3 py-2.5'
           }`}
-          title={activeModel ? '打开模型加载界面' : '打开模型管理'}
+          title={engineMode
+            ? `打开 ${engineIdentity?.label} 页`
+            : activeModel
+              ? '打开模型加载界面'
+              : '打开模型管理'}
         >
           {collapsed ? (
             <>
@@ -369,11 +402,21 @@ export default function ChatSidebar({
             </>
           ) : (
             <>
-              <div className="truncate text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">{activeModel?.name ?? '未加载模型'}</div>
+              <div className="truncate text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">
+                {engineMode
+                  ? (canChat ? engineIdentity?.displayName : `${engineIdentity?.label} 引擎未启动`)
+                  : (activeModel?.name ?? '未加载模型')}
+              </div>
               {!narrow && (
                 <div className="mt-1 flex items-center gap-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                   <span className={`h-2 w-2 rounded-full ${modelStatusDotClass}`} />
-                  {canChat ? '本地推理可用 · 点击查看参数' : activeModel ? '已加载 · 点击查看参数' : '点击前往模型管理'}
+                  {engineMode
+                    ? (canChat ? '引擎就绪 · 点击前往引擎页' : '点击前往引擎页')
+                    : canChat
+                      ? '本地推理可用 · 点击查看参数'
+                      : activeModel
+                        ? '已加载 · 点击查看参数'
+                        : '点击前往模型管理'}
                 </div>
               )}
               <RuntimeStatusCard metrics={statusMetrics} />            </>

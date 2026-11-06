@@ -23,7 +23,7 @@ import type { ChatEngineId } from '@/types';
  * 用「进程在跑」而不是「可对话」作为判据：引擎启动要几秒到十几分钟，
  * 启动期间对话页就该显示「引擎正在加载」，而不是继续指向已经被顶掉的主模型。
  *
- * agent（Pi / dsh）不在这条线上：它们各有自己的对话界面和独立数据，
+ * agent（Pi）不在这条线上：它有自己的对话界面和独立数据，
  * 由侧边栏或 Agent 设置面板里的入口打开，不参与主对话的后端选择。
  */
 export function useAutoChatEngine() {

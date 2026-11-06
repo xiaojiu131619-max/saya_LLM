@@ -19,14 +19,17 @@ import {
   addDesktopModelDir,
   clearDesktopModelCache,
   clearModelRunRecords,
+  getKernelOverridePath,
   getStoragePaths,
   isDesktopRuntime,
+  pickKernelExe,
   pickModelDirectory,
   pickStorageDirectory,
   removeDesktopModelDir,
   resetDesktopAppConfig,
   revealDesktopPath,
   scanDesktopModels,
+  setKernelOverridePath,
   setStorageDir,
   stopActiveChatCompletion,
   stopDesktopServer,
@@ -518,6 +521,9 @@ export default function DataManagementPage() {
                 />
               ) : null}
 
+              {/* 自编译内核：从「核心更新」页迁来。它属于数据/路径维护，不属于更新动作。 */}
+              <KernelOverrideCard />
+
               {/* 非桌面运行时（浏览器预览）拿不到后端目录配置：明确说明，而不是静默少三行。 */}
               {!paths && (
                 <div className="py-3 text-[length:var(--font-caption)] leading-5 text-[var(--text-tertiary)]">
@@ -656,6 +662,129 @@ export default function DataManagementPage() {
         onConfirm={runPendingDataAction}
         onCancel={() => setPendingDataAction(null)}
       />
+    </div>
+  );
+}
+
+/**
+ * 自编译内核：指定一个自己编译的 llama-server.exe 覆盖随包内核。
+ *
+ * 之前放在「核心更新」页，和「更新」混在一起容易让人以为它是更新目标；
+ * 它其实是路径配置，归数据管理更合适。保存后 `process_manager` 解析可执行文件时
+ * 会优先用它，直到「恢复内置」清掉。
+ */
+function KernelOverrideCard() {
+  const [path, setPath] = useState('');
+  const [draft, setDraft] = useState('');
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    void getKernelOverridePath()
+      .then((value) => {
+        const next = value ?? '';
+        setPath(next);
+        setDraft(next);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const handleBrowse = async () => {
+    try {
+      const picked = await pickKernelExe();
+      if (picked) setDraft(picked);
+    } catch (error) {
+      setMessage(String(error instanceof Error ? error.message : error));
+    }
+  };
+
+  const handleSave = async () => {
+    const value = draft.trim();
+    setBusy(true);
+    setMessage(null);
+    try {
+      await setKernelOverridePath(value || null);
+      setPath(value);
+      setMessage(value ? '已启用自编译内核。' : '已恢复内置内核。');
+    } catch (error) {
+      setMessage(`保存失败：${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleClear = async () => {
+    setDraft('');
+    setBusy(true);
+    setMessage(null);
+    try {
+      await setKernelOverridePath(null);
+      setPath('');
+      setMessage('已恢复内置内核。');
+    } catch (error) {
+      setMessage(`恢复失败：${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-[var(--border-subtle)] pt-3">
+      <div className="flex items-center justify-between">
+        <div className="min-w-0">
+          <div className="text-sm text-primary-custom">自编译内核</div>
+          <div className="mt-0.5 text-xs text-secondary-custom">
+            指定自己编译的 llama-server.exe；留空则使用随包内核。
+          </div>
+        </div>
+        <span
+          className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[length:var(--font-micro)] ${
+            path ? 'bg-[var(--accent)]/12 text-[var(--accent)]' : 'bg-[var(--surface-muted)] text-[var(--text-secondary)]'
+          }`}
+        >
+          {path ? '已启用' : '未启用'}
+        </span>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="例如 D:\\build\\llama.cpp\\llama-server.exe"
+          className="mono-font h-9 min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-3 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-black/20"
+          aria-label="自编译内核路径"
+        />
+        <button
+          type="button"
+          onClick={() => void handleBrowse()}
+          className="h-9 rounded-md border border-[var(--border)] px-3 text-xs text-[var(--text-primary)] transition-colors hover:border-[var(--accent)]"
+        >
+          浏览
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void handleSave()}
+          className="h-9 rounded-md bg-[var(--accent)] px-3 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-60"
+        >
+          保存
+        </button>
+        {path ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleClear()}
+            className="h-9 rounded-md border border-[var(--border)] px-3 text-xs text-[var(--text-primary)] transition-colors hover:border-[var(--state-danger)] disabled:opacity-60"
+          >
+            恢复内置
+          </button>
+        ) : null}
+      </div>
+
+      {message ? (
+        <p className="mt-1.5 break-words text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">{message}</p>
+      ) : null}
     </div>
   );
 }

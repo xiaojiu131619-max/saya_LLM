@@ -17,9 +17,9 @@ import PageHeader from '@/components/PageHeader';
 import {
   HEATMAP_SCALES,
   buildHeatmapView,
+  dayKey,
   heatmapCellSize,
   heatmapWidth,
-  parseDayKey,
   type HeatmapScale,
 } from '@/lib/usageHeatmap';
 
@@ -37,16 +37,6 @@ function formatCount(value: number): string {
   if (abs >= 1e6) return `${(value / 1e6).toFixed(abs >= 1e7 ? 1 : 2).replace(/\.?0+$/, '')}M`;
   if (abs >= 1e3) return `${(value / 1e3).toFixed(abs >= 1e4 ? 1 : 2).replace(/\.?0+$/, '')}K`;
   return value.toLocaleString();
-}
-
-/** 分档配色：与热力图同一套阈值。 */
-function tokenLevel(tokens: number, maxTokens: number): number {
-  if (tokens <= 0) return 0;
-  const ratio = tokens / maxTokens;
-  if (ratio <= 0.25) return 1;
-  if (ratio <= 0.5) return 2;
-  if (ratio <= 0.75) return 3;
-  return 4;
 }
 
 /** 次级指标：标签 + 数值 + 单位，横排紧凑。 */
@@ -126,16 +116,29 @@ export default function UsagePage() {
     () => buildHeatmapView(dailyTokens, heatmapScale, heatmapAnchor),
     [dailyTokens, heatmapScale, heatmapAnchor],
   );
+  /**
+   * 年 / 月 / 日三档共用同一张「年度日历热力图」。
+   *
+   * 参考截图里的用量热力图始终是同一块 53 周左右的网格：切换时间范围只换汇总与高亮，
+   * 网格本身不换形态。这里保持同样的口径——格子永远是当前年份，月/日视图用高亮圈出
+   * 所选月份或所选那一天，不再把月份放大、也不再给日视图单独做一张汇总卡。
+   */
+  const calendarView = useMemo(
+    () => buildHeatmapView(dailyTokens, 'year', heatmapAnchor),
+    [dailyTokens, heatmapAnchor],
+  );
+  const focusDay = heatmapScale === 'day' ? heatmapView.dayDetail?.day : undefined;
+  const gridCell = heatmapCellSize('year');
 
   // 翻页单位的中文名（按钮 tooltip 与 aria-label 用）。
   const scaleUnitLabel = heatmapScale === 'year' ? '年' : heatmapScale === 'month' ? '月' : '日';
 
-  // 区间的短标签：年视图只写年，月视图写「YYYY-MM」，日视图写「MM-DD」。
+  // 区间标签三档统一使用同一套中文年月日，避免年写 2026、月写 2026-11、日写 11-04 的割裂。
   const heatmapRangeLabel = heatmapScale === 'year'
-    ? `${heatmapAnchor.getFullYear()}`
+    ? `${heatmapAnchor.getFullYear()} 年`
     : heatmapScale === 'month'
-      ? `${heatmapAnchor.getFullYear()}-${String(heatmapAnchor.getMonth() + 1).padStart(2, '0')}`
-      : `${String(heatmapAnchor.getMonth() + 1).padStart(2, '0')}-${String(heatmapAnchor.getDate()).padStart(2, '0')}`;
+      ? `${heatmapAnchor.getFullYear()} 年 ${heatmapAnchor.getMonth() + 1} 月`
+      : `${heatmapAnchor.getFullYear()} 年 ${heatmapAnchor.getMonth() + 1} 月 ${heatmapAnchor.getDate()} 日`;
 
   // 不能往后翻到未来：年视图到今年为止，月/日视图到今月/今日为止。
   const canShiftForward = useMemo(() => {
@@ -148,12 +151,28 @@ export default function UsagePage() {
     return heatmapAnchor.getTime() < new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   }, [heatmapScale, heatmapAnchor]);
 
+  // 锚点是否仍在「当前年 / 当前月 / 今天」：决定「回到当前」按钮是否出现。
+  const anchorIsCurrent = useMemo(() => {
+    const now = new Date();
+    if (heatmapScale === 'year') return heatmapAnchor.getFullYear() === now.getFullYear();
+    if (heatmapScale === 'month') {
+      return heatmapAnchor.getFullYear() === now.getFullYear() && heatmapAnchor.getMonth() === now.getMonth();
+    }
+    return heatmapAnchor.getFullYear() === now.getFullYear()
+      && heatmapAnchor.getMonth() === now.getMonth()
+      && heatmapAnchor.getDate() === now.getDate();
+  }, [heatmapScale, heatmapAnchor]);
+
   const shiftHeatmapAnchor = (step: 1 | -1) => {
     const scale = heatmapScaleRef.current;
     setHeatmapAnchor((current) => {
       const next = new Date(current);
-      if (scale === 'year') next.setFullYear(current.getFullYear() + step);
-      else if (scale === 'month') {
+      if (scale === 'year') {
+        // 闰日（2-29）翻到平年会溢出成 3-01；统一先把日号钳到目标年的当月最后一天。
+        const targetYear = current.getFullYear() + step;
+        const lastDay = new Date(targetYear, current.getMonth() + 1, 0).getDate();
+        next.setFullYear(targetYear, current.getMonth(), Math.min(current.getDate(), lastDay));
+      } else if (scale === 'month') {
         // 直接 setMonth 会把 31 日溢出到下个月（10-31 点“上个月”变成 10-01）。
         // 先把日号钳到目标月的最后一天，再落锚点。
         const targetMonth = current.getMonth() + step;
@@ -164,7 +183,19 @@ export default function UsagePage() {
     });
   };
 
-  // 粒度切换时同步 ref，翻页用最新粒度；日期锚点保持不动（月->日仍落在同一天）。
+  /**
+   * 切换年/月/日粒度时把锚点归到今天。
+   *
+   * 旧实现保留锚点：在年视图翻到 2023 后切「日」，会落在 2023 年的某一天，
+   * 用户以为切档没生效。三档统一以「当前时间」为入口，翻页后再各自移动。
+   */
+  const switchHeatmapScale = (scale: HeatmapScale) => {
+    heatmapScaleRef.current = scale;
+    setHeatmapScale(scale);
+    setHeatmapAnchor(new Date());
+  };
+
+  // 粒度切换时同步 ref，翻页用最新粒度。
   useEffect(() => {
     heatmapScaleRef.current = heatmapScale;
   }, [heatmapScale]);
@@ -207,6 +238,87 @@ export default function UsagePage() {
   const sourceRows = SOURCE_ORDER
     .map((source) => ({ source, tokens: bySource[source] ?? 0 }))
     .filter((row) => row.tokens > 0);
+
+  /**
+   * 按模型拆开的每日用量：月视图叠成「每天一根、按模型分段」的柱状图，
+   * 日视图按模型各画一根柱。年度热力图仍只关心当日总量，不在这里拆。
+   */
+  const modelDailyUsage = useMemo(() => {
+    const byId = new Map(state.models.map((model) => [model.id, model]));
+    return Object.entries(state.usageByModel)
+      .map(([id, usage]) => {
+        const model = byId.get(id);
+        const engineLabel = id === FAST27B_SERVICE_ID
+          ? 'NiNfer 引擎'
+          : id === STRATA_SERVICE_ID
+            ? 'Strata 引擎'
+            : null;
+        const dailyTokens = usage.dailyTokens ?? {};
+        return {
+          id,
+          name: model?.name ?? engineLabel ?? usage.modelName ?? id,
+          color: model?.themeColorSolid ?? usage.modelColor ?? 'var(--accent)',
+          dailyTokens,
+          total: Object.values(dailyTokens).reduce((sum, tokens) => sum + tokens, 0),
+        };
+      })
+      .filter((model) => model.total > 0)
+      .sort((a, b) => b.total - a.total);
+  }, [state.models, state.usageByModel]);
+
+  // 月视图：当月每天的总量 + 按模型拆分的分段。
+  const monthChart = useMemo(() => {
+    const year = heatmapAnchor.getFullYear();
+    const month = heatmapAnchor.getMonth();
+    const dayCount = new Date(year, month + 1, 0).getDate();
+    const rows = Array.from({ length: dayCount }, (_, index) => {
+      const day = dayKey(new Date(year, month, index + 1));
+      const segments = modelDailyUsage
+        .map((model) => ({
+          id: model.id,
+          name: model.name,
+          color: model.color,
+          tokens: model.dailyTokens[day] ?? 0,
+        }))
+        .filter((segment) => segment.tokens > 0);
+      return {
+        day,
+        total: segments.reduce((sum, segment) => sum + segment.tokens, 0),
+        segments,
+      };
+    });
+    const modelTotals = new Map<string, { name: string; color: string; tokens: number }>();
+    for (const row of rows) {
+      for (const segment of row.segments) {
+        const current = modelTotals.get(segment.id);
+        modelTotals.set(segment.id, {
+          name: segment.name,
+          color: segment.color,
+          tokens: (current?.tokens ?? 0) + segment.tokens,
+        });
+      }
+    }
+    return {
+      rows,
+      max: Math.max(1, ...rows.map((row) => row.total)),
+      models: [...modelTotals.values()].sort((a, b) => b.tokens - a.tokens),
+    };
+  }, [heatmapAnchor, modelDailyUsage]);
+
+  // 日视图：只显示所选日期里出现过的模型。
+  const dayChart = useMemo(() => {
+    if (!focusDay) return { rows: [], max: 1 };
+    const rows = modelDailyUsage
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        color: model.color,
+        tokens: model.dailyTokens[focusDay] ?? 0,
+      }))
+      .filter((row) => row.tokens > 0)
+      .sort((a, b) => b.tokens - a.tokens);
+    return { rows, max: Math.max(1, ...rows.map((row) => row.tokens)) };
+  }, [focusDay, modelDailyUsage]);
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
@@ -294,7 +406,7 @@ export default function UsagePage() {
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                   <CalendarDays className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
-                  <h2 className="truncate text-sm font-semibold text-[var(--text-primary)]">{heatmapView.title} Token 热力图</h2>
+                  <h2 className="truncate text-sm font-semibold text-[var(--text-primary)]">Token 用量</h2>
                 </div>
                 {/* 缩放：年 / 月 / 日 三档，外加前后翻页 */}
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -303,10 +415,7 @@ export default function UsagePage() {
                       <button
                         key={item.id}
                         type="button"
-                        onClick={() => {
-                          heatmapScaleRef.current = item.id;
-                          setHeatmapScale(item.id);
-                        }}
+                        onClick={() => switchHeatmapScale(item.id)}
                         aria-pressed={heatmapScale === item.id}
                         title={item.hint}
                         className={`h-7 rounded-[var(--radius-sm)] px-2.5 text-[length:var(--font-caption)] font-medium transition-colors ${
@@ -342,14 +451,14 @@ export default function UsagePage() {
                     >
                       <ChevronRight className="h-3.5 w-3.5" />
                     </button>
-                    {(heatmapScale !== 'year' || heatmapAnchor.getFullYear() !== new Date().getFullYear()) && (
+                    {!anchorIsCurrent && (
                       <button
                         type="button"
                         onClick={() => setHeatmapAnchor(new Date())}
                         className="h-7 rounded-[var(--radius-field)] px-2 text-[length:var(--font-eyebrow)] text-[var(--accent)] transition-colors hover:bg-[var(--accent-subtle)]"
                         title="回到当前时间"
                       >
-                        今天
+                        回到当前
                       </button>
                     )}
                   </div>
@@ -365,119 +474,87 @@ export default function UsagePage() {
                 )}
               </div>
 
-              {heatmapView.scale === 'day' && heatmapView.dayDetail ? (
-                // 日视图：不伪造小时数据，只给当日读数与当月上下文。
-                <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface-muted)]/40 p-4">
-                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="text-[length:var(--font-title)] font-semibold text-[var(--text-primary)]">{formatCount(heatmapView.dayDetail.tokens)}</span>
-                    <span className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">Token · {heatmapView.dayDetail.day}</span>
-                  </div>
-                  <p className="mt-1.5 text-[length:var(--font-caption)] leading-5 text-[var(--text-tertiary)]">
-                    小时级用量尚未落盘，这里不做推算；下面按天列出本月分布，方便对照。
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-1">
-                    {heatmapView.dayDetail.monthDays.map((item) => {
-                      const level = tokenLevel(item.tokens, Math.max(1, ...heatmapView.dayDetail!.monthDays.map((d) => d.tokens)));
-                      const isTarget = item.day === heatmapView.dayDetail!.day;
-                      return (
-                        <button
-                          key={item.day}
-                          type="button"
-                          onClick={() => setHeatmapAnchor(parseDayKey(item.day))}
-                          title={`${item.day}：${formatCount(item.tokens)} 个 Token`}
-                          aria-current={isTarget ? 'date' : undefined}
-                          className={`h-6 w-6 rounded-[var(--radius-sm)] text-[length:var(--font-eyebrow)] transition-transform hover:scale-110 ${
-                            isTarget ? 'ring-1 ring-[var(--text-primary)]' : ''
-                          }`}
-                          style={{
-                            background: item.tokens > 0 ? heatmapPalette[level] : 'var(--surface-muted)',
-                            color: item.tokens > 0 && level >= 3 ? 'var(--text-on-accent)' : 'var(--text-tertiary)',
-                          }}
-                        >
-                          {Number(item.day.slice(-2))}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 border-t border-[var(--border-subtle)] pt-2.5 text-[length:var(--font-caption)]">
-                    <div>
-                      <div className="text-[var(--text-tertiary)]">本月合计</div>
-                      <div className="mono-font font-medium text-[var(--text-primary)]">{formatCount(heatmapView.dayDetail.monthTotal)}</div>
-                    </div>
-                    <div>
-                      <div className="text-[var(--text-tertiary)]">日均（有记录）</div>
-                      <div className="mono-font font-medium text-[var(--text-primary)]">
-                        {heatmapView.dayDetail.monthAverage === null ? '—' : formatCount(heatmapView.dayDetail.monthAverage)}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:thin]">
-                  <div style={{ width: heatmapWidth(heatmapView) + 42, minWidth: '100%' }}>
-                    {/* 月份标签 */}
-                    <div className="mb-1.5 flex pl-9 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
-                      {heatmapView.columns.map((column, index) => (
-                        <div key={index} style={{ width: heatmapCellSize(heatmapScale).cell + heatmapCellSize(heatmapScale).gap, flexShrink: 0 }}>
-                          {column.monthLabel ? <span className="relative -left-px whitespace-nowrap">{column.monthLabel}</span> : null}
+              {/*
+                固定高度框架：年视图铺日历热力图，月/日视图换成柱状图。
+                切换粒度时外框大小不变，只换图形与图例。
+              */}
+              <div className="h-[220px]">
+                {heatmapScale === 'year' ? (
+                  <div className="flex h-full flex-col justify-center">
+                    <div className="overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:thin]">
+                      <div style={{ width: heatmapWidth(calendarView) + 42, minWidth: '100%' }}>
+                        {/* 月份标签 */}
+                        <div className="mb-1.5 flex pl-9 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
+                          {calendarView.columns.map((column, index) => (
+                            <div key={index} style={{ width: gridCell.cell + gridCell.gap, flexShrink: 0 }}>
+                              {column.monthLabel ? <span className="relative -left-px whitespace-nowrap">{column.monthLabel}</span> : null}
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                    {/* items-start：否则两列被拉伸到同高，星期标签行距会与格子错开 */}
-                    <div className="flex items-start">
-                      {/* 星期标签 */}
-                      <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col text-[length:var(--font-micro)] text-[var(--text-secondary)]" style={{ gap: heatmapCellSize(heatmapScale).gap }}>
-                        {WEEKDAY_LABELS.map((label, rowIndex) => (
-                          <div
-                            key={rowIndex}
-                            className="flex flex-shrink-0 items-center justify-end pr-0.5"
-                            style={{ height: heatmapCellSize(heatmapScale).cell }}
-                          >
-                            {rowIndex % 2 === 1 ? label : ''}
+                        {/* items-start：否则两列被拉伸到同高，星期标签行距会与格子错开 */}
+                        <div className="flex items-start">
+                          {/* 星期标签 */}
+                          <div className="mr-1.5 flex w-9 flex-shrink-0 flex-col text-[length:var(--font-micro)] text-[var(--text-secondary)]" style={{ gap: gridCell.gap }}>
+                            {WEEKDAY_LABELS.map((label, rowIndex) => (
+                              <div
+                                key={rowIndex}
+                                className="flex flex-shrink-0 items-center justify-end pr-0.5"
+                                style={{ height: gridCell.cell }}
+                              >
+                                {rowIndex % 2 === 1 ? label : ''}
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                      {/* 格子 */}
-                      <div className="flex" style={{ gap: heatmapCellSize(heatmapScale).gap }}>
-                        {heatmapView.columns.map((column, columnIndex) => (
-                          <div
-                            key={columnIndex}
-                            className="flex flex-shrink-0 flex-col"
-                            style={{ gap: heatmapCellSize(heatmapScale).gap }}
-                          >
-                            {column.cells.map((cell, rowIndex) => {
-                              if (!cell.day) {
-                                return <div key={`blank-${columnIndex}-${rowIndex}`} style={{ width: heatmapCellSize(heatmapScale).cell, height: heatmapCellSize(heatmapScale).cell }} />;
-                              }
-                              return (
-                                <div
-                                  key={cell.day}
-                                  title={`${cell.day}：${formatCount(cell.tokens)} 个 Token`}
-                                  className="flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[var(--accent)]/60"
-                                  style={{
-                                    width: heatmapCellSize(heatmapScale).cell,
-                                    height: heatmapCellSize(heatmapScale).cell,
-                                    background: cell.tokens > 0 ? heatmapPalette[cell.level] : (state.theme === 'dark' ? 'rgba(255,255,255,0.06)' : 'var(--border)'),
-                                  }}
-                                />
-                              );
-                            })}
+                          {/* 格子 */}
+                          <div className="flex" style={{ gap: gridCell.gap }}>
+                            {calendarView.columns.map((column, columnIndex) => (
+                              <div
+                                key={columnIndex}
+                                className="flex flex-shrink-0 flex-col"
+                                style={{ gap: gridCell.gap }}
+                              >
+                                {column.cells.map((cell, rowIndex) => {
+                                  if (!cell.day) {
+                                    return <div key={`blank-${columnIndex}-${rowIndex}`} style={{ width: gridCell.cell, height: gridCell.cell }} />;
+                                  }
+                                  return (
+                                    <div
+                                      key={cell.day}
+                                      title={`${cell.day}：${formatCount(cell.tokens)} 个 Token`}
+                                      className="flex-shrink-0 rounded-[3px] transition-transform duration-150 hover:scale-125 hover:ring-1 hover:ring-[var(--accent)]/60"
+                                      style={{
+                                        width: gridCell.cell,
+                                        height: gridCell.cell,
+                                        background: cell.tokens > 0 ? heatmapPalette[cell.level] : (state.theme === 'dark' ? 'rgba(255,255,255,0.06)' : 'var(--border)'),
+                                      }}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              )}
-              {heatmapView.scale !== 'day' && (
-                /* 图例固定在滚动容器之外：格子可以横向滚动，图例始终在可见区域右下角。 */
-                <div className="mt-2 flex items-center justify-end gap-1.5 pr-0.5 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
+                ) : heatmapScale === 'month' ? (
+                  <MonthModelBars rows={monthChart.rows} max={monthChart.max} />
+                ) : (
+                  <DayModelBars rows={dayChart.rows} max={dayChart.max} />
+                )}
+              </div>
+
+              {/* 图例：年视图是色阶，月/日视图换成模型颜色与用量。 */}
+              {heatmapScale === 'year' ? (
+                <div className="mt-2 flex h-7 items-center justify-end gap-1.5 pr-0.5 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
                   <span>少</span>
                   {heatmapPalette.map((color, index) => (
                     <span key={index} className="h-[14px] w-[14px] rounded-[3px]" style={{ background: color }} />
                   ))}
                   <span>多</span>
                 </div>
+              ) : (
+                <ModelLegend models={heatmapScale === 'month' ? monthChart.models : dayChart.rows} />
               )}
             </section>
 
@@ -532,6 +609,121 @@ export default function UsagePage() {
   );
 }
 
+interface MonthBarRow {
+  day: string;
+  total: number;
+  segments: Array<{ id: string; name: string; color: string; tokens: number }>;
+}
+
+interface DayBarRow {
+  id: string;
+  name: string;
+  color: string;
+  tokens: number;
+}
+
+function ChartEmpty({ label }: { label: string }) {
+  return (
+    <div className="grid h-full place-items-center text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+      {label}
+    </div>
+  );
+}
+
+/** 月视图：每天一根柱，柱内按模型分段；同一天用了哪些模型一眼可见。 */
+function MonthModelBars({ rows, max }: { rows: MonthBarRow[]; max: number }) {
+  if (!rows.some((row) => row.total > 0)) {
+    return <ChartEmpty label="本月没有记录" />;
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 items-stretch gap-1 overflow-x-auto pb-1 [scrollbar-width:thin]">
+        {rows.map((row) => (
+          <div
+            key={row.day}
+            className="flex h-full min-w-[12px] flex-1 flex-col"
+            title={`${row.day}：${formatCount(row.total)} 个 Token`}
+          >
+            <div className="flex min-h-0 flex-1 items-end">
+              <div
+                className="flex w-full flex-col-reverse overflow-hidden rounded-t-[2px] transition-opacity hover:opacity-85"
+                style={{ height: `${(row.total / max) * 100}%` }}
+              >
+                {row.segments.map((segment) => (
+                  <div
+                    key={segment.id}
+                    style={{
+                      height: `${(segment.tokens / row.total) * 100}%`,
+                      background: segment.color,
+                    }}
+                    title={`${segment.name}：${formatCount(segment.tokens)} 个 Token`}
+                  />
+                ))}
+              </div>
+            </div>
+            <span className="mt-1 h-4 flex-shrink-0 text-center text-[length:var(--font-micro)] leading-4 text-[var(--text-tertiary)]">
+              {Number(row.day.slice(-2))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 日视图：每个模型一根柱，直接对比当天各模型用量。 */
+function DayModelBars({ rows, max }: { rows: DayBarRow[]; max: number }) {
+  if (rows.length === 0) {
+    return <ChartEmpty label="当天没有记录" />;
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto pb-1 [scrollbar-width:thin]">
+        {rows.map((row) => (
+          <div
+            key={row.id}
+            className="flex h-full min-w-[72px] max-w-[180px] flex-1 flex-col"
+            title={`${row.name}：${formatCount(row.tokens)} 个 Token`}
+          >
+            <div className="flex min-h-0 flex-1 items-end">
+              <div
+                className="w-full rounded-t-[3px] transition-opacity hover:opacity-85"
+                style={{ height: `${(row.tokens / max) * 100}%`, background: row.color }}
+              />
+            </div>
+            <span
+              className="mt-1 line-clamp-2 h-9 flex-shrink-0 text-[length:var(--font-micro)] leading-4 text-[var(--text-secondary)]"
+              title={row.name}
+            >
+              {row.name}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 模型图例：颜色 + 名称 + 当前区间用量。 */
+function ModelLegend({ models }: { models: Array<{ name: string; color: string; tokens: number }> }) {
+  if (models.length === 0) return <div className="mt-2 h-7" />;
+  return (
+    <div className="mt-2 flex h-7 items-center gap-3 overflow-x-auto whitespace-nowrap pr-0.5 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)] [scrollbar-width:thin]">
+      {models.map((model, index) => (
+        <span
+          key={`${model.name}-${index}`}
+          className="inline-flex flex-shrink-0 items-center gap-1.5"
+          title={`${model.name}：${formatCount(model.tokens)} 个 Token`}
+        >
+          <span className="h-2.5 w-2.5 flex-shrink-0 rounded-[2px]" style={{ background: model.color }} />
+          <span className="max-w-[12rem] truncate text-[var(--text-secondary)]">{model.name}</span>
+          <span className="mono-font">{formatCount(model.tokens)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function UsageRankRow({ rank, name, source, tokens, total, color, responseCount, avgTokensPerSec, lastUsedAt }: {
   rank: number;
   name: string;
@@ -560,7 +752,7 @@ function UsageRankRow({ rank, name, source, tokens, total, color, responseCount,
       </div>
       <div className="mt-1.5 flex items-center gap-2 pl-6">
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-          <div className="h-full rounded-full transition-[width] duration-500 ease-out" style={{ width: `${percent}%`, background: color }} />
+          <div className="h-full rounded-full transition-[width] duration-200 ease-out" style={{ width: `${percent}%`, background: color }} />
         </div>
         <span className="mono-font w-10 flex-shrink-0 text-right text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{percent.toFixed(0)}%</span>
       </div>

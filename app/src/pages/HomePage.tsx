@@ -150,7 +150,7 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-[1180px] min-[1600px]:max-w-[1520px] min-w-0 items-center gap-3">
           <div className="min-w-0">
             <div className="eyebrow mb-2">模型工作台 / 本地 GGUF</div>
-            <h1 className="truncate text-xl font-bold leading-tight text-[var(--text-primary)]">模型管理</h1>
+            <h1 className="heading-brand truncate text-[length:var(--font-page-title)] font-bold leading-tight text-[var(--text-primary)]">模型管理</h1>
             <p className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)]">
               扫描本地 GGUF 文件，选择模型并进入参数加载。
             </p>
@@ -243,6 +243,7 @@ export default function HomePage() {
                   index={i}
                   isSingleColumn={state.gridColumns === 1}
                   recentUsedAt={state.recentModelUsage[model.id]}
+                  allowLineFieldAnimation={sortedModels.length <= 24}
                 />
               ))}
             </div>

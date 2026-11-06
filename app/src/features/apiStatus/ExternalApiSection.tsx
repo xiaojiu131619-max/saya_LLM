@@ -183,7 +183,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
         <div className={embedded ? '' : 'mx-auto max-w-3xl'}>
           {!embedded && (
             <div className="mb-6">
-              <h1 className="text-2xl font-bold text-primary-custom">对外 API</h1>
+              <h1 className="heading-brand text-[length:var(--font-page-title)] font-bold text-primary-custom">对外 API</h1>
               <p className="mt-1 text-sm leading-6 text-secondary-custom">
                 管理 OpenAI / Anthropic 兼容接口的监听范围、端口和 API Key。修改后请重新加载模型以生效。
               </p>

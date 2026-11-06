@@ -6,6 +6,28 @@
 
 ---
 
+## [Unreleased]
+
+### 变更
+
+- **WebUI 迁入设置中心并升级为「WebUI 测试」页**：Agent 页的 WebUI 标签移入「设置中心 → WebUI 测试」，保留三后端选择（主模型 / NiNfer / Strata）与官方界面入口；新增「连通性测试」卡，经 Rust 端 `probe_local_openai_api`（仅回环地址、不走系统代理）探测当前后端 `/v1/models`，展示延迟、状态码与模型列表，不受浏览器跨域限制。Agent 页只剩 Pi 与画布两个标签，导航圆点改为跟随 Pi 内核运行状态。
+- **画布与 Pi 双向联动补全**：新增 `canvas_list_workflows` 命令（与 Pi 工具桥同一实现）；画布页「工作流」区列出网关工作流并支持一键「交给 Pi」——自动切到 Chat 的 Pi 工作区并预填一条用 `canvas_run` 运行该工作流的提示词；Pi 图片产物卡新增「画布续作」，打开（必要时启动）画布用产物图继续创作。
+- **NiNfer / Strata 融入 API 服务页**：API 服务页此前在 Strata 后端下整页回退为「主模型未运行」错误视图。现在跟随对话后端三档渲染：Strata 模式显示网关端口 / Base URL / 鉴权 / 在途请求（取指标快照 `active_requests`，不编造槽位分母）、接口在线但权重加载中给出专属提示；用量卡新增 `strataServiceUsage` 聚合（与 NiNfer 同一套解耦层口径）；「另一后端在跑」提示与跳转覆盖两个引擎。
+- **对话页引擎感对齐**：Chat 侧边栏身份区跟随引擎后端（显示「NiNfer · Bonsai 27B」等、状态点与点击去向进引擎专页）；页头「后端」徽章可点击跳当前后端管理页（保持只读、不做下拉——手动切只能切到没在跑的引擎，必然报错）。
+- **NiNfer 改为 Bonsai / Saluki 双模型**：去掉「Fast」9B 预留空页面；第一个变体由 Heretic 升级为 Bonsai（`Swift-Bonsai-2-27B-PQ2-MTP-DFlash2-v3.ninfer`），第二个为 Saluki（`Qwen3.8-27B-Saluki-Swift-1.5-mix2-mtp.ninfer`）。启动参数逐项对齐 `fast-llm/run/bonsai.bat`（balanced：rk8v4、66,560 窗口、DFlash2 k6 + ngram15 + full head、chunk 1024 + cuBLAS）与 `saluki.bat`（int8、55,296 窗口、MTP k2、chunk 512）；旧 `heretic` / `Heretic` 配置与模型路径自动落到 Bonsai，旧离线包 `ninfer-serve-86.exe` 在检测到新 `ninfer-serve.exe` 时自动切换。
+- **Strata 改为 S / M 双模型**：S 对应 `gyro-s-100k.json`（Gyro-S TQ1_0），M 对应 `gyro-m-abl-100k.json`（Gyro-M TQ2_0）；页面胶囊切换只切换 run config，运行中禁止切换（避免十几分钟加载被静默重启）。两个变体的 run config 路径分别记忆、互不覆盖。
+
+### 修复
+
+- **修复「webui→设置」迁移半成品导致的 4 个编译错误**：`AgentTabId` 类型已删 `'webui'` 但 AgentPage 未同步；本次一并完成 UI 层迁移。
+- **UsagePage 用量条 500ms 过渡违反动效上限（D-16）**：改为 200ms（Fluent Normal 档）。
+- **对话文案指对页**：chatScope 的空态 / 占位符文案不再把 Strata 用户指去 NiNfer 页（按当前引擎名指路）；NiNfer 页 tab 类型清掉已删除的 `"api"` 残留成员。
+- **Pi 自动重试成功后仍被标成失败**：模型偶发 529 / 超时后 Pi 会自己重试（`auto_retry_start` / `auto_retry_end`），此前前端只记「正在重试」、从不消费重试结果，`run.failure` 一直留到收尾，于是重试成功的轮次也被标成 `aborted` 并挂一条失败警告。现在 `auto_retry_end.success=true` 会清掉失败记录并补一条「重试成功」，只有最终失败才保留原因。浮窗同样不再把 `agent_end(willRetry=true)` 当成结束。
+- **Pi 工具步骤不看 `isError`，失败也显示 ✓**：`tool_execution_end` 的失败标记是顶层 `isError`，此前只检查 `ok === false` / `exit_code !== 0`，权限拒绝、宿主桥失败、命令非零退出都会被渲染成成功，失败的 `write_file` 还会把路径记进产物卡。现在顶层 `isError`、`result.isError`、`exitCode`（camelCase）与旧字段 `exit_code` 都参与判定。
+- **Pi 画布产物与命令退出码取不到**：宿主扩展把 `meta` 放在工具结果的 `details` 里，此前只读 `structuredContent`，导致 `canvas_run` 生成的图片永远不进产物卡、`run_command` 的非零退出码也检测不到。事件解析抽到 `lib/piEvents.ts`，优先读 `details` 并兼容 `structuredContent`，补了 7 条协议回归测试（`scripts/pi-events.test.mjs`）。
+
+---
+
 ## [0.5.0] - 2026-11-04
 
 Pi 内核接入 Chat 之后的收口批次：P0–P3 完成清单（`docs/plans/POST_0.5_BACKLOG.md`）全部落地，并把无限画布接进 Pi 的工具链。此前 `[Unreleased]` 的批次一并归入本版本。

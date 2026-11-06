@@ -92,6 +92,21 @@ export async function canvasGetSummary(): Promise<CanvasSummary | null> {
   return invoke<CanvasSummary>('canvas_get_summary');
 }
 
+/** 网关已安装的工作流条目（只读）：画布标签页「交给 Pi」入口用。 */
+export interface CanvasWorkflowEntry {
+  id: string;
+  name: string;
+  category?: unknown;
+  type?: unknown;
+  enabled: boolean;
+  availability?: unknown;
+}
+
+export async function canvasListWorkflows(): Promise<CanvasWorkflowEntry[]> {
+  if (!isDesktopRuntime()) return [];
+  return invoke<CanvasWorkflowEntry[]>('canvas_list_workflows');
+}
+
 export async function canvasStart(): Promise<CanvasStatus> {
   if (!isDesktopRuntime()) throw new Error('画布只在桌面版可用。');
   return invoke<CanvasStatus>('canvas_start');

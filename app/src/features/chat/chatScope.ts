@@ -25,6 +25,8 @@ export interface ChatScopeRuntime {
   modelReady: boolean;
   /** Pi CLI 是否可用（配置已探测到 cli.js）。 */
   piReady: boolean;
+  /** 是否开启「随应用启动」；关闭时不再自动拉起 Pi。 */
+  piAutoStart: boolean;
   /** Pi 进程是否在运行。 */
   piRunning: boolean;
   /** 当前 Chat 会话是否就是 Pi 正在跑的会话。 */
@@ -97,7 +99,7 @@ const MAIN_PROFILE: ChatScopeProfile = {
     if (runtime.engine) {
       return mainCanChat(runtime)
         ? '输入消息...'
-        : `请先到 NiNfer 页启动 ${runtime.engine.label} 引擎`;
+        : `请先到 ${runtime.engine.label} 页启动引擎`;
     }
     if (runtime.modelName) {
       return mainCanChat(runtime) ? '输入消息...' : '请先从模型管理加载本地模型';
@@ -109,7 +111,7 @@ const MAIN_PROFILE: ChatScopeProfile = {
       const name = runtime.engine.displayName ?? runtime.engine.label;
       return mainCanChat(runtime)
         ? `${name} · 引擎已连接，可上传照片、视频和文本文件（视频仅分析画面；已连接的 MCP 工具可参与调用）`
-        : `${runtime.engine.label} 引擎未运行：到 NiNfer 页启动引擎后再对话`;
+        : `${runtime.engine.label} 引擎未运行：到 ${runtime.engine.label} 页启动引擎后再对话`;
     }
     if (runtime.modelName) {
       return mainCanChat(runtime)
@@ -127,7 +129,12 @@ const PI_PROFILE: ChatScopeProfile = {
   description: 'Pi 内核 · 连续执行 · 沙箱内操控文件',
   historyKey: historyKeyOf('pi'),
   sendRoute: 'agent',
-  canChat: (runtime) => runtime.desktopReady && runtime.piReady && !runtime.piStarting,
+  // 关掉「随应用启动」且当前没有实例时，发送入口也禁用，避免发出去才报错。
+  canChat: (runtime) =>
+    runtime.desktopReady &&
+    runtime.piReady &&
+    (runtime.piAutoStart || runtime.piRunning) &&
+    !runtime.piStarting,
   eyebrow: () => '助手 / Pi',
   subtitle: () => 'Pi 内核 · 连续执行 · 沙箱内操控文件',
   statusText: (runtime) => {
@@ -135,15 +142,22 @@ const PI_PROFILE: ChatScopeProfile = {
     if (runtime.piSessionReady) return 'Pi 已连接';
     if (runtime.piRunning) return 'Pi 正在运行其他会话';
     if (!runtime.piReady) return 'Pi 未配置 — 到 Agent 页填写 CLI 路径';
+    if (!runtime.piAutoStart) return 'Pi 已关闭自动启动 — 到 Agent 页手动启动';
     return 'Pi 未启动 — 发送时自动启动';
   },
   placeholder: (runtime) => {
     if (runtime.piStarting) return 'Pi 正在启动，稍等即可发送';
     if (!runtime.piReady) return '请先到 Agent 页的 Pi 设置里填写 CLI 路径';
+    if (!runtime.piAutoStart && !runtime.piRunning) {
+      return 'Pi 未启动：到 Agent 页「Pi」点启动，或打开「随应用启动」';
+    }
     return '输入消息...';
   },
   emptyMessage: (runtime) => {
     if (!runtime.piReady) return 'Pi 未配置：到 Agent 页的 Pi 设置里填写 Node / CLI 路径后再对话。';
+    if (!runtime.piAutoStart && !runtime.piRunning) {
+      return 'Pi 已关闭自动启动：到 Agent 页「Pi」点「启动」，或打开「随应用启动」后再对话。';
+    }
     return 'Pi 已就绪：说一句话，它会自己连续执行、验证产物。';
   },
   emptyEyebrow: 'PI WORKSPACE',

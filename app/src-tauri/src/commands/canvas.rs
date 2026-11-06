@@ -59,6 +59,23 @@ pub fn canvas_get_summary(app: AppHandle) -> CanvasSummary {
     canvas_manager::summary(Some(&app))
 }
 
+/// 网关已安装的工作流列表（只读）：画布标签页「交给 Pi」入口用。
+/// 与 Pi 工具桥的 canvas_list_workflows 同一实现，这里是给前端 UI 的通道。
+#[tauri::command]
+pub async fn canvas_list_workflows() -> Result<Vec<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = crate::services::canvas_agent::list_workflows()?;
+        let workflows = value
+            .get("workflows")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(workflows)
+    })
+    .await
+    .map_err(|error| format!("读取画布工作流失败：{error}"))?
+}
+
 #[tauri::command]
 pub async fn canvas_start(app: AppHandle) -> Result<CanvasStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {

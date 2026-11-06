@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata' | 'webui';
 
 /**
  * 顶层界面：**两棵完全独立的界面树**，各有各的侧边栏与导航。
@@ -509,10 +509,15 @@ export interface AppState {
   currentView: ViewType;
   /** 对话后端：main = 主 llama-server；fast27b = NiNfer 引擎（自带 OpenAI API）。 */
   chatEngine: ChatEngineId;
-  /** Agent 页 WebUI 标签的后端：主模型 / NiNfer（NiNfer 由同源桥提供官方页面）。 */
+  /** 设置 → 测试页的官方 WebUI 后端：主模型 / NiNfer / Strata（NiNfer 由同源桥提供官方页面）。 */
   webuiEngine: WebUiEngineId;
-  /** Agent 页当前标签（dsh / WebUI 之间互相跳转用）。 */
+  /** Agent 页当前标签（Pi / 画布之间互相跳转用）。 */
   agentTab: AgentTabId;
+  /**
+   * 待送入 Chat「Pi 工作区」输入框的预填提示词（画布「交给 Pi」入口用）。
+   * ChatPage 消费后立即置回 null；null 表示没有待预填内容。
+   */
+  piPromptDraft: string | null;
   theme: ThemeType;
   // 主题模式（浅色/深色/跟随系统）与生效主题 theme 分离存储。
   themeMode: ThemeMode;
@@ -523,6 +528,8 @@ export interface AppState {
   // 减少界面动画：用户手动开关，等价于强制 prefers-reduced-motion。
   // CSS 过渡与 framer-motion 动画都会被降级为瞬时完成，不影响功能逻辑。
   reduceMotion: boolean;
+  /** 全站字体缩放百分比（75–150，15 级）；100 = 正常。 */
+  fontScale: number;
   // 发送快捷键偏好：true = Enter 发送、Shift+Enter 换行；
   // false = Ctrl/⌘+Enter 发送、Enter 换行（便于输入多行提示词）。
   enterToSend: boolean;
@@ -565,8 +572,8 @@ export interface AppState {
  */
 export type ChatEngineId = 'main' | 'fast27b' | 'strata';
 
-/** WebUI 标签的后端选择：主模型 / NiNfer（NiNfer 走应用提供的同源桥）。 */
+/** 设置 → 测试页的后端选择：主模型 / NiNfer / Strata（NiNfer 走应用提供的同源桥）。 */
 export type WebUiEngineId = 'main' | 'fast27b' | 'strata';
 
-/** Agent 页标签（跨面板跳转用；放在全局状态里，NiNfer 面板按钮可直接切到 WebUI 标签）。 */
-export type AgentTabId = 'pi' | 'webui' | 'canvas';
+/** Agent 页标签（跨面板跳转用；放在全局状态里，画布面板按钮可直接切到 Pi 标签）。 */
+export type AgentTabId = 'pi' | 'canvas';

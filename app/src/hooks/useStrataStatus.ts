@@ -19,16 +19,23 @@ export const STRATA_SERVICE_ID = 'engine:strata';
 export const STRATA_SERVICE_COLOR = '#a855f7';
 export const STRATA_SERVICE_LABEL = 'Strata';
 export const STRATA_DEFAULT_PORT = 8082;
-export const STRATA_DEFAULT_MODEL_ID = 'qwen3.8-flash-next-gyro-gyro-m';
+export const STRATA_M_MODEL_ID = 'qwen3.8-flash-next-gyro-gyro-m';
+export const STRATA_S_MODEL_ID = 'qwen3.8-flash-next-gyro-gyro-s';
+/** 兼容旧引用：未指定变体时按 M 处理。 */
+export const STRATA_DEFAULT_MODEL_ID = STRATA_M_MODEL_ID;
 export const STRATA_DEFAULT_CONTEXT_WINDOW = 102400;
 
-/** 对话页只需要这一小组字段就能把请求指向某个引擎。 */
+/** 对话页只需要这一小组字段就能把请求指向某个引擎；API 服务页另需 lan / apiReachable。 */
 export interface ChatEngineServiceView {
   label: string;
   modelLabel: string;
   running: boolean;
   /** 可对话：进程存活且权重已加载。 */
   serviceable: boolean;
+  /** /health 在线（接口在线，权重可能仍在加载）；「API 服务页」的 /v1/models 徽章用它。 */
+  apiReachable: boolean;
+  /** 是否开启了局域网监听。 */
+  lan: boolean;
   port: number;
   apiKey: string;
   modelId: string;
@@ -44,12 +51,17 @@ export interface ChatEngineServiceView {
  * 所以必须叠加 `model_loaded`。
  */
 export function strataServiceView(status: StrataStatus | null): ChatEngineServiceView {
-  const modelName = status?.model_name ?? STRATA_DEFAULT_MODEL_ID;
+  const selected = status?.selected_model ?? 'm';
+  const fallbackModelId =
+    selected === 's' ? STRATA_S_MODEL_ID : STRATA_M_MODEL_ID;
+  const modelName = status?.model_name ?? fallbackModelId;
   return {
     label: STRATA_SERVICE_LABEL,
-    modelLabel: 'Gyro-M',
+    modelLabel: selected === 's' ? 'Gyro-S' : 'Gyro-M',
     running: Boolean(status?.running),
     serviceable: Boolean(status?.running) && Boolean(status?.model_loaded),
+    apiReachable: Boolean(status?.running) && Boolean(status?.api_reachable),
+    lan: Boolean(status?.lan),
     port: status?.port ?? STRATA_DEFAULT_PORT,
     apiKey: status?.api_key ?? '',
     modelId: modelName,

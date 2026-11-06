@@ -1,16 +1,13 @@
 import { useEffect, useState, type ComponentType } from 'react';
-import { Bot, Globe, Infinity as InfinityIcon } from 'lucide-react';
+import { Bot, Infinity as InfinityIcon } from 'lucide-react';
 import {
   canvasGetSummary,
-  fast27bGetStatus,
   isDesktopRuntime,
   piAgentGetStatus,
   type CanvasSummary,
-  type Fast27bStatus,
   type PiAgentStatus,
 } from '@/lib/desktop';
 import PiPanel from '@/pages/agent/PiPanel';
-import AgentWebUiPanel from '@/pages/agent/AgentWebUiPanel';
 import CanvasPanel from '@/pages/agent/CanvasPanel';
 import { useApp } from '@/context/AppContext';
 import type { AgentTabId } from '@/types';
@@ -30,14 +27,12 @@ const DOT_CLASS: Record<TabBadgeState, string> = {
 
 const TABS: { id: AgentTab; label: string; icon: ComponentType<{ className?: string }>; hint: string }[] = [
   { id: 'pi', label: 'Pi', icon: Bot, hint: 'Pi 内核：RPC 直连、宿主工具代理、权限三档、会话隔离与技能路由；对话在 Chat 的 Pi 工作区' },
-  { id: 'webui', label: 'WebUI', icon: Globe, hint: '官方网页界面入口：主模型直接开引擎页面，NiNfer 由应用的同源桥提供同一套官方页面' },
   { id: 'canvas', label: '画布', icon: InfinityIcon, hint: '无限画布 · 本地 ComfyUI 生图/视频工作台：启动网关与画布，在独立窗口里创作' },
 ];
 
-/** 标签圆点的悬停提示：WebUI 标签不看「资源齐备」而看「该后端服务在不在跑」。 */
+/** 标签圆点的悬停提示。 */
 function badgeTitle(id: AgentTab, badge: TabBadgeState): string {
   if (id === 'pi') return badge === 'running' ? 'Pi 内核在运行' : 'Pi 未启动';
-  if (id === 'webui') return badge === 'running' ? '后端服务在运行' : '后端服务未运行';
   if (id === 'canvas') {
     if (badge === 'running') return '画布正在运行';
     if (badge === 'missing') return '画布模块或 Node 运行时未安装';
@@ -53,8 +48,8 @@ function badgeTitle(id: AgentTab, badge: TabBadgeState): string {
 /**
  * Agent（智能体）页：按钮切换界面。
  * - 「Pi」为 Pi 内核的设置 / 状态 / 日志页，对话在 Chat 的 Pi 工作区；
- * - 「WebUI」为主模型 / NiNfer 的官方网页界面入口；
  * - 「画布」为本地 ComfyUI 无限画布的控制台（画布在独立窗口打开）。
+ * - 官方 WebUI 入口在「设置中心 → WebUI 测试」（独立测试页）。
  */
 export default function AgentPage() {
   const { state, dispatch } = useApp();
@@ -62,7 +57,6 @@ export default function AgentPage() {
   const tab = state.agentTab;
   const setTab = (next: AgentTab) => dispatch({ type: 'SET_AGENT_TAB', payload: next });
   // 标签圆点用的轻量状态轮询：与各面板自己的详细轮询相互独立。
-  const [fast27bStatus, setFast27bStatus] = useState<Fast27bStatus | null>(null);
   const [piStatus, setPiStatus] = useState<PiAgentStatus | null>(null);
   const [canvasStatus, setCanvasStatus] = useState<CanvasSummary | null>(null);
 
@@ -71,13 +65,11 @@ export default function AgentPage() {
     let disposed = false;
     const refresh = async () => {
       try {
-        const [nextFast27b, nextPi, nextCanvas] = await Promise.all([
-          fast27bGetStatus().catch(() => null),
+        const [nextPi, nextCanvas] = await Promise.all([
           piAgentGetStatus().catch(() => null),
           canvasGetSummary().catch(() => null),
         ]);
         if (disposed) return;
-        if (nextFast27b) setFast27bStatus(nextFast27b);
         if (nextPi) setPiStatus(nextPi);
         if (nextCanvas) setCanvasStatus(nextCanvas);
       } catch {
@@ -95,10 +87,6 @@ export default function AgentPage() {
   const badgeByTab: Record<AgentTab, TabBadgeState> = {
     // Pi：只看内核进程在不在跑。
     pi: piStatus?.running ? 'running' : 'disabled',
-    // WebUI：只随 WebUI 标签自己的「后端」选择（主模型看 serverRunning，引擎看引擎在不在跑）。
-    webui: state.webuiEngine === 'main'
-      ? (state.serverRunning ? 'running' : 'missing')
-      : (fast27bStatus?.running ? 'running' : 'missing'),
     // 画布：运行中绿点；缺模块或 Node 红点；其余灰点。
     canvas: canvasStatus?.running
       ? 'running'
@@ -115,7 +103,7 @@ export default function AgentPage() {
           <div
             role="tablist"
             aria-label="Agent 界面切换"
-            className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 sm:grid-cols-3"
+            className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1"
           >
             {TABS.map(({ id, label, icon: Icon, hint }) => {
               const active = tab === id;
@@ -150,13 +138,7 @@ export default function AgentPage() {
 
       {/* 活动面板：各自携带滚动容器与 PageHeader */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {tab === 'pi' ? (
-          <PiPanel />
-        ) : tab === 'webui' ? (
-          <AgentWebUiPanel />
-        ) : (
-          <CanvasPanel />
-        )}
+        {tab === 'pi' ? <PiPanel /> : <CanvasPanel />}
       </div>
     </div>
   );

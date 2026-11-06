@@ -20,9 +20,14 @@ export const HEATMAP_SCALES: Array<{ id: HeatmapScale; label: string; hint: stri
   { id: 'day', label: '日', hint: '单日汇总；小时级用量尚未落盘，不做推算' },
 ];
 
-/** 一列（竖向 7 天）在年视图里占的宽度，含间隔。 */
-const YEAR_CELL = 13;
-const YEAR_GAP = 3;
+/**
+ * 一列（竖向 7 天）在年视图里占的宽度，含间隔。
+ *
+ * 全年约 53 列，卡片内容区常见宽度约 676px；13/3 会横向溢出并把 11–12 月
+ * 推到屏幕外。收到 10/2 后整年刚好落在一屏内，当前月份不再需要手动横向滚动。
+ */
+const YEAR_CELL = 10;
+const YEAR_GAP = 2;
 /** 月视图格子放大倍数：单月最多 6 列，格子可以明显更大。 */
 const MONTH_SCALE = 2.1;
 

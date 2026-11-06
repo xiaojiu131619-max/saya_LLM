@@ -16,6 +16,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [DEVELOPMENT_GUIDE.md](guides/DEVELOPMENT_GUIDE.md) | 本地开发、构建、测试和故障排查 |
+| [UI_DESIGN_GUIDE.md](guides/UI_DESIGN_GUIDE.md) | UI/UX 设计边界与实现规则：分层、令牌、字体、图标、动效、组件、布局、禁止清单 |
 | [CANVAS_MODULE.md](guides/CANVAS_MODULE.md) | 无限画布外挂模块：端口/数据目录、Node 复用、画布包构建与发布 |
 | [TECHNICAL_REPORT.md](guides/TECHNICAL_REPORT.md) | 当前架构、数据流与模块清单 |
 | [SWIFT27B_TUNING.md](guides/SWIFT27B_TUNING.md) | Swift-27B 模型调优依据、A/B 实测数据与已知坑 |

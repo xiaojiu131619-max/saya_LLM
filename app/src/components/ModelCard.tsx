@@ -1,4 +1,4 @@
-﻿import { useState, type ReactNode } from 'react';
+﻿import { useRef, useState, type ReactNode } from 'react';
 import { Play, Box, Boxes, FolderSearch, Zap, Loader2, History, Eye, Brain, Wrench, Sparkles, Mic, Film, Layers } from 'lucide-react';
 import type { ModelInfo } from '@/types';
 import { useApp } from '@/context/AppContext';
@@ -6,17 +6,15 @@ import { isDesktopRuntime, listenDesktopEvent, revealDesktopPath, startDesktopSe
 import { modelVideoSupport, videoSupportTitle } from '@/lib/modelCapabilities';
 import { getModelThemeGroup } from '@/lib/modelTheme';
 import ModelFamilyLogo from '@/components/ModelFamilyLogo';
+import ModelLineField from '@/components/ModelLineField';
 
 interface ModelCardProps {
   model: ModelInfo;
   index: number;
   isSingleColumn?: boolean;
   recentUsedAt?: number;
-}
-
-function formatCtx(ctxLength: number) {
-  if (!ctxLength) return 'ctx 暂无';
-  return `${ctxLength >= 1000 ? `${(ctxLength / 1000).toFixed(0)}K` : ctxLength} ctx`;
+  /** 卡片过多时关掉线场动效，只保留静态首帧（D-39）。 */
+  allowLineFieldAnimation?: boolean;
 }
 
 function formatLaunchMemoryTitle(config: ModelInfo['loadConfig']) {
@@ -32,9 +30,10 @@ function formatRecentUsedAt(usedAt: number) {
   }).format(new Date(usedAt));
 }
 
-export default function ModelCard({ model, index, isSingleColumn = false, recentUsedAt }: ModelCardProps) {
+export default function ModelCard({ model, index, isSingleColumn = false, recentUsedAt, allowLineFieldAnimation = true }: ModelCardProps) {
   const { state, dispatch } = useApp();
   const [quickStarting, setQuickStarting] = useState(false);
+  const logoRef = useRef<HTMLSpanElement | null>(null);
   const themeGroup = getModelThemeGroup(model);
   const launchMemory = state.modelLaunchMemories[model.id];
   const isHighlighted = state.selectedModelId === model.id;
@@ -245,147 +244,157 @@ export default function ModelCard({ model, index, isSingleColumn = false, recent
     );
   }
 
-  // 多列模式保留磁贴密度，规格、能力与操作分别对齐。
+  // 卡片模式：3:4 整卡线场 + 底部文字浮层 + 右上角快速启动角标。
+  // 线场是卡片唯一的图形层，文字与操作全部压在它上面。
+  const cardTint = model.themeColorSolid;
+  const quickLabel = isBusy
+    ? (quickStarting ? '启动中' : statusLabel)
+    : model.status === 'loaded'
+      ? '开始对话'
+      : launchMemory
+        ? '记忆启动'
+        : '快速启动';
+  const quickAction = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (isBusy) return;
+    if (model.status === 'loaded') {
+      handleQuickChat(event);
+      return;
+    }
+    if (launchMemory) {
+      void handleQuickLaunch(event);
+      return;
+    }
+    handleClick();
+  };
   return (
     <article
-      style={{ animationDelay: `${Math.min(index * 15, 80)}ms` }}
+      style={{
+        animationDelay: `${Math.min(index * 15, 80)}ms`,
+        background: isHighlighted
+          ? `color-mix(in srgb, ${cardTint} 14%, var(--surface))`
+          : `color-mix(in srgb, ${cardTint} 7%, var(--surface))`,
+      }}
       role="button"
       tabIndex={0}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
       aria-label={`打开 ${model.name} 的加载参数`}
-      className={`anim-card-rise model-tile flex min-w-0 w-full cursor-pointer flex-col ${
-        state.selectedModelId === model.id ? 'model-tile--selected' : ''
+      className={`anim-card-rise model-tile relative flex aspect-[3/4] min-w-0 w-full cursor-pointer flex-col overflow-hidden ${
+        isHighlighted ? 'model-tile--selected' : ''
       } ${model.status === 'loaded' ? 'model-tile--loaded' : ''}`}
     >
-      <div className="flex items-center justify-between gap-2 px-3 pt-3">
-        <span
-          className={`model-tile-status model-tile-status--${model.status} inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-xs`}
-          role="status"
-        >
-          {model.status === 'loading' ? (
-            <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" />
-          ) : (
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusClass}`} aria-hidden="true" />
-          )}
-          {statusLabel}
-        </span>
-        {recentUsedAt && (
-          <span title={recentTitle} className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs text-[var(--text-secondary)]">
-            <History className="h-3 w-3 text-[var(--accent)]" />
-            最近使用
-          </span>
-        )}
-      </div>
+      <ModelLineField
+        target={logoRef}
+        color={cardTint}
+        allowAnimation={allowLineFieldAnimation}
+      />
 
-      <div className="flex min-w-0 items-start gap-2.5 px-3 pb-2 pt-2">
-        <span
-          className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg"
-          style={{ background: `${model.themeColorSolid}1f` }}
-        >
-          <ModelFamilyLogo
-            family={model.family}
-            architecture={model.architecture}
-            name={model.name}
-            size={20}
-            customSrc={model.customLogo}
-            tone={model.themeColorSolid}
-            className="relative"
-            fallback={<span className="relative text-base font-semibold" style={{ color: model.themeColorSolid }}>{themeGroup.icon}</span>}
+      <div className="relative z-[1] flex h-full flex-col p-3">
+        <div className="flex items-start justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-1">
+            <span
+              className={`model-tile-status model-tile-status--${model.status} inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--border-subtle)] bg-[var(--surface)] px-1.5 py-0.5 text-xs`}
+              role="status"
+            >
+              {model.status === 'loading' ? (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusClass}`} aria-hidden="true" />
+              )}
+              {statusLabel}
+            </span>
+            {model.isDynamicQuant && (
+              <span
+                className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-md border border-[var(--border-subtle)] bg-[var(--surface)] text-[var(--accent)]"
+                title="动态量化（UD）"
+                aria-label="动态量化模型"
+              >
+                <Box className="h-3.5 w-3.5" />
+              </span>
+            )}
+            {model.filePath && (
+              <button
+                type="button"
+                onClick={handleReveal}
+                disabled={!isDesktopRuntime()}
+                className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-md border border-[var(--border-subtle)] bg-[var(--surface)] text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                title="在资源管理器中显示"
+                aria-label="在资源管理器中显示"
+              >
+                <FolderSearch className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </span>
+        </div>
+
+        <div className="flex-1" />
+
+        <div className="relative mt-auto">
+          {/* 文字浮层：用主题色向 surface 过渡的渐变压住线场，保证名称可读，又不遮住上方标志。 */}
+          <div
+            className="pointer-events-none absolute -inset-x-3 -bottom-3 h-24"
+            style={{
+              background: `linear-gradient(to top, color-mix(in srgb, ${cardTint} 14%, var(--surface)) 0%, color-mix(in srgb, ${cardTint} 10%, var(--surface)) 58%, transparent 100%)`,
+            }}
           />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3
-            className="line-clamp-2 min-h-[2.5em] text-sm font-semibold leading-tight text-[var(--text-primary)] [overflow-wrap:anywhere]"
-            title={model.name}
-          >
-            {model.name}
-          </h3>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-            <span className="mono-font truncate font-semibold text-[var(--text-primary)]" title={`${model.params} · ${model.modelType === 'moe' ? 'MoE' : '稠密'}`}>{model.params}</span>
-            <span className="text-[var(--text-tertiary)]" aria-hidden="true">·</span>
-            <span className="shrink-0">{model.modelType === 'moe' ? 'MoE' : '稠密'}</span>
+          {/* 下挂：名称 + 快速启动，卡片其余区域只留动态量化图标。 */}
+          <div className="relative flex min-w-0 items-center gap-2">
+            <h3
+              className="line-clamp-2 min-w-0 flex-1 text-sm font-semibold leading-tight text-[var(--text-primary)] [overflow-wrap:anywhere]"
+              title={model.name}
+            >
+              {model.name}
+            </h3>
+            {recentUsedAt && (
+              <History className="h-3 w-3 shrink-0 text-[var(--accent)]" aria-label={recentTitle} />
+            )}
+            <button
+              type="button"
+              onClick={quickAction}
+              disabled={isBusy || (!model.filePath && model.status !== 'loaded')}
+              className={`grid h-9 w-9 flex-shrink-0 place-items-center rounded-[var(--radius-pill)] border transition-[transform,background-color,border-color] duration-150 ease-out hover:-translate-y-px active:scale-95 disabled:opacity-45 ${
+                isBusy
+                  ? 'border-[var(--surface-muted)] bg-[var(--surface-muted)] text-[var(--text-secondary)]'
+                  : model.status === 'loaded'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--text-on-accent)]'
+                    : launchMemory
+                      ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)]'
+                      : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-primary)] hover:border-[var(--accent)]'
+              }`}
+              title={quickLabel}
+              aria-label={quickLabel}
+            >
+              {isBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : model.status === 'loaded' ? (
+                <Play className="h-4 w-4" />
+              ) : launchMemory ? (
+                <Zap className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+            </button>
           </div>
         </div>
       </div>
 
-      <dl className="model-tile-specs mx-3 grid grid-cols-2 gap-x-2 gap-y-1.5 rounded-lg border border-[var(--border-subtle)] px-2.5 py-2">
-        <div className="flex min-w-0 flex-col gap-1">
-          <dt className="text-xs text-[var(--text-secondary)]">量化</dt>
-          <dd className="mono-font truncate text-xs font-semibold text-[var(--text-primary)]" title={model.quant}>{model.quant}</dd>
-        </div>
-        <div className="flex min-w-0 flex-col gap-1">
-          <dt className="text-xs text-[var(--text-secondary)]">文件大小</dt>
-          <dd className="mono-font whitespace-nowrap text-xs font-semibold text-[var(--text-primary)]">{model.fileSize}</dd>
-        </div>
-      </dl>
-
-      <div className="model-tile-capabilities flex min-h-9 flex-wrap content-start items-center gap-1.5 px-3 py-2">
-        <ModelTaskPill model={model} />
-        <CapabilityBadges model={model} twoLine />
-      </div>
-
-      <div className="mt-auto flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2 text-xs text-[var(--text-secondary)]">
-        <span className="mono-font whitespace-nowrap" title={`模型声明上下文：${model.ctxLength ? model.ctxLength.toLocaleString() : '暂无'}`}>
-          {model.ctxLength ? `上下文 ${formatCtx(model.ctxLength).replace(' ctx', '')}` : '上下文暂无'}
-        </span>
-        {model.avgTokensPerSec ? (
-          <span className="mono-font whitespace-nowrap" title="历史平均生成速度，实际速度随加载参数和输入变化">
-            历史 {model.avgTokensPerSec.toFixed(1)} tok/s
-          </span>
-        ) : launchMemory ? (
-          <span className="inline-flex items-center gap-1 whitespace-nowrap" title={formatLaunchMemoryTitle(launchMemory.config)}>
-            <Zap className="h-3 w-3 text-[var(--state-warning)]" />已记忆
-          </span>
-        ) : null}
-      </div>
-
-      <div className="model-tile-actions mx-3 flex items-center gap-2 border-t border-[var(--border-subtle)] py-2.5">
-        {isBusy ? (
-          <button disabled className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--surface-muted)] px-2 text-xs font-medium text-[var(--text-secondary)]">
-            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-            {quickStarting ? '启动中' : statusLabel}
-          </button>
-        ) : model.status === 'loaded' ? (
-          <button
-            onClick={handleQuickChat}
-            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
-            title="开始对话"
-          >
-            <Play className="h-3.5 w-3.5" />
-            开始对话
-          </button>
-        ) : launchMemory ? (
-          <button
-            onClick={(event) => void handleQuickLaunch(event)}
-            disabled={!model.filePath || !isDesktopRuntime()}
-            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 text-xs font-medium text-[var(--state-warning)] transition-colors hover:brightness-95 disabled:opacity-40"
-            title={formatLaunchMemoryTitle(launchMemory.config)}
-          >
-            <Zap className="h-3.5 w-3.5" />
-            记忆启动
-          </button>
-        ) : (
-          <button
-            onClick={(event) => { event.stopPropagation(); handleClick(); }}
-            className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-2 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
-          >
-            <Play className="h-3.5 w-3.5" />
-            加载模型
-          </button>
-        )}
-        {model.filePath && (
-          <button
-            onClick={handleReveal}
-            disabled={!isDesktopRuntime()}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--border)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-40"
-            title="在资源管理器中显示"
-            aria-label="在资源管理器中显示"
-          >
-            <FolderSearch className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
+      {/* 只承担采样：真正的品牌标志由 60×30 线场用粗细不同的竖线画出。 */}
+      <span
+        ref={logoRef}
+        className="pointer-events-none absolute left-1/2 top-1/2 h-px w-px -translate-x-1/2 -translate-y-1/2 overflow-hidden opacity-0"
+        aria-hidden="true"
+      >
+        <ModelFamilyLogo
+          family={model.family}
+          architecture={model.architecture}
+          name={model.name}
+          size={48}
+          customSrc={model.customLogo}
+          tone={cardTint}
+          fallback={<span className="text-xl font-semibold" style={{ color: cardTint }}>{themeGroup.icon}</span>}
+        />
+      </span>
     </article>
   );
 }

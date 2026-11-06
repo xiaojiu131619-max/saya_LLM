@@ -162,6 +162,117 @@ pub fn clear_system_logs() -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI 兼容接口通用探测：设置中心「WebUI 测试」页用
+// ---------------------------------------------------------------------------
+
+/// 只允许回环地址：探测命令暴露任意 URL 会变成内网 SSRF 跳板。
+fn ensure_loopback_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(raw_url.trim())
+        .map_err(|_| format!("地址无法解析：{}", raw_url.trim()))?;
+    if parsed.scheme() != "http" {
+        return Err("只支持 http:// 回环地址。".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "地址缺少主机名。".to_string())?;
+    if !is_loopback_host(host) {
+        return Err("出于安全考虑只允许探测 127.0.0.1 / localhost。".to_string());
+    }
+    Ok(parsed)
+}
+
+/// 对任意本地 OpenAI 兼容后端（主模型 / NiNfer 网页桥 / Strata 网关）做一次
+/// GET /v1/models 探测：回延迟、状态码与模型列表，给「WebUI 测试」页展示。
+#[tauri::command]
+pub async fn probe_local_openai_api(
+    url: String,
+    api_key: Option<String>,
+) -> Result<PingResult, String> {
+    let parsed = ensure_loopback_url(&url)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let models_url = parsed.join("v1/models").map_err(|e| e.to_string())?;
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            // 回环探测不走系统代理，避免代理配置把 127.0.0.1 转走。
+            .no_proxy();
+        if let Some(key) = api_key.as_deref().filter(|key| !key.trim().is_empty()) {
+            builder = builder.default_headers(
+                std::iter::once((
+                    reqwest::header::AUTHORIZATION,
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", key.trim()))
+                        .map_err(|e| e.to_string())?,
+                ))
+                .collect(),
+            );
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("创建 HTTP 客户端失败：{}", e))?;
+
+        let started = std::time::Instant::now();
+        let response = match client.get(models_url).send() {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(PingResult::unavailable(format!(
+                    "请求失败（服务未监听或已退出）：{}",
+                    error
+                )))
+            }
+        };
+        let latency_ms =
+            Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+        let status_code = response.status().as_u16();
+        if !response.status().is_success() {
+            return Ok(PingResult {
+                reachable: false,
+                latency_ms,
+                status_code: Some(status_code),
+                ..PingResult::unavailable(format!("/v1/models 返回状态码 {}。", status_code))
+            });
+        }
+        let (models, models_ok) = match response.json::<serde_json::Value>() {
+            Ok(json) => {
+                let ids = json
+                    .get("data")
+                    .and_then(|data| data.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                item.get("id").and_then(|id| id.as_str()).map(str::to_string)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let ok = !ids.is_empty();
+                (ids, ok)
+            }
+            Err(_) => (Vec::new(), false),
+        };
+        Ok(PingResult {
+            reachable: true,
+            latency_ms,
+            status_code: Some(status_code),
+            health_ok: true,
+            models_ok,
+            models,
+            base_url: Some(parsed.to_string()),
+            external_base_url: None,
+            bind_host: None,
+            api_key_required: false,
+            protocol_standards: Vec::new(),
+            error: if models_ok {
+                None
+            } else {
+                Some("/v1/models 未返回可用模型列表。".to_string())
+            },
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 供前端把应用侧事件（尤其是 API 请求/响应）汇入统一日志中枢。
 #[tauri::command]
 pub fn log_app_event(level: String, category: String, message: String) -> Result<(), String> {

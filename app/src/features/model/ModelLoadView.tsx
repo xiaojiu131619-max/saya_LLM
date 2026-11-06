@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { motion } from 'framer-motion';
 import { Play, RotateCcw, Box, Layers, Calendar, FileText, Hash, Cpu, Database, Gauge, History, Info, Square, ChevronRight, Settings2, Wand2, LoaderCircle } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
@@ -167,13 +168,6 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
           )}
           {activeTab === 'params' ? (
             <div>
-              <RunRecordsCard
-                records={runRecords}
-                running={autoTuneRunning}
-                log={autoTuneLog}
-                applied={autoTuneApplied}
-                onClearLog={onClearLog}
-              />
               <div className="model-load-param-grid">
                 <ParamSection title="推理与显存" icon={Cpu}>
                   <SliderParamRow
@@ -184,7 +178,6 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                     min={512}
                     max={ctxMax}
                     step={512}
-                    suffix="token"
                     ticks={ctxTicks}
                   />
                   <SliderParamRow
@@ -197,15 +190,6 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                     min={0}
                     max={gpuLayerMax}
                     step={1}
-                  />
-                  <NumberParamRow
-                    label="物理批处理大小（ubatch）"
-                    description="--ubatch-size / -ub"
-                    value={config.physicalBatchSize}
-                    onChange={(v) => updateConfig('physicalBatchSize', v)}
-                    min={1}
-                    max={8192}
-                    step={64}
                   />
                   <ToggleParamRow
                     label="将 KV 缓存卸载到 GPU 内存"
@@ -222,13 +206,26 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                 </ParamSection>
 
                 <ParamSection title="缓存与运行行为" icon={Database}>
+                  <NumberParamRow
+                    label="物理批处理大小（ubatch）"
+                    description="--ubatch-size / -ub"
+                    value={config.physicalBatchSize}
+                    onChange={(v) => updateConfig('physicalBatchSize', v)}
+                    min={1}
+                    max={8192}
+                    step={64}
+                  />
                   <CacheTypeParamRow
                     label="K 缓存量化类型"
                     description="-ctk / --cache-type-k"
                     badge="实验"
                     enabled={config.cacheTypeKEnabled}
                     value={config.cacheTypeK}
-                    onToggle={(v) => updateConfig('cacheTypeKEnabled', v)}
+                    onToggle={(v) => {
+                      updateConfig('cacheTypeKEnabled', v);
+                      // 开启即用 q8_0，关闭回落 f16：两种状态都有明确默认值。
+                      updateConfig('cacheTypeK', v ? 'q8_0' : 'f16');
+                    }}
                     onChange={(v) => updateConfig('cacheTypeK', v)}
                   />
                   <CacheTypeParamRow
@@ -237,7 +234,11 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                     badge="实验"
                     enabled={config.cacheTypeVEnabled}
                     value={config.cacheTypeV}
-                    onToggle={(v) => updateConfig('cacheTypeVEnabled', v)}
+                    onToggle={(v) => {
+                      updateConfig('cacheTypeVEnabled', v);
+                      // 开启即用 q8_0，关闭回落 f16。
+                      updateConfig('cacheTypeV', v ? 'q8_0' : 'f16');
+                    }}
                     onChange={(v) => updateConfig('cacheTypeV', v)}
                   />
                   {model.modelType === 'moe' && (
@@ -293,15 +294,6 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                         step={1}
                         autoLabel="自动"
                       />
-                      <SliderParamRow
-                        label="评估批处理大小"
-                        description="--batch-size / -b"
-                        value={config.batchSize}
-                        onChange={(v) => updateConfig('batchSize', v)}
-                        min={1}
-                        max={8192}
-                        step={64}
-                      />
                       <NumberParamRow
                         label="最大并发预测数（parallel）"
                         description="--parallel / -np；自动时不传该参数"
@@ -341,6 +333,15 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                     </div>
                     <div className="model-load-param-column">
+                      <SliderParamRow
+                        label="评估批处理大小"
+                        description="--batch-size / -b"
+                        value={config.batchSize}
+                        onChange={(v) => updateConfig('batchSize', v)}
+                        min={1}
+                        max={8192}
+                        step={64}
+                      />
                       <OptionalNumberParamRow
                         label="RoPE 频率基"
                         description="--rope-freq-base；关闭时从 GGUF 读取"
@@ -420,6 +421,14 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
             </div>
           ) : (
             <div className="max-w-5xl">
+              {/* 运行记录跟模型信息一起看：参数页专注「怎么加载」，信息页负责「跑过什么」。 */}
+              <RunRecordsCard
+                records={runRecords}
+                running={autoTuneRunning}
+                log={autoTuneLog}
+                applied={autoTuneApplied}
+                onClearLog={onClearLog}
+              />
               <div className="border-b border-[var(--border-subtle)] py-5">
                 <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">模型介绍</h3>
                 <p className="text-sm leading-relaxed text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{model.longDescription}</p>
@@ -568,10 +577,33 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
         {hasHardware && <span className={`mono-font text-[length:var(--font-eyebrow)] ${exceeded ? 'text-[var(--state-warning)]' : 'text-[var(--text-tertiary)]'}`} title={`${systemStats.gpuName} · 所有进程总占用；预测不会自动改变参数`}>设备 {systemStats.vramUsed.toFixed(1)} / {systemStats.vramTotal.toFixed(1)} GB{exceeded ? ' · 预测超容量' : ''}</span>}
       </div>
       <div className="model-load-compact-toolbar">
-        <div className="flex items-center gap-1 rounded-lg bg-[var(--surface-muted)] p-0.5" aria-label="模型详情视图">
-          {([{ id: 'params', label: '加载参数', icon: Settings2 }, { id: 'info', label: '模型信息', icon: FileText }] as const).map(({ id, label, icon: Icon }) => (
-            <button type="button" key={id} aria-pressed={activeTab === id} onClick={() => onTabChange(id)} className={`inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors ${activeTab === id ? 'bg-[var(--surface)] text-[var(--accent)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}><Icon className="h-3.5 w-3.5" />{label}</button>
-          ))}
+        <div className="relative flex items-center gap-1 rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--surface-muted)] p-0.5" role="tablist" aria-label="模型详情视图">
+          {([{ id: 'params', label: '加载参数', icon: Settings2 }, { id: 'info', label: '模型信息', icon: FileText }] as const).map(({ id, label, icon: Icon }) => {
+            const active = activeTab === id;
+            return (
+              <button
+                type="button"
+                key={id}
+                role="tab"
+                aria-selected={active}
+                aria-pressed={active}
+                onClick={() => onTabChange(id)}
+                className={`relative inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-pill)] px-3 text-xs font-medium transition-colors ${active ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+              >
+                {active && (
+                  <motion.span
+                    layoutId="model-load-tab-pill"
+                    className="absolute inset-0 rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--surface)]"
+                    transition={{ type: 'tween', duration: 0.16, ease: [0.33, 0, 0.67, 1] }}
+                  />
+                )}
+                <span className="relative z-[1] inline-flex items-center gap-1.5">
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </span>
+              </button>
+            );
+          })}
         </div>
         <div className="model-load-compact-actions">
           <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="使用完整加载基线，实测搜索 ngl / ctx / ncmoe / 独立 K/V；整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
@@ -955,8 +987,8 @@ function LogoLibraryDialog({ selected, color, colorDefault, onSelect, onColorCha
   );
 }
 
-function SliderParamRow({ label, description, badge, value, onChange, min, max, step, suffix, ticks }: {
-  label: string; description?: string; badge?: string; value: number; onChange: (v: number) => void; min: number; max: number; step: number; suffix?: string;
+function SliderParamRow({ label, description, badge, value, onChange, min, max, step, ticks }: {
+  label: string; description?: string; badge?: string; value: number; onChange: (v: number) => void; min: number; max: number; step: number;
   /** 快捷定位节点：显示为滑杆下方的可点击标签。 */
   ticks?: Array<{ value: number; label: string }>;
 }) {
@@ -1012,7 +1044,7 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
               background: `linear-gradient(to right, var(--accent) ${percent}%, rgba(125,118,107,0.22) ${percent}%)`,
             }}
           />
-          <div className="flex w-28 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 transition-colors focus-within:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
+          <div className="flex w-32 flex-shrink-0 items-center rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 transition-colors focus-within:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)]">
             <input
               type="number"
               aria-label={label}
@@ -1022,7 +1054,6 @@ function SliderParamRow({ label, description, badge, value, onChange, min, max, 
               step={step}
               className="mono-font h-8 min-w-0 flex-1 bg-transparent text-right text-sm text-[var(--text-primary)] outline-none dark:text-[var(--text-primary)]"
             />
-            {suffix && <span className="text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{suffix}</span>}
           </div>
         </div>
         <div className="flex justify-between">

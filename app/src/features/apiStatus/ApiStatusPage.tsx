@@ -30,11 +30,15 @@ import {
   refreshEngineStatus,
   useEngineStatuses,
 } from '@/hooks/useEngineStatuses';
+import { strataServiceView, useStrataStatus } from '@/hooks/useStrataStatus';
+import { refreshStrataStatus } from '@/lib/desktopState';
 import { useFast27bMetrics } from '@/hooks/useFast27bMetrics';
+import { useStrataMetrics } from '@/hooks/useStrataMetrics';
 import {
   fast27bModelDisplayName,
   fast27bServiceUsage,
   llamaServiceUsage,
+  strataServiceUsage,
 } from '@/lib/serviceUsage';
 import ServiceUsageCard from './ServiceUsageCard';
 import ExternalApiSection from './ExternalApiSection';
@@ -102,7 +106,7 @@ function DetailRow({ label, value, mono = false, action }: {
  * 4. 高级设置：监听范围、端口、API Key 与调用示例（默认折叠）。
  *
  * 曾经的状态文案在页头、大卡标题、请求卡、页脚各出现一次，端口与模型名也重复出现，
- * 这些重复项已合并；检测时间、刷新频率、设备 KV 池、dsh 绑定等运行细节改由各自的
+ * 这些重复项已合并；检测时间、刷新频率、设备 KV 池等运行细节改由各自的
  * 专页（NiNfer / 日志）承载。
  */
 export default function ApiStatusPage() {
@@ -115,19 +119,26 @@ export default function ApiStatusPage() {
   const checkingRef = useRef(false);
   const advancedRef = useRef<HTMLDetailsElement>(null);
 
-  // ---- 服务后端：跟随「对话后端」选择（主模型 llama-server / NiNfer 引擎）----
+  // ---- 服务后端：跟随「对话后端」选择（主模型 llama-server / NiNfer / Strata 引擎）----
   const engineStatuses = useEngineStatuses();
-  const engine = fast27bServiceView(engineStatuses.fast27b);
-  const engineMode = state.chatEngine === 'fast27b';
-  // 引擎模式的真实运行数据（与 NiNfer 页共用同一份轮询快照，指标口径一致）。
+  const strataStatus = useStrataStatus();
+  const fast27bEngine = fast27bServiceView(engineStatuses.fast27b);
+  const strataEngine = strataServiceView(strataStatus);
+  const isStrataMode = state.chatEngine === 'strata';
+  const engineMode = state.chatEngine !== 'main';
+  const engine = isStrataMode ? strataEngine : fast27bEngine;
+  // 引擎模式的真实运行数据（与各自专页共用同一份轮询快照，指标口径一致）。
   const engineMetrics = useFast27bMetrics();
+  const strataMetrics = useStrataMetrics();
 
   const runCheck = useCallback(async () => {
     if (checkingRef.current) return;
     checkingRef.current = true;
     setChecking(true);
     try {
-      if (engineMode) {
+      if (isStrataMode) {
+        await refreshStrataStatus();
+      } else if (engineMode) {
         await refreshEngineStatus();
       } else {
         const nextResult = await pingLocalApi();
@@ -137,7 +148,7 @@ export default function ApiStatusPage() {
       checkingRef.current = false;
       setChecking(false);
     }
-  }, [engineMode]);
+  }, [engineMode, isStrataMode]);
 
   useEffect(() => {
     if (engineMode) return;
@@ -155,10 +166,11 @@ export default function ApiStatusPage() {
     return () => { disposed = true; };
   }, []);
 
-  // 引擎日志只用于一件事：判定在途请求（请求槽位）。读 400 行足够覆盖最近一次
+  // 引擎日志只用于一件事：判定 NiNfer 的在途请求（请求槽位）。读 400 行足够覆盖最近一次
   // started 与终止行，不必每 1.5 秒搬运整个 5000 行缓冲（NiNfer 页已有一份全量轮询）。
+  // Strata 的在途数直接来自指标快照的 active_requests，不解析日志。
   useEffect(() => {
-    if (!isDesktopRuntime() || !engineMode) return;
+    if (!isDesktopRuntime() || !engineMode || isStrataMode) return;
     let disposed = false;
     const refreshLogs = async () => {
       try {
@@ -175,7 +187,7 @@ export default function ApiStatusPage() {
       window.clearInterval(timer);
       setEngineLogs([]);
     };
-  }, [engineMode]);
+  }, [engineMode, isStrataMode]);
 
   const bindHost = result?.bindHost?.trim();
   const runningExternal = bindHost === '0.0.0.0'
@@ -188,13 +200,19 @@ export default function ApiStatusPage() {
     ?? state.models.find((model) => model.status === 'loaded');
   const standards = result?.protocolStandards?.length ? result.protocolStandards.join(' / ') : '探测中…';
 
-  // ---- 数据模块（解耦层）：界面不认识具体引擎，两种后端各自聚合出同一份视图模型 ----
+  // ---- 数据模块（解耦层）：界面不认识具体引擎，各后端各自聚合出同一份视图模型 ----
   const engineUsage = useMemo(
-    () => fast27bServiceUsage(engineMetrics, {
-      title: fast27bModelDisplayName(engine.modelPath, engine.modelLabel),
-      subtitle: 'NiNfer 引擎',
-    }),
-    [engineMetrics, engine.modelPath, engine.modelLabel],
+    () => isStrataMode
+      ? strataServiceUsage(strataMetrics, {
+          title: strataEngine.modelId,
+          subtitle: `Strata 引擎 · ${strataEngine.modelLabel}`,
+        })
+      : fast27bServiceUsage(engineMetrics, {
+          title: fast27bModelDisplayName(fast27bEngine.modelPath, fast27bEngine.modelLabel),
+          subtitle: 'NiNfer 引擎',
+        }),
+    [isStrataMode, strataMetrics, strataEngine.modelId, strataEngine.modelLabel,
+      engineMetrics, fast27bEngine.modelPath, fast27bEngine.modelLabel],
   );
   const llamaUsage = useMemo(
     () => llamaServiceUsage(activeModel ? state.usageByModel[activeModel.id] : undefined, {
@@ -205,11 +223,11 @@ export default function ApiStatusPage() {
   );
   const usageStats = engineMode ? engineUsage : llamaUsage;
   const usageNote = engineMode
-    ? '统计最近 24 小时完成的请求，覆盖对话、dsh 与外部 API 调用。'
+    ? '统计最近 24 小时完成的请求，覆盖对话与外部 API 调用。'
     : '统计当前主模型在本会话的累计用量，来自 llama.cpp 响应。';
 
   // 在途请求：软件内对话按 isStreaming 统计；引擎另外用日志的 started/done 判定，
-  // 后者涵盖外部客户端与 dsh 的请求，是引擎真正的占用来源。
+  // 后者涵盖外部客户端的请求，是引擎真正的占用来源。
   const appInFlight = useMemo(
     () => Object.values(state.chatSessions).reduce(
       (count, sessions) => count + sessions.reduce(
@@ -226,29 +244,40 @@ export default function ApiStatusPage() {
     ? activeModel.loadConfig.parallel
     : 1);
 
-  // ---- 统一后的服务视图（两套后端共用同一批渲染分支）----
+  // ---- 统一后的服务视图（几种后端共用同一批渲染分支）----
   const serviceRunning = engineMode ? engine.running : state.serverRunning;
   const serviceHealthy = engineMode ? engine.serviceable : Boolean(result?.reachable);
   const servicePort = engineMode ? engine.port : state.serverPort;
   const serviceModelName = engineMode ? engine.modelId : (activeModel ? activeModel.name : '未加载');
   const serviceModelNote = engineMode
-    ? engine.modelLabel
+    ? (isStrataMode ? `Strata · ${engine.modelLabel}` : engine.modelLabel)
     : (activeModel ? `${activeModel.params} ${activeModel.quant}` : '未加载模型');
   const serviceExposed = engineMode ? engine.lan : runningExternal;
   const serviceTitle = engineMode
-    ? engine.serviceable ? '引擎运行中' : engine.running ? '引擎已失效' : '引擎未启动'
+    ? engine.serviceable
+      ? '引擎运行中'
+      : engine.running
+        ? (isStrataMode ? '引擎加载中' : '引擎已失效')
+        : '引擎未启动'
     : statusText(result, state.serverRunning);
   const serviceBaseUrl = engineMode
     ? `http://${engine.lan ? lanIp ?? '<本机局域网 IP>' : '127.0.0.1'}:${engine.port}/v1`
     : llamaBase;
   const serviceStandards = engineMode ? 'OpenAI Compatible' : standards;
   const serviceAuthRequired = engineMode ? Boolean(engine.apiKey) : Boolean(result?.apiKeyRequired);
-  const slotTotal = engineMode ? FAST27B_MAX_CONCURRENCY : llamaSlotTotal;
-  const slotUsed = engineMode
-    ? (engineInFlight || appInFlight > 0 ? 1 : 0)
-    : Math.min(llamaSlotTotal, appInFlight);
+  // 槽位口径：主模型按并行参数；NiNfer 固定单并发；Strata 网关不设固定槽位，
+  // 直接报指标快照里的在途请求数，不编造分母。
+  const strataActive = strataMetrics?.active_requests ?? 0;
+  const llamaSlotUsed = Math.min(llamaSlotTotal, appInFlight);
+  const ninferSlotUsed = engineInFlight || appInFlight > 0 ? 1 : 0;
+  const slotLabel = isStrataMode ? '在途请求' : '请求槽位';
+  const slotValue = engineMode
+    ? (isStrataMode
+        ? (serviceRunning ? String(strataActive) : '—')
+        : (serviceRunning ? `${ninferSlotUsed} / ${FAST27B_MAX_CONCURRENCY}` : `— / ${FAST27B_MAX_CONCURRENCY}`))
+    : (serviceRunning ? `${llamaSlotUsed} / ${llamaSlotTotal}` : `— / ${llamaSlotTotal}`);
   const slotHint = engineMode
-    ? '固定单并发（含外部客户端）'
+    ? (isStrataMode ? '网关在途请求（含外部客户端）' : '固定单并发（含外部客户端）')
     : '并行槽位（仅软件内对话）';
   const exposureLabel = serviceExposed
     ? `局域网 · ${engineMode ? '0.0.0.0' : bindHost ?? '0.0.0.0'}`
@@ -268,8 +297,12 @@ export default function ApiStatusPage() {
   };
 
   const openFast27bPage = () => dispatch({ type: 'SET_VIEW', payload: 'fast27b' });
-  const manageTarget = engineMode ? openFast27bPage : openAdvancedSettings;
-  const manageLabel = engineMode ? '到 NiNfer 页管理' : '管理监听与 Key';
+  const openStrataPage = () => dispatch({ type: 'SET_VIEW', payload: 'strata' });
+  const openEnginePage = isStrataMode ? openStrataPage : openFast27bPage;
+  const manageTarget = engineMode ? openEnginePage : openAdvancedSettings;
+  const manageLabel = engineMode
+    ? (isStrataMode ? '到 Strata 页管理' : '到 NiNfer 页管理')
+    : '管理监听与 Key';
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
@@ -280,7 +313,9 @@ export default function ApiStatusPage() {
             eyebrow={`服务控制台 / API · ${engineMode ? engine.label : '主模型'}`}
             title="API 服务"
             description={engineMode
-              ? `NiNfer 引擎自带的 OpenAI 兼容端点（端口 ${engine.port}，固定单并发）；切换对话后端即可在主模型与引擎之间切换。`
+              ? (isStrataMode
+                ? `Strata 网关自带的 OpenAI 兼容端点（端口 ${engine.port}）；切换对话后端即可在主模型与引擎之间切换。`
+                : `NiNfer 引擎自带的 OpenAI 兼容端点（端口 ${engine.port}，固定单并发）；切换对话后端即可在主模型与引擎之间切换。`)
               : '本地 OpenAI / Anthropic 兼容接口。外部客户端用下方 Base URL 即可接入；参数修改后需重新加载模型生效。'}
             actions={(
               <>
@@ -299,20 +334,35 @@ export default function ApiStatusPage() {
           />
 
           {/* 另一个后端在跑时给出提示与一键切换，避免「引擎已启动但本页还是主模型」的困惑。 */}
-          {!engineMode && engine.running && (
+          {!engineMode && (fast27bEngine.running || strataEngine.running) && (
             <div className="accent-soft mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[var(--radius-field)] px-4 py-3">
               <Zap className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
               <span className="min-w-0 flex-1 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                NiNfer 引擎正在运行（端口 {engine.port}），本页当前描述的是主模型服务。
+                {[
+                  fast27bEngine.running ? `NiNfer 引擎正在运行（端口 ${fast27bEngine.port}）` : null,
+                  strataEngine.running ? `Strata 引擎正在运行（端口 ${strataEngine.port}）` : null,
+                ].filter(Boolean).join('；')}，本页当前描述的是主模型服务。
               </span>
-              <button
-                type="button"
-                onClick={openFast27bPage}
-                className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-              >
-                前往 NiNfer 页
-                <ArrowUpRight className="h-3.5 w-3.5" />
-              </button>
+              {fast27bEngine.running && (
+                <button
+                  type="button"
+                  onClick={openFast27bPage}
+                  className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+                >
+                  前往 NiNfer 页
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {strataEngine.running && (
+                <button
+                  type="button"
+                  onClick={openStrataPage}
+                  className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+                >
+                  前往 Strata 页
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
           )}
 
@@ -325,12 +375,12 @@ export default function ApiStatusPage() {
                     <span className={`absolute -inset-1 rounded-full opacity-20 ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                     <span className={`absolute inset-0 rounded-full ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                   </span>
-                  <h2 className="text-[length:var(--font-display)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
+                  <h2 className="heading-brand text-[length:var(--font-page-title)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
                   <span className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                     {engineMode ? engine.label : '主模型'}
                   </span>
                   {engineMode ? (
-                    <StatusPill ok={engine.apiReachable} text="/v1/models" />
+                    <StatusPill ok={engine.apiReachable} text={isStrataMode ? '/health' : '/v1/models'} />
                   ) : (
                     <>
                       <StatusPill ok={Boolean(result?.healthOk)} text="/health" />
@@ -367,30 +417,30 @@ export default function ApiStatusPage() {
               <Fact label="端口" value={String(servicePort)} mono />
               <Fact label="访问范围" value={exposureLabel} />
               <Fact
-                label="请求槽位"
-                value={serviceRunning ? `${slotUsed} / ${slotTotal}` : `— / ${slotTotal}`}
+                label={slotLabel}
+                value={slotValue}
                 hint={slotHint}
               />
               <Fact label="兼容协议" value={serviceStandards} />
             </dl>
 
-            {engineMode && engine.degraded && (
+            {engineMode && !isStrataMode && fast27bEngine.degraded && (
               <div className="mt-4 rounded-[var(--radius-field)] border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3.5 py-3">
                 <div className="text-[length:var(--font-caption)] font-semibold text-[var(--state-danger)]">
-                  引擎已失效{engine.faultAt ? `（${engine.faultAt}）` : ''}
-                  {engine.faultKindText ? ` · ${engine.faultKindText}` : ''}
+                  引擎已失效{fast27bEngine.faultAt ? `（${fast27bEngine.faultAt}）` : ''}
+                  {fast27bEngine.faultKindText ? ` · ${fast27bEngine.faultKindText}` : ''}
                 </div>
-                {engine.degradedReason && (
+                {fast27bEngine.degradedReason && (
                   <div className="mt-1 break-words text-[length:var(--font-caption)] leading-[var(--leading-ui)] text-[var(--text-primary)]">
-                    {engine.degradedReason}
+                    {fast27bEngine.degradedReason}
                   </div>
                 )}
-                {engine.rawFaultLine && (
+                {fast27bEngine.rawFaultLine && (
                   <div className="mono-font mt-1.5 break-words text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
-                    {engine.rawFaultLine}
+                    {fast27bEngine.rawFaultLine}
                   </div>
                 )}
-                {engine.requiresRestart && (
+                {fast27bEngine.requiresRestart && (
                   <button
                     type="button"
                     onClick={openFast27bPage}
@@ -400,6 +450,13 @@ export default function ApiStatusPage() {
                     <ArrowUpRight className="h-3.5 w-3.5" />
                   </button>
                 )}
+              </div>
+            )}
+            {/* Strata 特有：接口在线但权重仍在加载（十几分钟），不是失效。 */}
+            {engineMode && isStrataMode && engine.running && !engine.serviceable && (
+              <div className="mt-4 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+                <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+                接口已在线，权重仍在加载：/health 与网页都能打开，对话要等加载完成。
               </div>
             )}
 
@@ -471,17 +528,17 @@ export default function ApiStatusPage() {
             </div>
           </section>
 
-          {/* 引擎模式的配置都在 NiNfer 页：这里不再重复参数表，只保留一句指引。 */}
+          {/* 引擎模式的配置都在各自专页：这里不再重复参数表，只保留一句指引。 */}
           {engineMode ? (
             <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
               <Globe2 className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
-              引擎的端口、局域网访问与 API Key 都在 NiNfer 页配置。
+              引擎的端口、局域网访问与 API Key 都在 {engine.label} 页配置。
               <button
                 type="button"
-                onClick={openFast27bPage}
+                onClick={openEnginePage}
                 className="inline-flex items-center gap-1 font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
               >
-                前往 NiNfer 页
+                前往 {engine.label} 页
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </button>
             </div>

@@ -331,6 +331,13 @@ fn pack_candidates(app: Option<&AppHandle>) -> Vec<(PathBuf, &'static str)> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
+            // `bundle.resources` 里用 `../resources/canvas` 时，Tauri 会把它放到
+            // `_up_/resources/canvas`（新版打包器的落点）；与 auto_updater 的
+            // resource_dir() 口径一致。
+            candidates.push((
+                parent.join("_up_").join("resources").join("canvas"),
+                "resource",
+            ));
             candidates.push((parent.join("resources").join("canvas"), "exe"));
             candidates.push((parent.join("canvas"), "exe"));
         }
@@ -339,16 +346,42 @@ fn pack_candidates(app: Option<&AppHandle>) -> Vec<(PathBuf, &'static str)> {
 }
 
 pub fn resolve_pack(app: Option<&AppHandle>) -> Option<(PathBuf, &'static str)> {
+    // 画布改为随应用分发后，随包的包可能比用户机器上残留的旧包新。
+    // 按版本取最高的有效包（而不是死守候选顺序），这样升级应用就能把旧画布带上来；
+    // 用户自己装了更新的包时仍然是新的那个生效。
     let mut seen = HashSet::new();
+    let mut best: Option<(PathBuf, &'static str, Vec<u32>)> = None;
     for (dir, source) in pack_candidates(app) {
         if !seen.insert(dir.clone()) {
             continue;
         }
-        if is_valid_pack(&dir) {
+        if !is_valid_pack(&dir) {
+            continue;
+        }
+        // 环境变量是开发期显式覆盖，优先级最高。
+        if source == "env" {
             return Some((dir, source));
         }
+        let key = pack_version(&dir)
+            .map(|version| version_key(&version))
+            .unwrap_or_default();
+        let replace = match &best {
+            None => true,
+            Some((_, _, current)) => key > *current,
+        };
+        if replace {
+            best = Some((dir, source, key));
+        }
     }
-    None
+    best.map(|(dir, source, _)| (dir, source))
+}
+
+fn version_key(raw: &str) -> Vec<u32> {
+    raw.split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .take(4)
+        .collect()
 }
 
 fn pack_status(app: Option<&AppHandle>) -> CanvasPackStatus {

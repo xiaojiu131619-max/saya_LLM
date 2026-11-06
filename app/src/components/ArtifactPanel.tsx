@@ -6,6 +6,7 @@ import {
   FolderOpen,
   GitBranch,
   Image as ImageIcon,
+  Infinity as InfinityIcon,
   Loader2,
   Package,
 } from 'lucide-react';
@@ -14,6 +15,9 @@ import { fileExtension, formatFileSize } from '@/features/chat/chatUtils';
 import { parseMindMap, type ParsedMindMap } from '@/features/chat/mindmap';
 import MindMapPreview from './MindMapPreview';
 import {
+  canvasGetSummary,
+  canvasOpenWindow,
+  canvasStart,
   isDesktopRuntime,
   openExternalUrl,
   piReadArtifact,
@@ -77,6 +81,51 @@ function useReveal(sandboxDir: string | undefined, artifact: AgentArtifact) {
   };
 
   return { absolutePath, error, reveal };
+}
+
+/** 画布联动：打开（必要时启动）无限画布，用画布续作 Pi 生成的图。 */
+function OpenInCanvasButton() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const summary = await canvasGetSummary();
+      if (!summary?.running) {
+        // 未运行：canvasStart 会按用户配置自动打开独立窗口或系统浏览器。
+        await canvasStart();
+      } else {
+        await canvasOpenWindow();
+      }
+    } catch (reason) {
+      setError(readErrorText(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="inline-flex flex-shrink-0 items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => void open()}
+        disabled={busy || !isDesktopRuntime()}
+        className="inline-flex items-center gap-1 rounded-[var(--radius-field)] border border-[var(--border)] px-2.5 py-1.5 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-45 disabled:cursor-not-allowed dark:hover:bg-white/[0.07]"
+        title="打开（必要时启动）无限画布：产物图片已保存在 Pi 会话工作区的 canvas/ 目录，可在画布里导入续作"
+      >
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <InfinityIcon className="h-3.5 w-3.5" />}
+        画布续作
+      </button>
+      {error && (
+        <span className="max-w-40 truncate text-[length:var(--font-caption)] text-[var(--state-danger)]" title={error}>
+          {error}
+        </span>
+      )}
+    </span>
+  );
 }
 
 export default function ArtifactPanel({ artifacts, sandboxDir, onResize }: ArtifactPanelProps) {
@@ -558,6 +607,9 @@ function ImageArtifactCard({
             )}
           </div>
         </div>
+        {absolutePath && (
+          <OpenInCanvasButton />
+        )}
         {absolutePath && (
           <button
             type="button"

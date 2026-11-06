@@ -66,6 +66,14 @@ New-Item -ItemType Directory -Force -Path $StageRoot | Out-Null
 Copy-Item -LiteralPath $ExePath -Destination $StageRoot -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $StageRoot "_up_\resources") | Out-Null
 
+# 无限画布随包分发：解析顺序里有「exe 同级 canvas」，便携包直接放这里。
+$CanvasSource = Join-Path $PSScriptRoot "..\resources\canvas"
+if (Test-Path -LiteralPath $CanvasSource) {
+  Copy-Item -LiteralPath $CanvasSource -Destination (Join-Path $StageRoot "canvas") -Recurse -Force
+} else {
+  Write-Warning "app\resources\canvas 不存在，便携包将不含画布模块。"
+}
+
 $StartBatName = Decode-Utf8Base64 "5ZCv5YqoIEFnZW50IExMTS5iYXQ="
 $StartBatPath = Join-Path $StageRoot $StartBatName
 $StartBat = "@echo off`r`ncd /d ""%~dp0""`r`nstart """" ""%~dp0agent-llm.exe""`r`n"

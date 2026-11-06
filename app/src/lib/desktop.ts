@@ -11,6 +11,7 @@ import {
 import { logInfo } from '@/lib/appLog';
 import { extractVideoFrames, prepareAudioForLlama } from '@/lib/mediaAdapters';
 import { prepareFast27bMessages } from '@/lib/fast27bMedia';
+import { normalizeMessagesImages } from '@/lib/imageNormalize';
 import { buildServerConfig } from '@/lib/serverConfig';
 import type { ServerConfig } from '@/lib/ipc/model';
 export { buildServerConfig } from '@/lib/serverConfig';
@@ -1010,9 +1011,12 @@ export async function streamChatCompletion(options: {
   if (!fast27b) validateMediaSupport(serverModalities, hasAudio, hasVideo);
 
   const buildMessages = async (useNativeVideo: boolean): Promise<ChatCompletionMessage[]> => {
+    // 先让浏览器解码再重编码：截断/异常 chunk 的图片在本地就报错，
+    // 不发到引擎去换一句看不懂的 invalid_prompt。
+    const normalizedMessages = await normalizeMessagesImages(options.messages);
     const sanitizedMessages = fast27b
-      ? prepareFast27bMessages(options.messages, serverModalities)
-      : await sanitizeMessagesForLlama(options.messages, useNativeVideo);
+      ? prepareFast27bMessages(normalizedMessages, serverModalities)
+      : await sanitizeMessagesForLlama(normalizedMessages, useNativeVideo);
     return options.config.systemPrompt.trim()
       ? [{ role: 'system', content: options.config.systemPrompt.trim() }, ...sanitizedMessages]
       : sanitizedMessages;
@@ -1180,7 +1184,9 @@ export async function streamChatCompletion(options: {
         ? '附件请求过大，请缩小照片或视频后重试。'
         : fast27b && /media_budget_exceeded|context_length_exceeded/.test(errorBody)
           ? '照片、视频或历史消息超过引擎预算，请减少附件或新建会话。'
-          : '';
+          : fast27b && /invalid_prompt|png chunk|invalid image|decode/.test(errorBody)
+            ? '图片数据无法解码（文件可能不完整），请撤回后重新添加原图。'
+            : '';
       throw new Error(`${fast27b ? 'NiNfer' : 'llama-server'} 返回 ${response.status}: ${mediaHint}${truncated}`);
     }
   }

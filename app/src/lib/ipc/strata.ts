@@ -9,6 +9,18 @@ import { isDesktopRuntime } from '../desktopRuntime';
  * 但发对话会一直挂着——所以界面必须按 `model_loaded` 区分「接口在线」和「可对话」。
  */
 
+/** 智慧模型变体：S（Gyro-S）与 M（Gyro-M）。 */
+export type StrataModelVariant = 's' | 'm';
+
+/** 变体及其 run config 状态。 */
+export interface StrataModelPreset {
+  id: StrataModelVariant;
+  label: string;
+  short_label: string;
+  config_path: string;
+  exists: boolean;
+}
+
 /** 智慧模型运行状态 + 配置回显 + 环境校验。 */
 export interface StrataStatus {
   // 配置
@@ -16,6 +28,10 @@ export interface StrataStatus {
   python_path: string;
   work_dir: string;
   config_path: string;
+  selected_model: StrataModelVariant;
+  model_presets: StrataModelPreset[];
+  s_config_path: string;
+  m_config_path: string;
   port: number;
   lan: boolean;
   api_key: string;
@@ -38,10 +54,6 @@ export interface StrataStatus {
   model_name: string | null;
   max_context: number | null;
   pid: number | null;
-  /** 当前 dsh 绑定（仅当 dsh 默认模型指向本引擎端口时才有值）。 */
-  dsh_bound_model: string | null;
-  /** dsh Web 地址。 */
-  dsh_web_url: string;
   /** 网关自带的网页界面地址（strata 内置 WebUI，`/`）。 */
   webui_url: string;
 }
@@ -51,7 +63,11 @@ export interface StrataConfig {
   enabled: boolean;
   python_path: string;
   work_dir: string;
+  /** 当前生效的 run config；切换模型时由 strataSelectModel 同步。 */
   config_path: string;
+  selected_model: StrataModelVariant;
+  s_config_path: string;
+  m_config_path: string;
   port: number;
   lan: boolean;
   api_key: string;
@@ -72,6 +88,12 @@ export async function strataGetConfig() {
 export async function strataSaveConfig(config: StrataConfig) {
   if (!isDesktopRuntime()) return;
   await invoke('strata_save_config', { config });
+}
+
+/** 一键切换 S / M 模型（只切换 run config；运行中会拒绝，需先停止）。 */
+export async function strataSelectModel(model: StrataModelVariant) {
+  if (!isDesktopRuntime()) return;
+  await invoke('strata_select_model', { model });
 }
 
 export async function strataSetEnabled(enabled: boolean) {
@@ -146,22 +168,4 @@ export async function strataGetMetrics() {
 export async function strataClearMetrics() {
   if (!isDesktopRuntime()) return;
   await invoke('strata_clear_metrics');
-}
-
-export interface StrataBindResult {
-  model_id: string;
-  base_url: string;
-  provider: string;
-}
-
-/** 把智慧模型一键接入 dsh（写入共享提供方槽位并设为默认模型）。 */
-export async function strataBindDsh() {
-  if (!isDesktopRuntime()) return null;
-  return invoke<StrataBindResult>('strata_bind_dsh');
-}
-
-/** 解除 dsh 绑定（与 llama / NiNfer 共用同一提供方槽位）。 */
-export async function strataUnbindDsh() {
-  if (!isDesktopRuntime()) return;
-  await invoke('strata_unbind_dsh');
 }

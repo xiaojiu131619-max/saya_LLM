@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Copy, ExternalLink, Globe, Info, KeyRound, RefreshCw, Zap } from 'lucide-react';
+import { Activity, Check, Copy, ExternalLink, Globe, Info, KeyRound, RefreshCw, Zap } from 'lucide-react';
 import {
   fast27bBridgeEnsure,
   fast27bBridgeStatus,
   getServerApiKey,
   openExternalUrl,
+  probeLocalOpenAiApi,
+  type PingResult,
   type WebuiBridgeInfo,
 } from '@/lib/desktop';
 import { useApp } from '@/context/AppContext';
@@ -19,12 +21,14 @@ const ENGINE_OPTIONS: Array<{ id: WebUiEngineId; label: string }> = [
 ];
 
 /**
- * Agent 页「WebUI」标签：**官方 llama.cpp 网页界面的入口**（不内嵌任何应用自绘界面）。
+ * 设置中心「WebUI 测试」页：**官方 llama.cpp 网页界面的入口 + 接口连通性测试**。
+ * （不内嵌任何应用自绘界面；从 Agent 页迁入设置中心。）
  *
  * - 主模型：本身就是 llama.cpp 服务，浏览器直接开它自己的端口即可；
  * - NiNfer：引擎没有任何 HTML 页面，由应用的**同源桥**（`services::webui_bridge`）在回环上
  *   提供官方页面并把引擎的协议差异（必须带 model、top_k ≤ 20、无 /props）抹平，
- *   所以这里显示的是桥的地址；引擎在跑时打开标签会自动把桥拉起来。
+ *   所以这里显示的是桥的地址；引擎在跑时打开页面会自动把桥拉起来。
+ * - 「连通性测试」从应用侧探测当前后端的 /v1/models，验证 API 可用性。
  */
 export default function AgentWebUiPanel() {
   const { state, dispatch } = useApp();
@@ -36,6 +40,11 @@ export default function AgentWebUiPanel() {
   const [copied, setCopied] = useState<'url' | 'key' | null>(null);
   const [bridge, setBridge] = useState<WebuiBridgeInfo | null>(null);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
+  // 连通性测试：对当前后端 GET /v1/models（Rust 端探测，不受浏览器 CORS 影响）。
+  // 结果带探测时的地址一起展示，切后端后旧结果不会张冠李戴。
+  const [probe, setProbe] = useState<PingResult | null>(null);
+  const [probeUrl, setProbeUrl] = useState<string>('');
+  const [probing, setProbing] = useState(false);
 
   // 当前后端解析：主模型取 AppContext 状态；引擎取轮询到的状态快照。
   const target = useMemo(() => {
@@ -140,6 +149,31 @@ export default function AgentWebUiPanel() {
     }
   };
 
+  // 探测当前后端的 /v1/models：主模型与 Strata 带各自的 API Key，
+  // NiNfer 的鉴权由同源桥转发时注入，这里不带。
+  const runProbe = useCallback(async (url: string, probeKey: string | null) => {
+    if (!url || probing) return;
+    setProbing(true);
+    setProbe(null);
+    setProbeUrl(url);
+    try {
+      const result = await probeLocalOpenAiApi(url, probeKey);
+      setProbe(result);
+    } catch (error) {
+      setProbe({
+        reachable: false,
+        latencyMs: null,
+        statusCode: null,
+        healthOk: false,
+        modelsOk: false,
+        models: [],
+        error: String(error),
+      });
+    } finally {
+      setProbing(false);
+    }
+  }, [probing]);
+
   const backendSelector = (
     <label
       className="flex flex-shrink-0 items-center gap-1.5 text-xs"
@@ -165,6 +199,7 @@ export default function AgentWebUiPanel() {
           <Globe className="h-3.5 w-3.5 text-[var(--accent)]" /> WebUI
         </span>
         <span className="flex-1" />
+        <span className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">设置中心 · 测试页</span>
         {backendSelector}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">{children}</div>
@@ -307,6 +342,77 @@ export default function AgentWebUiPanel() {
           <p className="mt-2 rounded-md bg-[var(--state-danger-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--state-danger)]">
             网页桥启动失败：{bridgeError}
           </p>
+        )}
+      </div>
+
+      {/* ---- 连通性测试：GET /v1/models ---- */}
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-primary-custom">
+            <Activity className="h-4 w-4 text-[var(--accent)]" /> 连通性测试
+          </h2>
+          <button
+            type="button"
+            onClick={() => void runProbe(address, engine === 'main' ? serverApiKey : engine === 'strata' ? target.engineApiKey ?? null : null)}
+            disabled={!address || probing}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-secondary-custom transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-45 disabled:cursor-not-allowed"
+            title="向当前后端发起一次 GET /v1/models，验证接口可达并取回模型列表"
+          >
+            <Activity className={`h-3 w-3 ${probing ? 'animate-spin' : ''}`} /> {probing ? '探测中…' : '测试接口'}
+          </button>
+        </div>
+        <p className="mt-2 text-[length:var(--font-eyebrow)] leading-5 text-secondary-custom">
+          从应用侧直接探测 <span className="mono-font">/v1/models</span>（不经浏览器，不受跨域限制），验证官方界面之外 API 是否可用。
+        </p>
+        {probe && (
+          <div className="mt-3 space-y-2">
+            <p className="mono-font truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]" title={probeUrl}>
+              探测目标 {probeUrl}/v1/models
+            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`rounded-full border px-2 py-0.5 ${
+                  probe.reachable
+                    ? 'border-[var(--state-success-border)] bg-[var(--state-success-bg)] text-[var(--state-success)]'
+                    : 'border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)]'
+                }`}
+              >
+                {probe.reachable ? '接口可达' : '不可达'}
+              </span>
+              {probe.latencyMs !== null && (
+                <span className="mono-font text-secondary-custom" title="探测耗时（本地回环）">
+                  {probe.latencyMs} ms
+                </span>
+              )}
+              {probe.statusCode !== null && (
+                <span className="mono-font text-[var(--text-tertiary)]">HTTP {probe.statusCode}</span>
+              )}
+            </div>
+            {probe.error && (
+              <p className="rounded-md bg-[var(--state-danger-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] leading-5 text-[var(--state-danger)]">
+                {probe.error}
+              </p>
+            )}
+            {probe.models.length > 0 && (
+              <div className="rounded-md border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2.5 py-2">
+                <p className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                  模型列表（{probe.models.length}）
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {probe.models.slice(0, 8).map((model) => (
+                    <li key={model} className="mono-font truncate text-xs text-secondary-custom" title={model}>
+                      {model}
+                    </li>
+                  ))}
+                </ul>
+                {probe.models.length > 8 && (
+                  <p className="mt-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                    还有 {probe.models.length - 8} 个未展示。
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

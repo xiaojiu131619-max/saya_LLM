@@ -8,7 +8,6 @@ import {
   ChevronRight,
   Database,
   MessageSquare,
-  Server,
   Settings,
   Terminal,
   Wifi,
@@ -43,6 +42,7 @@ import {
 } from '@/features/chat/chatUtils';
 import { fast27bServiceView, useEngineStatuses } from '@/hooks/useEngineStatuses';
 import { strataServiceView, useStrataStatus } from '@/hooks/useStrataStatus';
+import { usePiRuntime } from '@/features/pi/PiRuntimeContext';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -117,6 +117,8 @@ export default function ModelWorkspace() {
   // 两套后端共用同一批渲染分支，差异全部收敛到下面那组 service* 派生值。
   const engineStatuses = useEngineStatuses();
   const strataStatus = useStrataStatus();
+  // Pi 状态来自壳层的 PiRuntimeContext（自带轮询），供 Agent 导航圆点用。
+  const { status: piRuntimeStatus } = usePiRuntime();
   // 两个引擎共用同一批渲染分支：主模型后端下两者都不参与，引擎后端下按当前选择取视图。
   const engineMode = state.chatEngine !== 'main';
   const engine =
@@ -132,13 +134,9 @@ export default function ModelWorkspace() {
   const embeddingOpen = state.currentView === 'embedding';
   const fast27bOpen = state.currentView === 'fast27b';
   const strataOpen = state.currentView === 'strata';
-  // Agent 页的整体可用性：它没有一个独立后端进程，但 WebUI 标签需要一个在跑的后端。
-  // 因此「Agent 是否算启动」跟随当前 WebUI 后端：主模型服务 / NiNfer / Strata 任一在跑即可。
-  const agentRunning = state.webuiEngine === 'main'
-    ? state.serverRunning
-    : state.webuiEngine === 'strata'
-      ? Boolean(strataStatus?.running)
-      : Boolean(engineStatuses.fast27b?.running);
+  // Agent 页的整体可用性：WebUI 已迁到设置中心，Agent 页只剩 Pi 与画布。
+  // Pi 内核在跑时点亮导航圆点（PiRuntimeContext 挂在壳层，自带轮询，无需额外开销）。
+  const agentRunning = piRuntimeStatus?.running === true;
   const selectedModel = state.models.find((model) => model.id === state.selectedModelId);
   const loadedModel = state.models.find((model) => model.id === state.activeModelId && model.status === 'loaded')
     ?? state.models.find((model) => model.status === 'loaded');
@@ -177,8 +175,6 @@ export default function ModelWorkspace() {
 
   // ---- 统一后的服务视图（两套后端共用同一批渲染分支）----
   const serviceRunning = engineMode ? engineRunning : state.serverRunning;
-  const servicePort = engineMode ? engine.port : state.serverPort;
-  const serviceLabel = engineMode ? engine.modelLabel : (loadedModel ? loadedModel.name : '未加载');
   const serviceTokensPerSec = engineMode ? engineStats?.tokensPerSec : tokensPerSec;
   const serviceCtxUsed = engineMode ? (engineStats?.ctxUsed ?? 0) : sessionCtxUsed;
   // 水位分母：引擎取设备 KV 池优先的有效上限，主模型取当前加载模型的 -c。
@@ -308,7 +304,7 @@ export default function ModelWorkspace() {
             <RailNavButton
               icon={Database}
               label="模型列表"
-              active={!detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen}
+              active={!llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen}
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             />
             <RailNavButton
@@ -322,7 +318,7 @@ export default function ModelWorkspace() {
               icon={Bot}
               label="Agent"
               active={agentOpen}
-              title="Agent（智能体）· 官方 WebUI 入口"
+              title="Agent（智能体）· Pi 内核与无限画布"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
               running={agentRunning}
             />
@@ -330,7 +326,7 @@ export default function ModelWorkspace() {
               icon={Zap}
               label="NiNfer"
               active={fast27bOpen}
-              title="NiNfer · Saluki / Heretic 27B 推理引擎（切换模型、一键启动）"
+              title="NiNfer · Bonsai / Saluki 27B 推理引擎（切换模型、一键启动）"
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
               running={engineStatuses.fast27b?.running}
             />
@@ -342,14 +338,6 @@ export default function ModelWorkspace() {
               onClick={() => dispatch({ type: 'SET_VIEW', payload: 'strata' })}
               running={strataStatus?.running}
             />
-            {detailOpen && (
-              <RailNavButton
-                icon={ArrowLeft}
-                label="退出参数界面"
-                active={false}
-                onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
-              />
-            )}
           </nav>
           <div className="mt-4 flex w-full flex-col items-center gap-1 border-t border-[var(--border-subtle)] pt-3">
             <RailNavButton
@@ -400,7 +388,7 @@ export default function ModelWorkspace() {
               {/* 身份区：这是 **Agent 设置**——agent 侧（NiNfer / Strata / 拾一）的
                   模型与引擎配置面板，不负责对话。对话在另一棵界面树（Chat 页）上，
                   两边各有各的侧边栏与状态，不互通。 */}
-              <div className="truncate text-base font-semibold">Agent 设置</div>
+              <div className="truncate text-base font-semibold">个人助手-拾壹</div>
               <div className="truncate text-xs text-[var(--text-tertiary)]">模型 · 引擎 · 智能体</div>
             </div>
           </div>
@@ -410,7 +398,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              !detailOpen && !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
+              !llamaLogsOpen && !apiStatusOpen && !agentOpen && !embeddingOpen && !fast27bOpen && !strataOpen ? 'bg-[var(--surface-selected)] text-[var(--text-primary)]' : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
             }`}
           >
             <Database className="h-4 w-4 flex-shrink-0" />
@@ -429,7 +417,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'agent' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${wideNavTone(agentOpen, agentRunning)}`}
-            title="Agent（智能体）· 官方 WebUI 入口"
+            title="Agent（智能体）· Pi 内核与无限画布"
             data-running={agentRunning ? 'true' : 'false'}
           >
             <Bot className="h-4 w-4 flex-shrink-0" />
@@ -438,7 +426,7 @@ export default function ModelWorkspace() {
           <button
             onClick={() => dispatch({ type: 'SET_VIEW', payload: 'fast27b' })}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${wideNavTone(fast27bOpen, Boolean(engineStatuses.fast27b?.running))}`}
-            title="NiNfer · Saluki / Heretic 27B 推理引擎（切换模型、一键启动）"
+            title="NiNfer · Bonsai / Saluki 27B 推理引擎（切换模型、一键启动）"
             data-running={engineStatuses.fast27b?.running ? 'true' : 'false'}
           >
             <Zap className="h-4 w-4 flex-shrink-0" />
@@ -453,30 +441,18 @@ export default function ModelWorkspace() {
             <Brain className="h-4 w-4 flex-shrink-0" />
             <span className="truncate">Strata</span>
           </button>
-          {detailOpen && (
-            <button
-              onClick={() => dispatch({ type: 'SET_VIEW', payload: 'home' })}
-              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--border)]"
-            >
-              <ArrowLeft className="h-4 w-4 flex-shrink-0" />
-              <span className="truncate">退出参数界面</span>
-            </button>
-          )}
         </nav>
 
         <div className="mt-5 px-3">
           <LoadedModelPanel model={loadedModel} running={state.serverRunning} onStop={handleStopServer} />
           <ServiceStatusPanel
             running={serviceRunning}
-            port={servicePort}
-            label={serviceLabel}
             tokensPerSec={formatTokensPerSec(serviceTokensPerSec)}
             ctxUsage={formatCtxUsage(serviceCtxUsed, serviceCtxCapacity)}
             ctxPercent={serviceCtxCapacity > 0 ? Math.min(100, (serviceCtxUsed / serviceCtxCapacity) * 100) : undefined}
             vramUsage={formatGbPair(systemStats.vramUsed, systemStats.vramTotal)}
             ramUsage={formatGbPair((systemStats.ramUsage / 100) * systemStats.ramTotal, systemStats.ramTotal)}
             linkState={linkState}
-            active={apiStatusOpen}
             onOpenDetails={() => dispatch({ type: 'SET_VIEW', payload: 'apiStatus' })}
           />
           <LlamaLogsCard
@@ -664,17 +640,14 @@ function LlamaLogsCard({ running, active, onOpen }: { running: boolean; active: 
   );
 }
 
-function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, active, onOpenDetails }: {
+function ServiceStatusPanel({ running, tokensPerSec, ctxUsage, ctxPercent, vramUsage, ramUsage, linkState, onOpenDetails }: {
   running: boolean;
-  port: number;
-  label: string;
   tokensPerSec: string;
   ctxUsage: string;
   ctxPercent?: number;
   vramUsage: string;
   ramUsage: string;
   linkState: string;
-  active?: boolean;
   onOpenDetails: () => void;
 }) {
   const LinkIcon = running ? Wifi : WifiOff;
@@ -683,23 +656,9 @@ function ServiceStatusPanel({ running, port, label, tokensPerSec, ctxUsage, ctxP
     <button
       type="button"
       onClick={onOpenDetails}
-      className={`block w-full border-b border-[var(--border-subtle)] py-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]/40 ${
-        active ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
-      }`}
+      className="block w-full border-b border-[var(--border-subtle)] py-2.5 text-left text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]/40"
       title="查看 API 状态详情"
     >
-      <div className="mb-1.5 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-          <Server className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-[var(--accent)]' : ''}`} />
-          <span className="truncate">{label}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <span className={`text-[length:var(--font-micro)] font-medium ${running ? 'text-[var(--state-success)]' : 'text-[var(--text-tertiary)]'}`}>
-            {running ? `:${port}` : '未运行'}
-          </span>
-          <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
-        </div>
-      </div>
       <div className="space-y-1 text-[length:var(--font-eyebrow)]">
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex-shrink-0 text-[var(--text-tertiary)]">速度</span>

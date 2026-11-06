@@ -442,7 +442,7 @@ export function latestRuntimeStatsFromServerLogs(logs: string[], ctxTotal: numbe
 //   req#26 failed during prepare | openai-chat stream | HTTP 503 | service unavailable
 //   req#7 response failed during transport | HTTP 499 | client disconnected
 //   req#8 cancelled | openai-chat stream | client disconnected
-// 引擎把所有来源的请求（本应用对话、外部客户端、dsh）都写进这份日志，因此
+// 引擎把所有来源的请求（本应用对话、外部客户端）都写进这份日志，因此
 // 「有 started 但还没 done/failed/cancelled」是真实的在途请求判定——比只看本应用对话更准。
 // ---------------------------------------------------------------------------
 

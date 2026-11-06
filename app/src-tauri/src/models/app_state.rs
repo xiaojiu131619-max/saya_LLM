@@ -277,7 +277,9 @@ fn default_embedding_port() -> u16 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fast27bModel {
-    Heretic,
+    /// 旧配置里的 `heretic` 按别名落到 Bonsai 槽位（模型已升级为 Swift-Bonsai-2）。
+    #[serde(alias = "heretic")]
+    Bonsai,
     /// 旧配置里的 `swift`（Swift PQ2 已清退）按别名落到 Saluki 槽位。
     #[serde(alias = "swift")]
     Saluki,
@@ -286,108 +288,174 @@ pub enum Fast27bModel {
 impl Fast27bModel {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Heretic => "Heretic 27B",
+            Self::Bonsai => "Bonsai 27B",
             Self::Saluki => "Saluki 27B",
         }
     }
 
-    /// BAT 启动器中的草稿方案：Heretic 使用 DFlash2，Saluki 使用 MTP。
+    /// BAT 启动器中的草稿方案：Bonsai 使用 DFlash2，Saluki 使用 MTP。
     pub fn spec(self) -> &'static str {
         match self {
-            Self::Heretic => "dflash2",
+            Self::Bonsai => "dflash2",
             Self::Saluki => "mtp",
         }
     }
 
     /// 每请求逻辑上下文上限。
     ///
-    /// 开环之后设备池不再等于上下文：设备只常驻窗口（约 42,496 token），其余页在
-    /// `--host-kv-mib` 的主机层、按检索拉回。所以两个模型都走模型原生 262,144，
-    /// 不必按显存砍上下文——实测 Saluki 在 12G 卡上以 262,144 启动，
-    /// `/v1/models` 回报 `context_window=262144`，设备池仍是 42,496（664/664 页）。
-    /// 旧结论「Saluki 只能 49152」来自未开环的实测，那时池=上下文，现已不适用。
+    /// 开环之后设备池不再等于上下文：真正的窗口由 `--kvmem-budget + --kvmem-gen-reserve`
+    /// 决定（Bonsai 66,560 / Saluki 55,296），`--max-context` 只写到模型原生上限。
+    /// 所以两个模型都走 262,144，具体窗口在启动参数里按模型收口。
     pub fn max_context_window(self) -> u32 {
+        262144
+    }
+
+    /// 调优后的 KV 格式（bonsai.bat / saluki.bat 的实测档位）。
+    pub fn kv_dtype(self) -> &'static str {
         match self {
-            Self::Heretic => 262144,
-            Self::Saluki => 262144,
+            Self::Bonsai => "rk8v4",
+            Self::Saluki => "int8",
         }
     }
 
-    /// 视觉塔驻留方式，与 fast-llm 的 start-heretic-best.bat 一致：两者都用 overlay。
-    /// Heretic 在 12G 卡上实测 resident 只剩 598 MiB、overlay 剩 1.49 GiB（同一 KV 池
-    /// 17,920 tokens），fast-llm 已于 2026-10-21 全面切到 overlay。
-    pub fn vision_residency(self) -> &'static str {
+    /// 设备 KV 池 B（`--kvmem-budget`）。
+    pub fn kvmem_budget(self) -> u32 {
         match self {
-            Self::Heretic => "overlay",
-            Self::Saluki => "overlay",
+            Self::Bonsai => 65536,
+            Self::Saluki => 54272,
         }
     }
 
-    /// Saluki 在 48K 下带 `--lm-head-draft` 会因运行时预留不足启动失败，
-    /// 且 32K 时实测 101.4 tok/s，低于不带的 103.9。
-    pub fn uses_lm_head_draft(self) -> bool {
-        matches!(self, Self::Heretic)
+    /// 每轮追加工作区 R（`--kvmem-gen-reserve`）。
+    pub fn kvmem_gen_reserve(self) -> u32 {
+        1024
     }
 
-    /// 思考通道重复惩罚。fast-llm 的 start-heretic-best.bat 为 Heretic 固定传 1.0
-    /// （本模型思考档官方 presence_penalty 是 0.0 且引擎无惩罚窗口，长思考会自陷循环）。
-    /// Saluki 实测 1.0 会让 decode 从 112.5 掉到 92.3，故默认不带，需要时由前端显式开。
-    pub fn thinking_presence_penalty(self) -> Option<&'static str> {
+    /// Host KV 载荷预算 MiB（`--kvmem-host-mib`）。
+    pub fn kvmem_host_mib(self) -> u32 {
+        8192
+    }
+
+    /// 常驻前缀 / 后缀 token（`--kvmem-sink-tokens` / `--kvmem-recent-tokens`）。
+    pub fn kvmem_sink_tokens(self) -> u32 {
+        512
+    }
+
+    pub fn kvmem_recent_tokens(self) -> u32 {
+        64
+    }
+
+    /// 预填充分块（Bonsai balanced 1024，Saluki 512）。
+    pub fn prefill_chunk(self) -> u32 {
         match self {
-            Self::Heretic => Some("1.0"),
-            Self::Saluki => None,
+            Self::Bonsai => 1024,
+            Self::Saluki => 512,
         }
+    }
+
+    /// 与 `--spec` 配套的 ngram 草稿宽度（`--ngram-draft-tokens`）。
+    pub fn ngram_draft_tokens(self) -> u32 {
+        match self {
+            Self::Bonsai => 15,
+            Self::Saluki => 0,
+        }
+    }
+
+    /// 调优后的草稿宽度（Bonsai balanced k6，Saluki k2）。
+    pub fn draft_tokens(self) -> u32 {
+        match self {
+            Self::Bonsai => 6,
+            Self::Saluki => 2,
+        }
+    }
+
+    /// Bonsai balanced 档启用 cuBLAS 宽预填；Saluki 的 bat 不开。
+    pub fn prefill_cublas(self) -> bool {
+        matches!(self, Self::Bonsai)
+    }
+
+    /// Bonsai balanced 档启用满输出头草稿；Saluki 不启用。
+    pub fn full_draft_head(self) -> bool {
+        matches!(self, Self::Bonsai)
     }
 
     /// OpenAI 端点的模型 id（`--model-id` 下发值 = `/v1/models` 回报 = dsh 绑定名）。
-    /// 与 fast-llm 启动器逐字一致：start-heretic-best.bat（经 fastllm-ui.mjs）用
-    /// qwen3.8-27b；start-saluki-best.bat 用 underdog-saluki-27b
-    /// （2026-10-25 实跑 bat 并核对引擎 `/v1/models` 回报同值）。
     pub fn model_id(self) -> &'static str {
         match self {
-            Self::Heretic => "qwen3.8-27b",
-            Self::Saluki => "underdog-saluki-27b",
+            Self::Bonsai => "bonsai",
+            Self::Saluki => "saluki",
         }
     }
 
-    /// 默认推理力度（`--default-reasoning-effort`）。fast-llm 的 mjs 启动器给
-    /// Heretic 传 high；Saluki 的 bat 不传（交回引擎默认），应用保持同口径。
-    pub fn default_reasoning_effort(self) -> Option<&'static str> {
-        match self {
-            Self::Heretic => Some("high"),
-            Self::Saluki => None,
-        }
+    /// 默认推理力度（`--default-reasoning-effort`）。两份 bat 都固定 low。
+    pub fn default_reasoning_effort(self) -> &'static str {
+        "low"
     }
 
+    /// 当前调优后的模型文件名（按优先级探测）。
     fn filenames(self) -> &'static [&'static str] {
         match self {
-            Self::Heretic => &["Ternary-Bonsai-2-27B-Heretic.ninfer"],
+            Self::Bonsai => &["Swift-Bonsai-2-27B-PQ2-MTP-DFlash2-v3.ninfer"],
+            Self::Saluki => &["Qwen3.8-27B-Saluki-Swift-1.5-mix2-mtp.ninfer"],
+        }
+    }
+
+    /// 旧版模型文件名：已存在的旧路径会被自动替换为上面的当前文件名。
+    fn legacy_filenames(self) -> &'static [&'static str] {
+        match self {
+            Self::Bonsai => &["Ternary-Bonsai-2-27B-Heretic.ninfer"],
             Self::Saluki => &[
                 "Underdog-Saluki-27B-1.0-IQ2-mix-ninfer-v3.ninfer",
                 "Underdog-Saluki-27B-1.0-IQ2-mix.ninfer",
             ],
         }
     }
+
+    fn matches_filename(self, path: &Path, names: &'static [&'static str]) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                names
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_legacy_path(self, path: &Path) -> bool {
+        self.matches_filename(path, self.legacy_filenames())
+            // 已清退的 Swift PQ2 文件（旧 Saluki 槽位曾指向它）。
+            // 只认 swift_pq2 这个已清退文件名；新的 Saluki 文件名里也含 "Swift"，不能误判。
+            || (self == Self::Saluki
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_ascii_lowercase().contains("swift_pq2"))
+                    .unwrap_or(false))
+    }
 }
 
-/// fast-27b 引擎（Swift / Heretic 27B）接入配置。
-/// 默认值与 D:\Projects\fast-llm 下的 BAT 启动器保持一致；api_key 为本地明文（仅本机/局域网使用）。
+/// fast-27b 引擎（Bonsai / Saluki 27B）接入配置。
+/// 默认值与 D:\Projects\fast-llm\run 下的 bonsai.bat / saluki.bat 保持一致；
+/// api_key 为本地明文（仅本机/局域网使用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Fast27bConfig {
     /// 是否启用（停用后页面显示停用态，禁止启动引擎）。
     pub enabled: bool,
-    /// ninfer-serve-86.exe 绝对路径。
+    /// ninfer-serve.exe 绝对路径。
     pub engine_path: String,
     /// .ninfer 模型权重文件绝对路径。
     pub model_path: String,
     /// 模型类型；None 兼容只有 model_path 的旧配置。
     pub selected_model: Option<Fast27bModel>,
     /// 分别保存两个模型的自定义路径，切换时不覆盖另一个模型的路径。
-    /// `swift_model_path` 是清退 Swift 前的旧字段名，读旧配置时自动落到 Saluki。
+    /// `swift_model_path` 是清退 Swift 前的旧字段名，读旧配置时自动落到 Saluki；
+    /// `heretic_model_path` 是 Bonsai 升级前的旧字段名，读旧配置时自动落到 Bonsai。
     #[serde(alias = "swift_model_path")]
     pub saluki_model_path: String,
-    pub heretic_model_path: String,
+    #[serde(alias = "heretic_model_path")]
+    pub bonsai_model_path: String,
     /// 服务端口。
     pub port: u16,
     /// true = 0.0.0.0（对局域网开放）；false = 仅 127.0.0.1。
@@ -413,25 +481,64 @@ impl Default for Fast27bConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            engine_path: String::from(
-                r"D:\Projects\fast-llm\engine\infer-engine-sm86-20261019\engine\ninfer-serve-86.exe",
-            ),
+            engine_path: String::from(r"D:\Projects\fast-llm\run\engine\ninfer-serve.exe"),
             model_path: String::from(
-                r"D:\Projects\fast-llm\model\Ternary-Bonsai-2-27B-Heretic.ninfer",
+                r"D:\Projects\fast-llm\models\Swift-Bonsai-2-27B-PQ2-MTP-DFlash2-v3.ninfer",
             ),
             selected_model: None,
             saluki_model_path: String::new(),
-            heretic_model_path: String::new(),
+            bonsai_model_path: String::new(),
             port: 8094,
             lan: false,
             // 本地 Bearer Key 每次全新配置随机生成；旧配置里已保存的 Key 不受影响。
             api_key: generate_local_api_key(),
             context_window: 262144,
-            draft_tokens: 4,
-            default_max_tokens: 32768,
-            default_thinking_budget: 8192,
+            draft_tokens: 6,
+            default_max_tokens: 10240,
+            default_thinking_budget: 1024,
             bridge_port: 8095,
             auto_open_dsh_web: true,
+        }
+    }
+}
+
+/// 智慧模型的两个调优变体：S（Gyro-S）与 M（Gyro-M）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrataModel {
+    S,
+    M,
+}
+
+impl StrataModel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::S => "S 模型",
+            Self::M => "M 模型",
+        }
+    }
+
+    /// 界面上的短名称（胶囊按钮）。
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::S => "S",
+            Self::M => "M",
+        }
+    }
+
+    /// 模型展示名（`/health` 未回报时的兜底）。
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::S => "Qwen3.8-Flash-Next（Gyro-S）",
+            Self::M => "Qwen3.8-Flash-Next（Gyro-M · ABL）",
+        }
+    }
+
+    /// strata launch 生成的 run config 文件名（按优先级探测）。
+    fn config_filenames(self) -> &'static [&'static str] {
+        match self {
+            Self::S => &["gyro-s-100k.json"],
+            Self::M => &["gyro-m-abl-100k.json", "gyro-m-32k.json", "gyro-m-abl-32k.json"],
         }
     }
 }
@@ -446,7 +553,7 @@ impl Default for Fast27bConfig {
 /// 服务端参数（上下文、KV、专家驻留、mmap 等）全部写在 `config_path` 指向的
 /// run config json 里，由 strata 自己的 `launch` 生成，应用不复制、不改写这些数值；
 /// 应用只覆盖 `--host` / `--port` / `--api-key` 三项网络参数（实测 CLI 参数优先于
-/// config 内的同名字段）。
+/// config 内的同名字段）。S/M 两个变体各自对应一份 run config，切换模型只切换路径。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StrataConfig {
@@ -459,9 +566,14 @@ pub struct StrataConfig {
     /// strata 源码目录（`serve/` 与 `strata_control/` 所在处）。子进程以它为工作目录，
     /// `-m serve.server` 与 `component:strata-engine` 的组件解析都依赖这个 cwd。
     pub work_dir: String,
-    /// 启动配置（strata launch 生成的 run config json）。含 exe、args、tokenizer、
-    /// model_name 与引擎日志路径；应用只读取不写入。
+    /// 当前生效的启动配置（strata launch 生成的 run config json）。含 exe、args、
+    /// tokenizer、model_name 与引擎日志路径；应用只读取不写入。
     pub config_path: String,
+    /// 当前模型变体；None 兼容只有 config_path 的旧配置（按文件名识别）。
+    pub selected_model: Option<StrataModel>,
+    /// S / M 两个变体各自的 run config 路径，切换时不覆盖另一个模型的路径。
+    pub s_config_path: String,
+    pub m_config_path: String,
     /// 服务端口。默认 8082：避开主模型 8080、向量服务 8081、fast-27b 8094。
     pub port: u16,
     /// true = 0.0.0.0（对局域网开放）；false = 仅 127.0.0.1。
@@ -517,6 +629,9 @@ impl Default for StrataConfig {
             // strata 源码目录没有通用默认位置，必须由用户指定。
             work_dir: String::new(),
             config_path: local_appdata_path(r"Strata\launch\gyro-m-abl-100k.json"),
+            selected_model: None,
+            s_config_path: local_appdata_path(r"Strata\launch\gyro-s-100k.json"),
+            m_config_path: local_appdata_path(r"Strata\launch\gyro-m-abl-100k.json"),
             port: 8082,
             lan: false,
             api_key: format!("strata-local-{}", generate_local_api_key()),
@@ -530,6 +645,60 @@ impl StrataConfig {
     /// 网关对外的 OpenAI 兼容基址。
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    pub fn selected_model(&self) -> StrataModel {
+        self.selected_model.unwrap_or_else(|| {
+            if self.config_path.to_ascii_lowercase().contains("gyro-s") {
+                StrataModel::S
+            } else {
+                StrataModel::M
+            }
+        })
+    }
+
+    /// 一键切换的纯配置变换：保存离开的模型路径，复用目标路径，其他参数保持原值。
+    pub fn with_selected_model(&self, model: StrataModel) -> Self {
+        let target_path = self.config_path_for(model);
+        let mut config = self.clone();
+        match self.selected_model() {
+            StrataModel::S => config.s_config_path = self.config_path.clone(),
+            StrataModel::M => config.m_config_path = self.config_path.clone(),
+        }
+        config.selected_model = Some(model);
+        config.config_path = target_path.clone();
+        match model {
+            StrataModel::S => config.s_config_path = target_path,
+            StrataModel::M => config.m_config_path = target_path,
+        }
+        config
+    }
+
+    /// 当前路径与显式保存的槽位优先；未配置的变体到 `%LOCALAPPDATA%\Strata\launch`
+    /// 下按文件名探测，不新建配置、不改写引擎参数。
+    pub fn config_path_for(&self, model: StrataModel) -> String {
+        if model == self.selected_model() && !self.config_path.trim().is_empty() {
+            return self.config_path.clone();
+        }
+        let saved = match model {
+            StrataModel::S => &self.s_config_path,
+            StrataModel::M => &self.m_config_path,
+        };
+        if !saved.trim().is_empty() {
+            return saved.clone();
+        }
+        if let Some(directory) = Path::new(&self.config_path).parent() {
+            for name in model.config_filenames() {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+        }
+        local_appdata_path(&format!(
+            r"Strata\launch\{}",
+            model.config_filenames().first().copied().unwrap_or_default()
+        ))
     }
 }
 
@@ -552,6 +721,40 @@ impl Fast27bConfig {
         validate_fast27b_thinking_budget(self.default_max_tokens, self.default_thinking_budget)
     }
 
+    /// 启动用引擎路径：旧离线包 `ninfer-serve-86.exe` 不支持 KVMem 参数，
+    /// 若同一机器上存在调优后的 `ninfer-serve.exe` 则自动切换；否则保持用户配置。
+    pub fn engine_path_for_launch(&self) -> String {
+        let saved = self.engine_path.trim();
+        if saved.is_empty() {
+            return String::new();
+        }
+        let saved_path = Path::new(saved);
+        let is_legacy = saved_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("ninfer-serve-86.exe"))
+            .unwrap_or(false);
+        if saved_path.is_file() && !is_legacy {
+            return saved.to_string();
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(parent) = saved_path.parent() {
+            candidates.push(parent.join("ninfer-serve.exe"));
+            if let Some(root) = parent.parent() {
+                candidates.push(root.join("run").join("engine").join("ninfer-serve.exe"));
+            }
+        }
+        candidates.push(PathBuf::from(r"D:\Projects\fast-llm\run\engine\ninfer-serve.exe"));
+        candidates.push(PathBuf::from(
+            r"D:\Projects\fast-llm\engine\infer-engine-sm86-20261019\engine\ninfer-serve.exe",
+        ));
+        if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+            return found.to_string_lossy().to_string();
+        }
+        saved.to_string()
+    }
+
     pub fn selected_model(&self) -> Fast27bModel {
         self.selected_model.unwrap_or_else(|| {
             let path = self.model_path.to_ascii_lowercase();
@@ -559,7 +762,7 @@ impl Fast27bConfig {
             if path.contains("saluki") || path.contains("swift") {
                 Fast27bModel::Saluki
             } else {
-                Fast27bModel::Heretic
+                Fast27bModel::Bonsai
             }
         })
     }
@@ -569,53 +772,77 @@ impl Fast27bConfig {
         let target_path = self.model_path_for(model);
         let mut config = self.clone();
         match self.selected_model() {
-            Fast27bModel::Heretic => config.heretic_model_path = self.model_path.clone(),
+            Fast27bModel::Bonsai => config.bonsai_model_path = self.model_path.clone(),
             Fast27bModel::Saluki => config.saluki_model_path = self.model_path.clone(),
         }
         config.selected_model = Some(model);
         config.model_path = target_path.clone();
         match model {
-            Fast27bModel::Heretic => config.heretic_model_path = target_path,
+            Fast27bModel::Bonsai => config.bonsai_model_path = target_path,
             Fast27bModel::Saluki => config.saluki_model_path = target_path,
         }
+        // 草稿宽度跟随模型调优档位，避免切模型后沿用上一件的 k 值。
+        config.draft_tokens = model.draft_tokens();
         config
     }
 
-    /// 当前路径及显式保存的路径优先；未配置的模型仅探测本地文件，不下载、不改参数。
-    /// 例外：指向已清退 Swift PQ2 的旧路径（文件名含 swift 且文件已不存在）不再沿用，
-    /// 直接落到 Saluki 探测，避免用户在界面上切过去就报「未找到模型文件」。
+    /// 当前路径及显式保存的路径优先；旧版模型文件名会被自动替换为当前调优文件。
+    ///
+    /// 只有「已知旧文件名」才做替换：用户自己改过名的自定义路径原样保留，避免
+    /// 静默改写排障基线。探测只读文件系统，不下载、不改参数。
     pub fn model_path_for(&self, model: Fast27bModel) -> String {
-        // 当前选中的模型直接用保存路径；但若它还是已清退的 Swift 旧路径且文件已不在，
-        // 继续走下去做探测，否则旧配置（selected_model=swift）会一启动就报未找到文件。
-        let current_stale = model == self.selected_model()
-            && self.model_path.to_ascii_lowercase().contains("swift")
-            && !Path::new(&self.model_path).is_file();
-        if model == self.selected_model() && !current_stale {
-            return self.model_path.clone();
-        }
-        let saved = match model {
-            Fast27bModel::Heretic => &self.heretic_model_path,
-            Fast27bModel::Saluki => &self.saluki_model_path,
+        let active = model == self.selected_model();
+        let saved = if active {
+            self.model_path.as_str()
+        } else {
+            match model {
+                Fast27bModel::Bonsai => self.bonsai_model_path.as_str(),
+                Fast27bModel::Saluki => self.saluki_model_path.as_str(),
+            }
         };
-        let stale_swift = saved.to_ascii_lowercase().contains("swift") && !Path::new(saved).is_file();
-        if !saved.trim().is_empty() && !stale_swift {
-            return saved.clone();
+        let saved_path = Path::new(saved);
+        let saved_trimmed = saved.trim();
+        if !saved_trimmed.is_empty() && !model.is_legacy_path(saved_path) {
+            return saved_trimmed.to_string();
         }
+
+        // 旧文件名：优先找同目录/常见模型库里的当前文件，找不到再退回旧路径。
         let current = PathBuf::from(&self.model_path);
         let engine = PathBuf::from(&self.engine_path);
         let mut directories = Vec::new();
         if let Some(parent) = current.parent() {
             directories.push(parent.to_path_buf());
         }
+        if !saved_trimmed.is_empty() {
+            if let Some(parent) = saved_path.parent() {
+                directories.push(parent.to_path_buf());
+            }
+        }
         if let Some(root) = engine.parent().and_then(|parent| parent.parent()) {
+            directories.push(root.join("models"));
             directories.push(root.join("model"));
         }
         // 本机已有的模型库；仍优先使用当前配置旁的离线资源。
+        directories.push(PathBuf::from(r"D:\Projects\fast-llm\models"));
         directories.push(PathBuf::from(r"D:\Projects\fast-llm\model"));
-        // Saluki 成品放在 D:\LLM，不在 fast-llm 仓库内。
+        // 旧版离线资源目录（Bonsai 升级前放在这里）。
+        directories.push(PathBuf::from(
+            r"D:\Projects\Agent_LLM\app\resources\fast-llm\model",
+        ));
         directories.push(PathBuf::from(r"D:\LLM"));
+
+        let mut seen = Vec::new();
         let candidates: Vec<_> = directories
-            .iter()
+            .into_iter()
+            .filter(|directory| {
+                let key = directory.to_string_lossy().to_ascii_lowercase();
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            })
             .flat_map(|directory| {
                 model
                     .filenames()
@@ -623,12 +850,16 @@ impl Fast27bConfig {
                     .map(move |name| directory.join(name))
             })
             .collect();
+        if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+            return found.to_string_lossy().to_string();
+        }
+        if !saved_trimmed.is_empty() && saved_path.is_file() {
+            return saved_trimmed.to_string();
+        }
         candidates
-            .iter()
-            .find(|path| path.is_file())
-            .or_else(|| candidates.first())
+            .first()
             .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default()
+            .unwrap_or_else(|| saved_trimmed.to_string())
     }
 }
 
@@ -641,9 +872,9 @@ mod fast27b_config_tests {
         let config: Fast27bConfig = serde_json::from_str(
             r#"{"model_path":"custom/Heretic.ninfer","context_window":65536,"draft_tokens":2,"default_max_tokens":4096}"#,
         ).unwrap();
-        assert_eq!(config.selected_model(), Fast27bModel::Heretic);
+        assert_eq!(config.selected_model(), Fast27bModel::Bonsai);
         assert_eq!(
-            config.model_path_for(Fast27bModel::Heretic),
+            config.model_path_for(Fast27bModel::Bonsai),
             "custom/Heretic.ninfer"
         );
         assert_eq!(
@@ -655,24 +886,26 @@ mod fast27b_config_tests {
             (65536, 2, 4096)
         );
         assert_eq!(config.port, 8094);
-        assert_eq!(config.default_thinking_budget, 8192);
-        // 新字段默认补齐，旧 ctx/draft/output 不迁移、不覆写；启动前会给出预算冲突提示。
-        assert!(config.validate_thinking_budget().is_err());
+        assert_eq!(config.default_thinking_budget, 1024);
+        // 新字段默认补齐，旧 ctx/draft/output 不迁移、不覆写；1024 的默认预算小于 4096 输出上限。
+        assert!(config.validate_thinking_budget().is_ok());
     }
 
     #[test]
     fn thinking_budget_defaults_roundtrip_and_validation() {
         let config = Fast27bConfig::default();
-        assert_eq!(config.default_thinking_budget, 8192);
+        assert_eq!(config.default_thinking_budget, 1024);
+        assert_eq!(config.default_max_tokens, 10240);
+        assert_eq!(config.draft_tokens, 6);
         assert!(config.validate_thinking_budget().is_ok());
-        assert_eq!(Fast27bModel::Heretic.spec(), "dflash2");
+        assert_eq!(Fast27bModel::Bonsai.spec(), "dflash2");
         assert_eq!(Fast27bModel::Saluki.spec(), "mtp");
         for (output, budget, valid) in [
-            (32768, 8192, true),
-            (8192, 8192, false),
-            (4096, 8192, false),
+            (10240, 1024, true),
+            (1024, 1024, false),
+            (512, 1024, false),
             (1, 0, true),
-            (0, 8192, true),
+            (0, 1024, true),
             (0, 0, true),
         ] {
             assert_eq!(
@@ -695,7 +928,7 @@ mod fast27b_config_tests {
             model_path: "custom/renamed.ninfer".into(),
             selected_model: Some(Fast27bModel::Saluki),
             saluki_model_path: "custom/renamed.ninfer".into(),
-            heretic_model_path: "custom/heretic-old.ninfer".into(),
+            bonsai_model_path: "custom/bonsai-old.ninfer".into(),
             ..Fast27bConfig::default()
         };
         assert_eq!(config.selected_model(), Fast27bModel::Saluki);
@@ -704,8 +937,8 @@ mod fast27b_config_tests {
             "custom/renamed.ninfer"
         );
         assert_eq!(
-            config.model_path_for(Fast27bModel::Heretic),
-            "custom/heretic-old.ninfer"
+            config.model_path_for(Fast27bModel::Bonsai),
+            "custom/bonsai-old.ninfer"
         );
         let roundtrip: Fast27bConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -715,10 +948,10 @@ mod fast27b_config_tests {
     #[test]
     fn selecting_model_only_changes_model_selection_and_remembers_both_paths() {
         let original = Fast27bConfig {
-            model_path: "custom/heretic.ninfer".into(),
+            model_path: "custom/bonsai.ninfer".into(),
             saluki_model_path: "custom/saluki-renamed.ninfer".into(),
             context_window: 65536,
-            draft_tokens: 2,
+            draft_tokens: 6,
             default_max_tokens: 12000,
             default_thinking_budget: 4096,
             port: 9104,
@@ -730,14 +963,16 @@ mod fast27b_config_tests {
         let switched = original.with_selected_model(Fast27bModel::Saluki);
         assert_eq!(switched.selected_model(), Fast27bModel::Saluki);
         assert_eq!(switched.model_path, "custom/saluki-renamed.ninfer");
-        assert_eq!(switched.heretic_model_path, original.model_path);
+        assert_eq!(switched.bonsai_model_path, original.model_path);
         assert_eq!(switched.saluki_model_path, switched.model_path);
-        let mut restored = switched.with_selected_model(Fast27bModel::Heretic);
+        assert_eq!(switched.draft_tokens, Fast27bModel::Saluki.draft_tokens());
+        let mut restored = switched.with_selected_model(Fast27bModel::Bonsai);
         assert_eq!(restored.model_path, original.model_path);
         assert_eq!(restored.saluki_model_path, "custom/saluki-renamed.ninfer");
         // 将预期的选择/路径字段归回原值，所有其余保存参数必须逐字段完全相同。
         restored.selected_model = original.selected_model;
-        restored.heretic_model_path = original.heretic_model_path.clone();
+        restored.bonsai_model_path = original.bonsai_model_path.clone();
+        restored.draft_tokens = original.draft_tokens;
         assert_eq!(
             serde_json::to_value(&restored).unwrap(),
             serde_json::to_value(&original).unwrap()
@@ -756,6 +991,26 @@ mod fast27b_config_tests {
             ..Fast27bConfig::default()
         };
         assert_eq!(config.selected_model(), Fast27bModel::Saluki);
+    }
+
+    #[test]
+    fn legacy_heretic_config_loads_into_bonsai_slot() {
+        // 旧 config.json 里的 "selected_model":"heretic" 与 "heretic_model_path" 必须能读进来：
+        // 前者落到 Bonsai 变体，后者落到 bonsai_model_path 字段。
+        let config: Fast27bConfig = serde_json::from_str(
+            r#"{"selected_model":"heretic","heretic_model_path":"models/Ternary-Bonsai-2-27B-Heretic.ninfer","context_window":65536}"#,
+        )
+        .unwrap();
+        assert_eq!(config.selected_model(), Fast27bModel::Bonsai);
+        assert_eq!(
+            config.bonsai_model_path,
+            "models/Ternary-Bonsai-2-27B-Heretic.ninfer"
+        );
+        // 写回时使用新字段名，不再产出 heretic_model_path。
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("bonsai_model_path"));
+        assert!(!json.contains("heretic_model_path"));
+        assert!(json.contains("\"bonsai\""));
     }
 
     #[test]
@@ -783,8 +1038,8 @@ mod fast27b_config_tests {
         // 用户的旧配置里 saluki 槽位还是已清退的 Swift 路径（文件不存在）：
         // 切到 Saluki 时不能把该路径原样交出去，否则启动校验报「未找到模型文件」。
         let config = Fast27bConfig {
-            selected_model: Some(Fast27bModel::Heretic),
-            model_path: "custom/heretic.ninfer".into(),
+            selected_model: Some(Fast27bModel::Bonsai),
+            model_path: "custom/bonsai.ninfer".into(),
             saluki_model_path: r"D:\Projects\fast-llm\model\bonsai2_27b_swift_pq2.v3.ninfer".into(),
             ..Fast27bConfig::default()
         };
@@ -794,6 +1049,45 @@ mod fast27b_config_tests {
             resolved.to_ascii_lowercase().contains("saluki"),
             "应探测到 Saluki 文件，实际为 {resolved}"
         );
+    }
+}
+
+#[cfg(test)]
+mod strata_config_tests {
+    use super::*;
+
+    #[test]
+    fn switching_s_and_m_keeps_both_run_configs() {
+        let original = StrataConfig {
+            config_path: r"C:\launch\gyro-m-abl-100k.json".into(),
+            selected_model: Some(StrataModel::M),
+            m_config_path: r"C:\launch\gyro-m-abl-100k.json".into(),
+            s_config_path: r"C:\launch\gyro-s-100k.json".into(),
+            port: 8082,
+            ..StrataConfig::default()
+        };
+        let switched = original.with_selected_model(StrataModel::S);
+        assert_eq!(switched.selected_model(), StrataModel::S);
+        assert_eq!(switched.config_path, original.s_config_path);
+        assert_eq!(switched.m_config_path, original.m_config_path);
+        let restored = switched.with_selected_model(StrataModel::M);
+        assert_eq!(restored.selected_model(), StrataModel::M);
+        assert_eq!(restored.config_path, original.config_path);
+        assert_eq!(restored.s_config_path, original.s_config_path);
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_strata_config_infers_model_from_run_config_name() {
+        let config: StrataConfig =
+            serde_json::from_str(r#"{"config_path":"C:\\launch\\gyro-s-100k.json"}"#).unwrap();
+        assert_eq!(config.selected_model(), StrataModel::S);
+        let config: StrataConfig =
+            serde_json::from_str(r#"{"config_path":"C:\\launch\\gyro-m-abl-100k.json"}"#).unwrap();
+        assert_eq!(config.selected_model(), StrataModel::M);
     }
 }
 

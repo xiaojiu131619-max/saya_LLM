@@ -125,10 +125,12 @@ export default function StrataPerformance({
   metrics,
   desktop,
   compact = false,
+  modelLabel = 'Gyro-M',
 }: {
   metrics: StrataMetricsSnapshot | null;
   desktop: boolean;
   compact?: boolean;
+  modelLabel?: string;
 }) {
   const [range, setRange] = useState<StrataTimeRange>(compact ? 1 : 24);
   const [openedAt] = useState(() => Date.now());
@@ -154,7 +156,7 @@ export default function StrataPerformance({
             Strata · 性能监测
           </h2>
           <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">
-            {desktop ? '对话、DSH 与外部 API 的真实运行数据' : '桌面端启动引擎后开始采集'}
+            {desktop ? '对话与外部 API 的真实运行数据' : '桌面端启动引擎后开始采集'}
             {(metrics?.active_requests ?? 0) > 0 && (
               <span className="ml-2 text-[var(--accent)]">{metrics?.active_requests} 个请求进行中</span>
             )}
@@ -195,7 +197,7 @@ export default function StrataPerformance({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="flex items-center gap-1.5 text-[length:var(--font-caption)] font-semibold text-primary-custom">
               <Layers3 className="h-3.5 w-3.5 text-[var(--accent)]" />
-              Gyro-M
+              {modelLabel}
             </h3>
             <span className="fast27b-spec-badge">MoE</span>
           </div>

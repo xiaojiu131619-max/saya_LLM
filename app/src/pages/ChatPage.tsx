@@ -291,9 +291,18 @@ export default function ChatPage() {
   const historyKey = historyKeyOf(scope);
   const isAgentScope = scope === 'pi';
 
+  // 画布「交给 Pi」预填：入口把提示词放进 piPromptDraft，这里消费到 Pi 工作区输入框。
+  // 挂载时与草稿变化时都会消费；消费完立即清空，避免二次粘贴。
+  const piPromptDraft = state.piPromptDraft;
+  useEffect(() => {
+    if (!isAgentScope || !piPromptDraft) return;
+    setInputText(piPromptDraft);
+    dispatch({ type: 'SET_PI_PROMPT_DRAFT', payload: null });
+  }, [isAgentScope, piPromptDraft, dispatch]);
+
   // ---- 对话后端：主模型 / NiNfer 引擎 / 智慧模型 ----
   const chatEngine = state.chatEngine;
-  // 引擎状态：全应用共享的单例轮询，与 Agent 页 WebUI 面板的后端选择互不影响。
+  // 引擎状态：全应用共享的单例轮询，与设置 → 测试页的 WebUI 后端选择互不影响。
   const engineStatuses = useEngineStatuses();
   const strataStatus = useStrataStatus();
   const engineService =
@@ -420,6 +429,7 @@ export default function ChatPage() {
     serverRunning: state.serverRunning,
     modelReady: Boolean(activeModel?.filePath),
     piReady: Boolean(piConfig?.cliPath.trim()),
+    piAutoStart: Boolean(piConfig?.autoStart),
     piRunning: Boolean(piStatus?.running),
     piSessionReady,
     piStarting:
@@ -1908,6 +1918,14 @@ export default function ChatPage() {
         activeModel={sidebarModel}
         canChat={mainCanChat}
         scope={scope}
+        engineIdentity={engineTarget
+          ? {
+              label: engineTarget.label,
+              displayName: engineTarget.displayName,
+              serviceable: engineTarget.serviceable,
+            }
+          : null}
+        onOpenEnginePage={() => dispatch({ type: 'SET_VIEW', payload: state.chatEngine === 'strata' ? 'strata' : 'fast27b' })}
         onSelectScope={(next) => dispatch({ type: 'SET_CHAT_SCOPE', payload: next })}
         collapsed={sidebarCollapsed}
         collapseLocked={compactSidebar}
@@ -1959,7 +1977,7 @@ export default function ChatPage() {
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
               <div className="eyebrow truncate">{scopeProfile.eyebrow(scopeHeaderRuntime)}</div>
-              <h1 className="mt-0.5 line-clamp-2 break-words text-[length:var(--font-title)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h1>
+              <h1 className="heading-brand mt-0.5 line-clamp-2 break-words text-[length:var(--font-page-title)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h1>
               <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                 <span className="truncate">{scopeProfile.subtitle(scopeHeaderRuntime)}</span>
                 <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/30" />
@@ -1973,20 +1991,22 @@ export default function ChatPage() {
           <div className="flex flex-shrink-0 items-center gap-1.5">
             {/* 主对话当前用的后端：主模型 / NiNfer / Strata，三者在显存上互斥，
                 由 useAutoChatEngine 自动选（谁在跑用谁）。
-                **只读徽章，不做成可点的下拉**——手动切只能切到没在跑的那个，
-                必然报错；要换引擎到 Agent 设置面板里启那个即可，这里会跟上。
-                Pi 工作区不展示这枚徽章：Pi 走的是独立任务流，不在引擎轴上。 */}
+                **不做成可点的下拉**——手动切只能切到没在跑的那个，必然报错；
+                但徽章可以点：跳到当前后端的管理页（引擎页 / 模型页）去启停，
+                这里会自动跟上。Pi 工作区不展示这枚徽章：Pi 走的是独立任务流。 */}
             {scope === 'main' && (
-              <span
-                className="mr-1 hidden flex-shrink-0 items-center gap-1.5 text-[length:var(--font-caption)] text-[var(--text-tertiary)] sm:inline-flex"
-                title={`当前对话后端：${backendLabel}（三个引擎显存互斥，自动选在跑的那个）`}
+              <button
+                type="button"
+                onClick={() => dispatch({ type: 'SET_VIEW', payload: chatEngine === 'strata' ? 'strata' : chatEngine === 'fast27b' ? 'fast27b' : 'home' })}
+                className="mr-1 hidden flex-shrink-0 items-center gap-1.5 rounded-[var(--radius-field)] text-[length:var(--font-caption)] text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] sm:inline-flex"
+                title={`当前对话后端：${backendLabel}（三个引擎显存互斥，自动选在跑的那个）· 点击前往${chatEngine === 'main' ? '模型' : '引擎'}页`}
               >
                 <span>后端</span>
                 <span className="font-medium text-[var(--text-primary)]">{backendLabel}</span>
                 <span className="rounded-[var(--radius-sm)] bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--accent)]">
                   自动
                 </span>
-              </span>
+              </button>
             )}
             {/* 生成中不再在页头重复一遍动画：动画只留在消息内（正文下方那行）。 */}
             {!isGenerating && (

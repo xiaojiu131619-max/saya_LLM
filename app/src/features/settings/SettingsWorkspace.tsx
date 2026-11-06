@@ -1,5 +1,5 @@
 ﻿import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, Database, Download, Settings, Sparkles, Wrench } from 'lucide-react';
+import { ArrowLeft, BarChart3, Database, Download, FlaskConical, Settings, Sparkles, Wrench } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useApp } from '@/context/AppContext';
 import type { ViewType } from '@/types';
@@ -9,6 +9,7 @@ import KernelUpdatePage from '@/pages/KernelUpdatePage';
 import UsagePage from '@/pages/UsagePage';
 import DataManagementPage from '@/pages/DataManagementPage';
 import SkillsPage from '@/pages/SkillsPage';
+import AgentWebUiPanel from '@/pages/agent/AgentWebUiPanel';
 
 // 「模型主题」入口已移除：模型头像与主题色改在模型加载参数界面点图标直接改，
 // 不必为了调一个颜色跳到设置里（见 ModelLoadView 的头像弹窗）。
@@ -17,13 +18,14 @@ const settingsTabs: Array<{ id: ViewType; label: string; icon: ComponentType<{ c
   { id: 'kernel', label: '核心更新', icon: Download },
   { id: 'usage', label: '使用统计', icon: BarChart3 },
   { id: 'tools', label: '工具', icon: Wrench },
+  { id: 'webui', label: 'WebUI 测试', icon: FlaskConical },
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'data', label: '数据管理', icon: Database },
 ];
 
 export default function SettingsWorkspace() {
   const { state, dispatch } = useApp();
-  const activeView = ['tools', 'kernel', 'usage', 'data', 'skills'].includes(state.currentView)
+  const activeView = ['tools', 'kernel', 'usage', 'data', 'skills', 'webui'].includes(state.currentView)
     ? state.currentView
     : 'settings';
   const returnToModel = () => {
@@ -43,6 +45,8 @@ export default function SettingsWorkspace() {
     switch (activeView) {
       case 'tools':
         return <ToolsPage />;
+      case 'webui':
+        return <AgentWebUiPanel />;
       case 'kernel':
         return <KernelUpdatePage />;
       case 'usage':

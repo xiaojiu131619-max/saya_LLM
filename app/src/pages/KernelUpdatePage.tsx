@@ -1,803 +1,493 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  RefreshCw,
-  Download,
-  Check,
   AlertTriangle,
+  Boxes,
+  BrainCircuit,
+  CheckCircle2,
   Cpu,
-  Package,
-  Globe,
-  Info,
-  Loader2,
-  Square,
-  HardDrive,
-  Stethoscope,
-  ChevronRight,
-  Wrench,
-  FolderOpen,
-  Save,
-  RotateCcw,
+  Download,
   Film,
+  Loader2,
+  RefreshCw,
+  Square,
+  Stethoscope,
 } from 'lucide-react';
-import { useApp } from '@/context/AppContext';
+
 import PageHeader from '@/components/PageHeader';
-import { SettingRow, SettingSection } from '@/components/SettingSection';
+import { SettingSection } from '@/components/SettingSection';
 import EnvCheckDialog from '@/features/workspace/EnvCheckDialog';
-import FfmpegInstallButton from '@/components/FfmpegInstallButton';
 import {
-  cancelKernelUpdate,
+  canvasGetStatus,
   checkDesktopEngine,
-  checkVideoRuntime,
-  getDesktopServerStatus,
-  getKernelOverridePath,
   isDesktopRuntime,
-  listenDesktopEvent,
-  listInstalledKernels,
-  listRecentLlamaReleases,
-  pickKernelExe,
-  setKernelOverridePath,
-  setSelectedKernel as saveSelectedKernel,
-  updateLlamaKernel,
+  onUpdateCenterComponent,
+  onUpdateCenterProgress,
+  updateCenterCancel,
+  updateCenterCheck,
+  updateCenterInstall,
+  type CanvasStatus,
+  type ComponentUpdate,
   type DesktopEngineInfo,
-  type InstalledKernelInfo,
-  type LlamaReleaseInfo,
-  type VideoRuntimeInfo,
+  type UpdateComponentId,
 } from '@/lib/desktop';
 
-// 内核下载源偏好：mirror=内置 GitHub 镜像加速，direct=直连 GitHub 官方。
-type KernelDownloadSource = 'mirror' | 'direct';
-const KERNEL_SOURCE_STORAGE_KEY = 'agent-llm-kernel-download-source';
-/** 核心更新只展示最近 5 个版本，减少列表高度与无效下载。 */
-const KERNEL_RELEASE_COUNT = 5;
+/**
+ * 核心更新。
+ *
+ * 只有两列：
+ * - 左：环境检测（六个组件的当前状态）+ 内核状态。**不显示安装路径**——
+ *   路径属于数据管理，放在更新页只会让人以为要手动维护。
+ * - 右：更新列表，只提供最新发行版。装哪个架构的包由后端按本机显卡判定，
+ *   界面把判定结论写出来（「已按 RTX 3080 Ti 选择 cuda12」），不提供版本选择。
+ *
+ * 画布不在更新列表里：它随应用一起打包分发，不单独在线更新。
+ */
 
-function loadKernelDownloadSource(): KernelDownloadSource {
-  if (typeof window === 'undefined') return 'mirror';
-  const stored = window.localStorage.getItem(KERNEL_SOURCE_STORAGE_KEY);
-  if (stored === 'direct' || stored === 'mirror') {
-    return stored;
-  }
-  return 'mirror';
-}
-
-function kernelSourceDescription(source: KernelDownloadSource) {
-  if (source === 'direct') return '直连 GitHub 官方发布包，适合 GitHub 访问稳定的网络。';
-  return '使用内置 GitHub 镜像加速源自动尝试，失败后回退 GitHub 官方。';
-}
-
-// 后端标签：llama.cpp 各后端在 Windows 上的实际包名对应关系。
-// ROCm/HIP 需要单独标注并提示适用范围——它只覆盖 RDNA2/3 的一部分卡
-// （RX 6000/7000/9000 系、Radeon PRO W6000/W7000、Instinct），普通 Radeon
-// 与核显必须用 Vulkan；HIP-capable 的卡在列表里会给出「支持 HIP」标记。
-const backendLabelMap: Record<string, string> = {
-  CUDA: 'CUDA',
-  Vulkan: 'Vulkan',
-  ROCm: 'ROCm / HIP',
-  CPU: 'CPU',
-  OpenVINO: 'OpenVINO',
-  OpenCL: 'OpenCL',
-  SYCL: 'SYCL',
+const ICONS: Record<UpdateComponentId, typeof Cpu> = {
+  pi: BrainCircuit,
+  llama: Cpu,
+  strata: Boxes,
+  ninfer: Cpu,
+  ffmpeg: Film,
 };
 
-function formatBytes(bytes: number) {
-  if (!bytes) return '未知大小';
-  const mb = bytes / 1024 / 1024;
-  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+/** 列表固定顺序：逐项结果先到后到都不影响行的位置。 */
+const UPDATE_ORDER: UpdateComponentId[] = ['pi', 'llama', 'strata', 'ninfer', 'ffmpeg'];
+
+/** 把逐项到达的检查结果合并进列表（同 id 覆盖）。 */
+function mergeComponent(list: ComponentUpdate[], update: ComponentUpdate) {
+  const next = list.filter((item) => item.id !== update.id);
+  next.push(update);
+  return next.sort(
+    (a, b) => UPDATE_ORDER.indexOf(a.id) - UPDATE_ORDER.indexOf(b.id),
+  );
 }
 
-function pickMatchedAsset(info: LlamaReleaseInfo) {
-  return info.assets.find((asset) => asset.matches_host) ?? info.assets[0] ?? null;
-}
-
-function releaseMatchDescription(info: LlamaReleaseInfo) {
-  const asset = pickMatchedAsset(info);
-  if (!asset) return '没有适合本机的 Windows x64 发布包';
-  const backend = backendLabelMap[asset.backend] ?? asset.backend;
-  return `${backend} · ${formatBytes(asset.size)} · ${asset.matches_host ? '已匹配本机' : '手动确认'}`;
-}
-
-/** ROCm/HIP 包的适用性说明（非 ROCm 包返回 null）。
- *  有 AMD 卡时按支持级别给出「支持 / 未验证 / 不支持」三种说明，
- *  没有 AMD 卡（NVIDIA / Intel 机器）提示该包与本机无关。 */
-function rocmApplicabilityNote(info: LlamaReleaseInfo): string | null {
-  const asset = pickMatchedAsset(info);
-  if (!asset || asset.backend !== 'ROCm') return null;
-  if (info.hip_gpu === null) return 'ROCm / HIP 包仅支持部分 AMD 显卡，与本机（非 AMD）无关';
-  if (info.hip_capable) return `本机 ${info.hip_gpu} 支持 HIP：可下载尝试，性能通常优于 Vulkan`;
-  return `本机 ${info.hip_gpu} 未在 ROCm 支持列表内，可能无法使用`;
-}
-
-// 从进度消息中提取下载百分比，用于进度条；非下载阶段返回 null。
-function parseProgressPercent(message: string | null) {
+function parsePercent(message: string | null): number | null {
   if (!message) return null;
-  const match = message.match(/下载中:\s*([\d.]+)%/);
-  return match ? Number(match[1]) : null;
+  const match = message.match(/(\d{1,3})%/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : null;
+}
+
+function statusTone(ok: boolean, pending: boolean) {
+  if (pending) return 'bg-[var(--state-warning)]';
+  return ok ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]';
+}
+
+function VersionText({ value }: { value: string | null }) {
+  if (!value) {
+    return <span className="text-[length:var(--font-caption)] text-[var(--text-tertiary)]">未安装</span>;
+  }
+  return (
+    <span className="mono-font max-w-[14rem] truncate text-[length:var(--font-caption)] text-[var(--text-secondary)]" title={value}>
+      {value}
+    </span>
+  );
+}
+
+/** 版本展示：日期型（ffmpeg 滚动构建）与构建号（b12091）原样显示，只有数字版本加 v。 */
+function formatVersion(value: string | null): string {
+  if (!value) return '—';
+  const trimmed = value.trim();
+  if (!trimmed) return '—';
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed;
+  const bare = trimmed.replace(/^v(?=\d)/i, '');
+  if (/^\d/.test(bare)) return `v${bare}`;
+  return bare;
 }
 
 export default function KernelUpdatePage() {
-  const { state, dispatch } = useApp();
-  const autoCheckedRef = useRef(false);
-  const updatingRef = useRef(false);
-  const [engineInfo, setEngineInfo] = useState<DesktopEngineInfo | null>(null);
-  const [releaseList, setReleaseList] = useState<LlamaReleaseInfo[]>([]);
-  const [installedKernels, setInstalledKernels] = useState<InstalledKernelInfo[]>([]);
-  const [selectedKernelName, setSelectedKernelName] = useState('');
-  // 正在更新/下载的版本号；null 表示空闲。
-  const [updatingVersion, setUpdatingVersion] = useState<string | null>(null);
-  const [currentKernelMessage, setCurrentKernelMessage] = useState<string | null>(null);
-  const [engineMessage, setEngineMessage] = useState<string | null>(null);
-  const [listMessage, setListMessage] = useState<string | null>(null);
-  const [kernelDownloadSource, setKernelDownloadSource] = useState<KernelDownloadSource>(loadKernelDownloadSource);
-  // 环境检测：手动打开检测弹窗（从「服务控制」并入核心更新）。
-  const [envCheckOpen, setEnvCheckOpen] = useState(false);
-  // 自编译核心：已保存路径 + 输入框草稿 + 操作反馈。
-  const [overridePath, setOverridePath] = useState<string | null>(null);
-  const [overrideInput, setOverrideInput] = useState('');
-  const [overrideMessage, setOverrideMessage] = useState<string | null>(null);
-  const [overrideSaving, setOverrideSaving] = useState(false);
-  // ffmpeg / ffprobe 运行时状态（视频与部分音频格式的可选组件）。
-  const [videoRuntime, setVideoRuntime] = useState<VideoRuntimeInfo | null>(null);
+  const [items, setItems] = useState<ComponentUpdate[]>([]);
+  const [canvas, setCanvas] = useState<CanvasStatus | null>(null);
+  const [engine, setEngine] = useState<DesktopEngineInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  // 每个组件各自的状态：一个在更新不该把别的按钮一起锁死。
+  const [busy, setBusy] = useState<Partial<Record<UpdateComponentId, boolean>>>({});
+  const [progress, setProgress] = useState<Partial<Record<UpdateComponentId, string | null>>>({});
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [envOpen, setEnvOpen] = useState(false);
+  const busyRef = useRef<Set<UpdateComponentId>>(new Set());
 
-  const updating = updatingVersion !== null;
-  const progressPercent = parseProgressPercent(engineMessage);
-  const latestRelease = releaseList[0] ?? null;
-
-  // 版本对比：当前内核与最新 release 都已知时给出直观结论。
-  // 内核存在但 --version 解析不出 bXXXX 版本号（如自编译构建）时，
-  // 显示「版本未知」而不是误报「未安装内核」。
-  const versionState = (() => {
-    if (!engineInfo?.binary_exists) return 'missing' as const;
-    const latest = latestRelease?.version ?? null;
-    if (!latest) return 'unknown' as const;
-    const current = engineInfo.llama_server_version;
-    if (!current) return 'unknown-version' as const;
-    return current === latest ? 'up-to-date' as const : 'outdated' as const;
-  })();
-
-  const handleKernelSourceChange = (source: KernelDownloadSource) => {
-    setKernelDownloadSource(source);
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(KERNEL_SOURCE_STORAGE_KEY, source);
-    }
-  };
-
-  const refreshEngine = async () => {
+  // 本机状态（画布 / 内核）是本地调用，不该被网络检查拖住：
+  // 早先三个请求用 Promise.all 绑在一起，GitHub 慢的时候整页空白。
+  const refreshLocal = useCallback(async () => {
     try {
-      const info = await checkDesktopEngine();
-      setEngineInfo(info);
-      if (info?.binary_exists) {
-        const version = info.llama_server_version ? `当前版本：${info.llama_server_version}` : '已检测到 llama.cpp 内核';
-        const runtime = info.runtime_backend
-          ? ` · 运行时 ${info.runtime_backend}${info.runtime_devices?.length ? `（${info.runtime_devices.join(' / ')}）` : ''}`
-          : '';
-        const host = info.host_backend
-          ? ` · 本机 ${info.host_backend}${info.gpu_name ? ` / ${info.gpu_name}` : ''}`
-          : '';
-        setCurrentKernelMessage(`${version}${runtime}${host}`);
-      } else {
-        setCurrentKernelMessage('未安装 llama.cpp 内核，请在下方选择版本下载。');
-      }
-    } catch (error) {
-      setCurrentKernelMessage(`内核检查失败：${String(error)}`);
-    }
-  };
-
-  const refreshInstalledKernels = async () => {
-    try {
-      const kernels = await listInstalledKernels();
-      setInstalledKernels(kernels);
-      setSelectedKernelName(kernels.find((kernel) => kernel.is_selected)?.name ?? '');
-    } catch {
-      // 读取不到目录列表时保留上一份快照，不影响更新流程。
-    }
-  };
-
-  const refreshVideoRuntime = async () => {
-    setVideoRuntime(await checkVideoRuntime().catch(() => null));
-  };
-
-  /** 切换本机核心目录；服务运行中会提示重新加载模型后生效。 */
-  const handleSelectKernel = async (name: string) => {
-    const previous = selectedKernelName;
-    setSelectedKernelName(name);
-    try {
-      await saveSelectedKernel(name || null);
-      await Promise.all([refreshInstalledKernels(), refreshEngine()]);
-      setEngineMessage(
-        overridePath
-          ? '已保存本机核心选择；当前仍使用自编译核心，清除自编译核心后生效。'
-          : name
-            ? '已切换本机核心，重新加载模型后生效。'
-            : '已恢复自动选择最新本机核心，重新加载模型后生效。',
-      );
-    } catch (error) {
-      setSelectedKernelName(previous);
-      setEngineMessage(`切换核心失败：${String(error)}`);
-    }
-  };
-
-  const handleCheckEngine = async () => {
-    if (!isDesktopRuntime()) {
-      setCurrentKernelMessage('请在 Tauri 桌面版中检查 llama.cpp 内核。');
-      return;
-    }
-    setCurrentKernelMessage('正在检查当前 llama.cpp 内核...');
-    await refreshEngine();
-  };
-
-  const handleRefreshReleases = async () => {
-    if (!isDesktopRuntime()) {
-      setListMessage('请在 Tauri 桌面版中检查更新。');
-      return;
-    }
-    setListMessage('正在读取 ggml-org/llama.cpp 最近发布列表...');
-    try {
-      const releases = await listRecentLlamaReleases(KERNEL_RELEASE_COUNT);
-      setReleaseList(releases);
-      setListMessage(releases.length > 0 ? `已获取 ${releases.length} 个版本。` : '未发现可用 release。');
-    } catch (error) {
-      setListMessage(`读取发布列表失败：${String(error)}`);
-    }
-  };
-
-  // 从指定 release 下载并安装：自动匹配本机发布包，下载中可随时取消。
-  const handleUpdateFromRelease = async (release: LlamaReleaseInfo) => {
-    if (updatingRef.current || updatingVersion !== null) return;
-    const asset = pickMatchedAsset(release);
-    if (!asset) {
-      setEngineMessage(`${release.version} 没有适合本机的发布包，无法更新。`);
-      return;
-    }
-    // 已是当前版本就不重复下载；版本未知（自编译）仍允许覆盖安装。
-    if (engineInfo?.binary_exists && engineInfo.llama_server_version === release.version) {
-      setEngineMessage(`当前已经是 ${release.version}，无需重复安装。`);
-      return;
-    }
-    updatingRef.current = true;
-    setUpdatingVersion(release.version);
-    setEngineMessage(
-      state.serverRunning
-        ? `更新会先自动停止 llama-server，然后安装 ${release.version} · ${asset.name}...`
-        : `正在更新到 ${release.version} · ${asset.name}...`,
-    );
-    // 事件监听失败不能把更新流程卡死：退化成没有进度文本，仍然继续下载。
-    const unlisten = await listenDesktopEvent<{ message: string }>('updater:progress', (payload) => {
-      setEngineMessage(payload.message);
-    }).catch(() => () => {});
-    try {
-      const useMirror = kernelDownloadSource === 'mirror';
-      const result = await updateLlamaKernel(asset.browser_download_url, release.version, useMirror);
-      setEngineMessage(result || `llama.cpp 内核已更新到 ${release.version}。`);
-      await Promise.allSettled([refreshEngine(), refreshInstalledKernels()]);
-    } catch (error) {
-      const text = String(error);
-      setEngineMessage(text.includes('取消') ? '更新已取消，本机核心保持不变。' : `更新失败：${text}`);
-      await Promise.allSettled([refreshEngine(), refreshInstalledKernels()]);
-    } finally {
-      unlisten();
-      updatingRef.current = false;
-      // 后端在下载前会停掉 llama-server；这里以真实状态为准，避免界面继续显示“运行中”。
-      try {
-        const serverRunning = await getDesktopServerStatus();
-        dispatch({ type: 'SET_SERVER_RUNNING', payload: serverRunning });
-        if (!serverRunning && state.activeModelId) {
-          dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: state.activeModelId, status: 'standby' } });
-        }
-      } catch {
-        // 状态读取失败时保持原值，下一次页面轮询会纠正。
-      }
-      setUpdatingVersion(null);
-    }
-  };
-
-  // 请求取消当前下载；Rust 端会在下一个数据块检查点中止并清理临时文件。
-  const handleCancelUpdate = async () => {
-    try {
-      await cancelKernelUpdate();
-      setEngineMessage('正在取消下载...');
-    } catch (error) {
-      setEngineMessage(`取消失败：${String(error)}`);
-    }
-  };
-
-  const handleBrowseOverride = async () => {
-    const picked = await pickKernelExe();
-    if (picked) setOverrideInput(picked);
-  };
-
-  // 保存自编译核心路径；输入为空等价于恢复内置核心。后端会校验文件存在与可执行文件名。
-  const handleSaveOverride = async () => {
-    const trimmed = overrideInput.trim();
-    setOverrideSaving(true);
-    try {
-      await setKernelOverridePath(trimmed || null);
-      setOverridePath(trimmed || null);
-      setOverrideMessage(trimmed ? '已保存。重新加载模型后生效。' : '已清除，恢复使用内置核心。');
-      await refreshEngine();
-    } catch (error) {
-      setOverrideMessage(`保存失败：${String(error)}`);
-    } finally {
-      setOverrideSaving(false);
-    }
-  };
-
-  const handleClearOverride = async () => {
-    setOverrideSaving(true);
-    try {
-      await setKernelOverridePath(null);
-      setOverridePath(null);
-      setOverrideInput('');
-      setOverrideMessage('已清除，恢复使用内置版本化核心。');
-      await refreshEngine();
-    } catch (error) {
-      setOverrideMessage(`清除失败：${String(error)}`);
-    } finally {
-      setOverrideSaving(false);
-    }
-  };
-
-  // 进入页面自动检查：当前内核 + 发布列表 + 本机已安装核心一次到位。
-  useEffect(() => {
-    if (autoCheckedRef.current || typeof window === 'undefined') return;
-    autoCheckedRef.current = true;
-
-    void (async () => {
-      if (!isDesktopRuntime()) return;
-      setCurrentKernelMessage('正在自动检查当前 llama.cpp 内核...');
-      setListMessage('正在自动读取最近发布列表...');
-      // 当前内核、已安装目录、ffmpeg 与发布列表互不依赖：并行读，页面一次进入可用状态。
-      const releasesTask = (async () => {
-        try {
-          const releases = await listRecentLlamaReleases(KERNEL_RELEASE_COUNT);
-          setReleaseList(releases);
-          setListMessage(releases.length > 0 ? `已获取 ${releases.length} 个版本。` : '未发现可用 release。');
-        } catch (error) {
-          setListMessage(`自动读取发布列表失败：${String(error)}`);
-        }
-      })();
-      await Promise.allSettled([
-        refreshEngine(),
-        refreshInstalledKernels(),
-        refreshVideoRuntime(),
-        releasesTask,
+      const [canvasStatus, engineInfo] = await Promise.all([
+        canvasGetStatus(),
+        checkDesktopEngine(),
       ]);
-    })();
-  }, []);
-
-  // 已保存的自编译核心路径一次到位（非桌面运行时返回 null，同样落到空输入框）。
-  // 内联 async IIFE（与上方加载安装内核的 effect 同风格）：setState 都在 await 之后，
-  // 不构成 effect 内的同步 setState。
-  useEffect(() => {
-    void (async () => {
-      const saved = await getKernelOverridePath();
-      setOverridePath(saved);
-      setOverrideInput(saved ?? '');
-    })();
-  }, []);
-
-  const versionBadge = (() => {
-    switch (versionState) {
-      case 'up-to-date':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-success-border)] bg-[var(--state-success-bg)] px-2 py-0.5 text-xs text-[var(--state-success)]">
-            <Check className="h-3 w-3" /> 已是最新
-          </span>
-        );
-      case 'outdated':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 py-0.5 text-xs text-[var(--state-warning)]">
-            <AlertTriangle className="h-3 w-3" /> 有可用更新
-          </span>
-        );
-      case 'missing':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-2 py-0.5 text-xs text-[var(--state-danger)]">
-            <AlertTriangle className="h-3 w-3" /> 未安装内核
-          </span>
-        );
-      case 'unknown-version':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-secondary-custom">
-            <Info className="h-3 w-3" /> 已安装 · 版本未知
-          </span>
-        );
-      default:
-        return null;
+      setCanvas(canvasStatus);
+      setEngine(engineInfo);
+    } catch {
+      // 本地状态读不到不影响更新列表。
     }
-  })();
+  }, []);
+
+  const refreshUpdates = useCallback(async () => {
+    setChecking(true);
+    setError(null);
+    // 清空旧结果：逐项结果会先到，最后的整体返回值再兜底覆盖。
+    setItems([]);
+    try {
+      setItems(await updateCenterCheck());
+    } catch (cause) {
+      setError(String(cause instanceof Error ? cause.message : cause));
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([refreshLocal(), refreshUpdates()]);
+  }, [refreshLocal, refreshUpdates]);
+
+  useEffect(() => {
+    // 放到下一个 tick：refresh 会同步置 checking，直接在 effect 体内调用会触发
+    // react-hooks/set-state-in-effect（级联渲染）。
+    const timer = window.setTimeout(() => void refresh(), 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void onUpdateCenterProgress((payload) => {
+      if (disposed) return;
+      const id = payload.component as UpdateComponentId;
+      if (!id) return;
+      setProgress((prev) => ({ ...prev, [id]: payload.message }));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 后端并行检查、逐项回传：哪个组件先返回就先显示，不必等整轮结束。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void onUpdateCenterComponent((payload) => {
+      if (disposed) return;
+      setItems((prev) => mergeComponent(prev, payload));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleUpdate = useCallback(
+    async (id: UpdateComponentId) => {
+      if (busyRef.current.has(id)) return;
+      busyRef.current.add(id);
+      setBusy((prev) => ({ ...prev, [id]: true }));
+      setProgress((prev) => ({ ...prev, [id]: null }));
+      setMessage(null);
+      setError(null);
+      try {
+        const result = await updateCenterInstall(id);
+        // 只改自己这一行：不重跑整轮网络检查，也不让别的行闪一下。
+        setItems((prev) =>
+          prev.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  installed: true,
+                  installedVersion: item.latestVersion ?? item.installedVersion,
+                  updateAvailable: false,
+                  message: null,
+                }
+              : item,
+          ),
+        );
+        setMessage(result || '更新完成。');
+      } catch (cause) {
+        const text = String(cause instanceof Error ? cause.message : cause);
+        setItems((prev) =>
+          prev.map((item) => (item.id === id ? { ...item, message: text } : item)),
+        );
+        setError(text);
+      } finally {
+        busyRef.current.delete(id);
+        setBusy((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setProgress((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const handleCancel = useCallback(async () => {
+    try {
+      await updateCenterCancel();
+      // 取消标志是全局的：所有在跑的下载都会停，这里把每个活动行都标上。
+      setProgress((prev) => {
+        const next: Partial<Record<UpdateComponentId, string | null>> = { ...prev };
+        for (const id of busyRef.current) next[id] = '正在取消...';
+        return next;
+      });
+    } catch (cause) {
+      setError(String(cause instanceof Error ? cause.message : cause));
+    }
+  }, []);
+
+  const leftRows = useMemo(() => {
+    const canvasRow = {
+      key: 'canvas',
+      name: '无限画布',
+      version: canvas?.pack.version ?? null,
+      running: Boolean(canvas?.running),
+      ready: Boolean(canvas?.pack.installed),
+      note: canvas?.pack.installed ? '随应用分发' : '未随应用安装',
+    };
+    const others = items.map((item) => ({
+      key: item.id,
+      name: item.name,
+      version: item.installedVersion,
+      running: item.running,
+      ready: item.applicable && (item.installed || Boolean(item.installedVersion)),
+      note: !item.applicable
+        ? '本机不支持'
+        : item.running
+          ? '运行中'
+          : item.installed
+            ? '已安装'
+            : '未安装',
+    }));
+    return [canvasRow, ...others];
+  }, [canvas, items]);
+
+  const kernelLabel = engine?.llama_server_version
+    ? `llama.cpp ${engine.llama_server_version}`
+    : '未检测到内核';
+  const backendLabel = engine?.runtime_backend ?? engine?.host_backend ?? '未知';
+  const activeCount = Object.values(busy).filter(Boolean).length;
+
+  if (!isDesktopRuntime()) {
+    return (
+      <div className="mx-auto w-full max-w-5xl px-6 py-8">
+        <PageHeader title="核心更新" description="桌面版专属功能。" />
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="mx-auto mb-6 max-w-6xl">
-          <PageHeader icon={Download} title="核心更新" description="检查、下载与升级 llama.cpp 推理内核，本机保留最近两个版本" />
-        </div>
+    <div className="mx-auto w-full max-w-6xl px-6 py-8">
+      <PageHeader
+        title="核心更新"
+        description="按本机显卡选择发行包，只提供最新版本。"
+        actions={
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={checking}
+            className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border)] px-3 text-[length:var(--font-caption)] font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] disabled:opacity-60"
+          >
+            {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            检查更新
+          </button>
+        }
+      />
 
-        <div className="mx-auto max-w-6xl pb-12">
-          {state.serverRunning && (
-            <div className="mb-4 flex items-start gap-2 rounded-lg border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-3 py-2.5">
-              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--state-warning)]" />
-              <p className="text-xs leading-5 text-secondary-custom">
-                llama-server 正在运行（端口 {state.serverPort}）。开始更新会自动停止服务；更新完成后需要重新加载模型。
-              </p>
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 items-start gap-x-8 lg:grid-cols-2">
-            <div className="min-w-0">
-
-          <SettingSection title="环境检测" icon={Stethoscope} delay={0.04}>
-            <SettingRow
-              label="运行环境检测"
-              description="检查 llama.cpp 内核、VC++ 运行库、显卡驱动、ffmpeg 与数据目录"
-            >
-              <button
-                onClick={() => setEnvCheckOpen(true)}
-                className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] dark:hover:bg-[var(--surface-raised)]"
-              >
-                运行检测 <ChevronRight className="w-3.5 h-3.5" />
-              </button>
-            </SettingRow>
-          </SettingSection>
-
-          <SettingSection title="内核状态" icon={Cpu} delay={0}>
-            <SettingRow
-              label="当前内核"
-              description={currentKernelMessage ?? (engineInfo?.llama_server_version ? `当前版本：${engineInfo.llama_server_version}` : engineInfo?.exe_path ?? 'resources/llama-server.exe')}
-            >
-              <div className="flex items-center gap-3">
-                {versionBadge}
-                <button
-                  onClick={() => void handleCheckEngine()}
-                  disabled={updating}
-                  className="flex min-h-9 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  检查
-                </button>
-              </div>
-            </SettingRow>
-            {engineInfo?.binary_exists && engineInfo.exe_path && (
-              <>
-                <div className="border-t border-[var(--border-subtle)]" />
-                <SettingRow
-                  label="内核文件"
-                  description={engineInfo.exe_path}
-                >
-                  <span />
-                </SettingRow>
-              </>
-            )}
-          </SettingSection>
-
-          <SettingSection title="视频运行时（ffmpeg）" icon={Film} delay={0.14}>
-            <SettingRow
-              label="ffmpeg / ffprobe"
-              description={
-                videoRuntime?.native_video_ready
-                  ? '已就绪：视频原生处理与多模态视频向量可用。'
-                  : '未安装。安装后可用视频原生理解与多模态视频向量；仅影响视频与部分音频，不影响对话与图片。'
-              }
-            >
-              {videoRuntime?.native_video_ready ? (
-                <span className="flex-shrink-0 rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-success)]">
-                  已就绪
-                </span>
-              ) : (
-                <span className="flex-shrink-0 rounded-full bg-[var(--state-warning-bg)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-warning)]">
-                  未安装
-                </span>
-              )}
-            </SettingRow>
-            {videoRuntime?.native_video_ready && videoRuntime.ffmpeg_path && (
-              <>
-                <div className="border-t border-[var(--border-subtle)]" />
-                <SettingRow label="安装位置" description={videoRuntime.ffmpeg_path}>
-                  <span />
-                </SettingRow>
-              </>
-            )}
-            <div className="border-t border-[var(--border-subtle)]" />
-            <div className="px-3 py-2.5">
-              <FfmpegInstallButton
-                onInstalled={() => {
-                  setEngineMessage('ffmpeg 与 ffprobe 已安装，原生视频处理已可用。');
-                  void refreshVideoRuntime();
-                }}
-              />
-              <p className="mt-2 text-xs leading-5 text-secondary-custom">
-                从 BtbN/FFmpeg-Builds 官方发布下载静态 win64 构建，安装到应用 resources 目录；
-                下载经过 GitHub 官方 SHA256 校验，安装前会实际运行验证。
-              </p>
-            </div>
-          </SettingSection>
-
-          <SettingSection title="下载设置" icon={Package} delay={0.12}>
-            <SettingRow
-              label="下载源"
-              description={kernelSourceDescription(kernelDownloadSource)}
-            >
-              <select
-                aria-label="内核下载源"
-                value={kernelDownloadSource}
-                onChange={(event) => handleKernelSourceChange(event.target.value as KernelDownloadSource)}
-                disabled={updating}
-                className="form-input max-w-[260px] bg-transparent px-3 py-2 text-xs text-primary-custom disabled:opacity-50"
-              >
-                <option value="mirror">镜像加速（推荐）</option>
-                <option value="direct">直连 GitHub 官方</option>
-              </select>
-            </SettingRow>
-            <div className="border-t border-[var(--border-subtle)]" />
-            <SettingRow
-              label="版本保留策略"
-              description="每次更新新建独立目录存放新核心；本机保留最近两个版本（最新的 + 更新前一个），并额外保留你手动选中的版本，其余自动清理。"
-            >
-              <span />
-            </SettingRow>
-          </SettingSection>
-
-            </div>
-
-            <div className="min-w-0">
-          <SettingSection title="可更新版本" icon={Globe} delay={0.06}>
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-secondary-custom">
-                {listMessage ?? '读取 ggml-org/llama.cpp 最近发布列表'}
-                {latestRelease?.host_backend ? ` · 本机优先 ${latestRelease.host_backend}${latestRelease.gpu_name ? `（${latestRelease.gpu_name}）` : ''}` : ''}
-              </p>
-              <button
-                onClick={() => void handleRefreshReleases()}
-                disabled={updating}
-                className="flex min-h-9 flex-shrink-0 items-center gap-1 rounded-md px-2 text-sm text-[var(--accent)] hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                刷新列表
-              </button>
-            </div>
-            {releaseList.length > 0 && (
-              <div className="space-y-1">
-                {releaseList.map((release, index) => {
-                  const isUpdatingThis = updatingVersion === release.version;
-                  const isLatest = index === 0;
-                  const isCurrentLatest = isLatest
-                    && versionState === 'up-to-date'
-                    && Boolean(engineInfo?.binary_exists);
-                  return (
-                    <div
-                      key={release.tag_name}
-                      className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 ${
-                        isUpdatingThis
-                          ? 'border-[var(--accent)]/40 bg-[var(--accent)]/5'
-                          : 'border-transparent bg-[var(--surface-muted)] dark:border-white/[0.06] dark:bg-white/[0.03]'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-primary-custom">{release.version}</span>
-                          {isLatest && (
-                            <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--accent)]">
-                              最新
-                            </span>
-                          )}
-                          {isCurrentLatest && (
-                            <Check className="h-3.5 w-3.5 text-[var(--state-success)]" />
-                          )}
-                        </div>
-                        <div className="mt-0.5 truncate text-xs text-secondary-custom">
-                          {release.published_at.slice(0, 10)} · {releaseMatchDescription(release)}
-                        </div>
-                        {rocmApplicabilityNote(release) && (
-                          <div
-                            className={`mt-0.5 text-[length:var(--font-eyebrow)] ${
-                              release.hip_capable
-                                ? 'text-[var(--state-success)]'
-                                : 'text-[var(--state-warning)]'
-                            }`}
-                          >
-                            {rocmApplicabilityNote(release)}
-                          </div>
-                        )}
-                      </div>
-                      {isCurrentLatest ? (
-                        <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-[var(--state-success-bg)] px-2 py-1 text-xs font-medium text-[var(--state-success)]">
-                          <Check className="h-3 w-3" />
-                          已是最新
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => void handleUpdateFromRelease(release)}
-                          disabled={updating || release.assets.length === 0}
-                          className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                        >
-                          {isUpdatingThis
-                            ? <Loader2 className="h-3 w-3 animate-spin" />
-                            : <Download className="h-3 w-3" />}
-                          {isUpdatingThis ? '更新中' : '更新'}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </SettingSection>
-
-          {updating && (
-            <SettingSection title="下载进度" icon={Download} delay={0.1}>
-              <div className="space-y-2.5">
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--border)] dark:bg-white/10">
-                  <div
-                    className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
-                    style={{ width: `${progressPercent ?? 5}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="min-w-0 truncate font-mono text-xs text-secondary-custom">{engineMessage}</p>
-                  <button
-                    onClick={() => void handleCancelUpdate()}
-                    className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md px-2 text-xs text-[var(--state-danger)] hover:bg-[var(--state-danger-border)] dark:hover:bg-[var(--surface-raised)]"
-                  >
-                    <Square className="h-3 w-3" />
-                    停止下载
-                  </button>
-                </div>
-              </div>
-            </SettingSection>
-          )}
-
-          {installedKernels.length > 0 && (
-            <SettingSection title="本机核心目录" icon={HardDrive} delay={0.16}>
-              <p className="text-xs leading-5 text-secondary-custom">
-                点击任一目录切换当前核心；重新加载模型后生效。
-                {overridePath ? ' 自编译核心已启用，选择会保存但暂不生效。' : ''}
-              </p>
+      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        {/* 左列：环境检测 + 内核状态 */}
+        <div>
+          <SettingSection title="环境检测" icon={Stethoscope}>
+            <div className="flex items-center justify-between rounded-[var(--radius-field)] bg-[var(--surface-muted)] px-3 py-2">
+              <span className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+                逐项检查运行库、显卡与可选组件
+              </span>
               <button
                 type="button"
-                onClick={() => void handleSelectKernel('')}
-                disabled={updating}
-                className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
-                  selectedKernelName === ''
-                    ? 'border-[var(--accent)]/45 bg-[var(--accent)]/5'
-                    : 'border-transparent bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]'
-                }`}
-                title="自动选择安装时间最新的本机核心"
+                onClick={() => setEnvOpen(true)}
+                className="inline-flex h-8 items-center rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-caption)] font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
               >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-primary-custom">自动（最新）</span>
-                    {selectedKernelName === '' && (
-                      <span className="rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-success)]">
-                        已选择
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 text-xs text-secondary-custom">按安装时间选择最新核心</div>
-                </div>
-                <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-tertiary)]" />
+                运行检测
               </button>
-              <div className="space-y-1">
-                {installedKernels.map((kernel) => (
-                  <button
-                    key={kernel.name}
-                    type="button"
-                    onClick={() => void handleSelectKernel(kernel.name)}
-                    disabled={updating}
-                    className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
-                      kernel.is_active
-                        ? 'border-[var(--accent)]/45 bg-[var(--accent)]/5'
-                        : 'border-transparent bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]'
-                    }`}
-                    title={`切换到 ${kernel.version}`}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-primary-custom">{kernel.version}</span>
-                        {kernel.is_active && (
-                          <span className="rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-success)]">
-                            使用中
-                          </span>
-                        )}
-                        {kernel.is_selected && !kernel.is_active && (
-                          <span className="rounded-full bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--accent)]">
-                            已选择
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 truncate font-mono text-xs text-secondary-custom">
-                        kernels/{kernel.name}
-                      </div>
-                    </div>
-                    <span className="flex flex-shrink-0 items-center gap-1 text-xs text-secondary-custom">
-                      {kernel.installed_at}
-                      {!kernel.is_active && <ChevronRight className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </SettingSection>
-          )}
+            </div>
 
-          <SettingSection title="自编译核心" icon={Wrench} delay={0.2}>
-            <SettingRow
-              label="核心路径指定"
-              description={
-                overridePath
-                  ? '自编译核心已启用：加载模型、跑分与本页内核状态都优先使用它。'
-                  : '当前使用内置版本化核心。要运行自编译的 llama.cpp，在此指定 llama-server.exe 的完整路径。'
-              }
-            >
-              {overridePath ? (
-                <span className="flex-shrink-0 rounded-full bg-[var(--state-success-bg)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-[var(--state-success)]">
-                  自编译核心
-                </span>
-              ) : (
-                <span className="flex-shrink-0 rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-micro)] font-medium text-secondary-custom">
-                  内置核心
-                </span>
-              )}
-            </SettingRow>
-            <div className="border-t border-[var(--border-subtle)]" />
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <input
-                  value={overrideInput}
-                  onChange={(event) => setOverrideInput(event.target.value)}
-                  placeholder="例如 D:\llama.cpp\build\bin\Release\llama-server.exe"
-                  spellCheck={false}
-                  className="form-input min-w-0 flex-1 px-3 py-2 font-mono text-xs text-primary-custom"
-                />
-                <button
-                  onClick={() => void handleBrowseOverride()}
-                  disabled={overrideSaving || updating}
-                  className="flex min-h-9 flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] px-2.5 text-xs text-primary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
-                >
-                  <FolderOpen className="h-3.5 w-3.5" />
-                  浏览
-                </button>
-              </div>
-              <div className="flex items-start justify-between gap-3">
-                <p
-                  className={`min-w-0 text-xs leading-5 ${
-                    state.serverRunning && overridePath
-                      ? 'text-[var(--state-warning)]'
-                      : 'text-secondary-custom'
-                  }`}
-                >
-                  {state.serverRunning && overridePath
-                    ? '服务正在运行：停止并重新加载模型后，新核心才会生效。'
-                    : (overrideMessage ?? '重新加载模型后生效；路径失效时自动回退内置核心。')}
-                </p>
-                <div className="flex flex-shrink-0 gap-2">
-                  <button
-                    onClick={() => void handleClearOverride()}
-                    disabled={overrideSaving || updating || !overridePath}
-                    className="flex min-h-8 items-center gap-1 rounded-md px-2 text-xs text-secondary-custom hover:bg-[var(--surface-muted)] disabled:opacity-40 dark:hover:bg-[var(--surface-raised)]"
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    恢复内置
-                  </button>
-                  <button
-                    onClick={() => void handleSaveOverride()}
-                    disabled={overrideSaving || updating || overrideInput.trim() === (overridePath ?? '')}
-                    className="flex min-h-8 items-center gap-1 rounded-md bg-[var(--accent)] px-2.5 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-40"
-                  >
-                    {overrideSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                    保存
-                  </button>
+            <div className="divide-y divide-[var(--border-subtle)]">
+              {leftRows.map((row) => (
+                <div key={row.key} className="flex items-center gap-3 py-2.5">
+                  <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusTone(row.ready, checking)}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[length:var(--font-body)] text-[var(--text-primary)]">{row.name}</div>
+                    <div className="truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{row.note}</div>
+                  </div>
+                  <VersionText value={row.version} />
                 </div>
-              </div>
+              ))}
             </div>
           </SettingSection>
-            </div>
-          </div>
 
-          {!updating && engineMessage && (
-            <p className="mt-4 px-1 text-xs text-secondary-custom">{engineMessage}</p>
-          )}
+          <SettingSection title="内核状态" icon={Cpu} delay={0.08}>
+            <div className="flex items-center justify-between py-1">
+              <span className="text-[length:var(--font-body)] text-[var(--text-primary)]">当前内核</span>
+              <span className="mono-font text-[length:var(--font-caption)] text-[var(--text-secondary)]">{kernelLabel}</span>
+            </div>
+            <div className="flex items-center justify-between py-1">
+              <span className="text-[length:var(--font-body)] text-[var(--text-primary)]">运行时后端</span>
+              <span className="text-[length:var(--font-caption)] text-[var(--text-secondary)]">{backendLabel}</span>
+            </div>
+          </SettingSection>
+        </div>
+
+        {/* 右列：更新列表（只列最新发行版） */}
+        <div>
+          <SettingSection title="更新列表" icon={Download}>
+            {items.length === 0 && checking ? (
+              <p className="flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                正在检查更新...
+              </p>
+            ) : null}
+            {items.length > 0 && checking ? (
+              <p className="mb-2 flex items-center gap-2 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                已检查 {items.length}/{UPDATE_ORDER.length}，其余组件仍在检查...
+              </p>
+            ) : null}
+            {items.length === 0 && !checking ? (
+              <p className="text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
+                暂无更新信息，点右上角「检查更新」重试。
+              </p>
+            ) : null}
+
+            <div className="space-y-3">
+              {items.map((item) => {
+                const Icon = ICONS[item.id];
+                const active = Boolean(busy[item.id]);
+                const percent = active ? parsePercent(progress[item.id] ?? null) : null;
+                // 只锁住自己：别的组件在更新时，这一行照样能点。
+                const disabled = !item.applicable || !item.updateAvailable || active;
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-[var(--radius-field)] border border-[var(--border-subtle)] px-3 py-3"
+                  >
+                    <div className="flex items-start gap-3">
+                      <Icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">
+                            {item.name}
+                          </span>
+                          {item.running ? (
+                            <span className="rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-micro)] text-[var(--text-secondary)]">
+                              运行中
+                            </span>
+                          ) : null}
+                          {!item.applicable ? (
+                            <span className="rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-micro)] text-[var(--state-warning)]">
+                              不可用
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+                          <span className="mono-font max-w-[10rem] truncate" title={item.installedVersion ?? undefined}>
+                            {formatVersion(item.installedVersion)}
+                          </span>
+                          <span className="text-[var(--text-tertiary)]">→</span>
+                          <span className="mono-font max-w-[10rem] truncate text-[var(--text-primary)]" title={item.latestVersion ?? undefined}>
+                            {formatVersion(item.latestVersion)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
+                          {item.applicability}
+                        </p>
+                        {item.message ? (
+                          <p className="mt-1 flex items-start gap-1 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--state-warning)]">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
+                            <span className="min-w-0 break-words">{item.message}</span>
+                          </p>
+                        ) : null}
+                        {active ? (
+                          <div className="mt-2">
+                            <div className="h-1 overflow-hidden rounded-full bg-[var(--surface-muted)]">
+                              <div
+                                className="h-full rounded-full bg-[var(--accent)] transition-[width]"
+                                style={{ width: `${percent ?? 100}%`, opacity: percent === null ? 0.4 : 1 }}
+                              />
+                            </div>
+                            <p className="mt-1 break-words text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
+                              {progress[item.id] ?? '准备中...'}
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="flex flex-shrink-0 items-center gap-1.5">
+                        {active ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleCancel()}
+                            className="inline-flex h-8 items-center gap-1 rounded-[var(--radius-field)] border border-[var(--border)] px-2.5 text-[length:var(--font-caption)] text-[var(--text-primary)] transition-colors hover:border-[var(--state-danger)]"
+                          >
+                            <Square className="h-3 w-3" />
+                            {activeCount > 1 ? '取消全部' : '取消'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => void handleUpdate(item.id)}
+                            className="inline-flex h-8 items-center gap-1 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-caption)] font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            {!item.latestVersion || item.message ? (
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                            ) : item.updateAvailable ? (
+                              <Download className="h-3.5 w-3.5" />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            )}
+                            {!item.latestVersion || item.message
+                              ? '检查失败'
+                              : item.updateAvailable
+                                ? '更新'
+                                : '已最新'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {message ? (
+              <p className="flex items-start gap-1.5 text-[length:var(--font-caption)] text-[var(--state-success)]">
+                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span className="min-w-0 break-words">{message}</span>
+              </p>
+            ) : null}
+            {error ? (
+              <p className="flex items-start gap-1.5 text-[length:var(--font-caption)] text-[var(--state-danger)]">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span className="min-w-0 break-words">{error}</span>
+              </p>
+            ) : null}
+          </SettingSection>
         </div>
       </div>
 
-      <EnvCheckDialog manualOpen={envCheckOpen} onClose={() => setEnvCheckOpen(false)} />
+      <EnvCheckDialog manualOpen={envOpen} onClose={() => setEnvOpen(false)} />
     </div>
   );
 }

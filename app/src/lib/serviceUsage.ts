@@ -3,11 +3,11 @@
  *
  * 目标：界面与模型解耦——API 服务页不认识具体引擎，只消费这里的
  * ServiceUsageStats 视图模型；每个后端各自提供聚合函数把数据流进来：
- * - fast27bServiceUsage：聚合 NiNfer 引擎指标快照（对话、dsh 与外部 API 的真实请求）；
+ * - fast27bServiceUsage：聚合 NiNfer 引擎指标快照（对话与外部 API 的真实请求）；
  * - llamaServiceUsage：聚合主模型（llama-server）按模型累计的用量。
  * 没有数据源或没有样本时返回 null，由界面渲染空态。
  */
-import type { Fast27bMetricsSnapshot, Fast27bRequestMetric } from './ipc/fast27b';
+import type { StrataMetricsSnapshot } from './ipc/strata';
 import type { ModelUsageStats } from '@/types';
 
 /** 运行时间分布里的一段时间（毫秒时间戳区间）。 */
@@ -133,7 +133,7 @@ export function fast27bModelDisplayName(modelPath: string, fallback: string): st
   return stem || fallback;
 }
 
-function requestSpan(request: Fast27bRequestMetric): UsageTimelineSpan {
+function requestSpan(request: EngineRequestMetric): UsageTimelineSpan {
   const end = request.finished_at;
   const start = request.started_at > 0 && request.started_at < end
     ? request.started_at
@@ -160,14 +160,39 @@ function latestSpans(spans: UsageTimelineSpan[]): UsageTimelineSpan[] {
   return spans.slice(spans.length - TIMELINE_SPAN_LIMIT);
 }
 
+/**
+ * 两个外部引擎（NiNfer / Strata）指标快照的结构交集。
+ * NiNfer 快照多出的 model / prefill_tps / draft_* / error 字段是它的私有细节，
+ * 聚合层不需要；Strata 没有 tool_calls，置 null 即可。
+ */
+export interface EngineRequestMetric {
+  id: string;
+  started_at: number;
+  finished_at: number;
+  outcome: 'success' | 'failed' | 'cancelled';
+  prompt_tokens: number | null;
+  output_tokens: number | null;
+  ttft_ms: number | null;
+  total_ms: number | null;
+  decode_tps: number | null;
+  cache_tokens: number | null;
+  tool_calls: number | null;
+}
+
+export interface EngineMetricsSnapshot {
+  collected_at: number;
+  active_requests: number;
+  requests: EngineRequestMetric[];
+}
+
 export function fast27bServiceUsage(
-  snapshot: Fast27bMetricsSnapshot | null,
+  snapshot: EngineMetricsSnapshot | null,
   naming: { title: string; subtitle: string },
 ): ServiceUsageStats | null {
   if (!snapshot) return null;
   const seen = new Set<string>();
-  const successful: Fast27bRequestMetric[] = [];
-  const aborted: Fast27bRequestMetric[] = [];
+  const successful: EngineRequestMetric[] = [];
+  const aborted: EngineRequestMetric[] = [];
   for (const request of snapshot.requests) {
     if (seen.has(request.id)) continue;
     seen.add(request.id);
@@ -262,6 +287,25 @@ export function fast27bServiceUsage(
     requestCount: successful.length,
     activeRequests: snapshot.active_requests,
   };
+}
+
+/**
+ * Strata 引擎用量：与 NiNfer 共用同一套聚合（指标快照结构一致，只是没有工具调用）。
+ * 界面继续只消费 ServiceUsageStats，不感知引擎差异。
+ */
+export function strataServiceUsage(
+  snapshot: StrataMetricsSnapshot | null,
+  naming: { title: string; subtitle: string },
+): ServiceUsageStats | null {
+  if (!snapshot) return null;
+  return fast27bServiceUsage(
+    {
+      collected_at: snapshot.collected_at,
+      active_requests: snapshot.active_requests,
+      requests: snapshot.requests.map((request) => ({ ...request, tool_calls: null })),
+    },
+    naming,
+  );
 }
 
 // ---------------------------------------------------------------------------
