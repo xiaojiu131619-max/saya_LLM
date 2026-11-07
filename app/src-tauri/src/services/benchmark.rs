@@ -14,6 +14,8 @@ use crate::services::process_manager::{self, ServerError};
 
 pub const VRAM_LIMIT: f64 = 0.90;
 pub const POINT_BUDGET: usize = 32;
+/// 先找可运行的显存边界，再在同一 ctx 下做参数优化；各占一半预算。
+pub const MEMORY_BUDGET: usize = 16;
 
 /// 一个集中注册表协调调参、普通加载/停止、测速与内核更新。
 /// Guard 不持有 Mutex，能够跨 await；只有匹配的所有者能释放槽位。
@@ -155,11 +157,20 @@ pub fn validate_config(config: &AutoTuneConfig) -> Result<(), String> {
 pub struct Candidate {
     pub ngl: u32,
     pub ncmoe: u32,
+    pub n_cpu_ffn: u32,
+    pub moe_cache_mib: u32,
     pub ctx: u32,
     pub cache_type_k: String,
     pub cache_type_v: String,
     pub cache_type_k_enabled: bool,
     pub cache_type_v_enabled: bool,
+    /// off / mtp / dspark / dflash
+    pub speculative: String,
+    pub spec_draft_n_max: Option<u32>,
+    pub spec_draft_n_ubatch: u32,
+    pub batch_size: u32,
+    pub ubatch_size: u32,
+    pub threads: i32,
 }
 impl Candidate {
     pub fn baseline(config: &AutoTuneConfig) -> Self {
@@ -167,22 +178,38 @@ impl Candidate {
         Self {
             ngl: b.ngl,
             ncmoe: b.ncmoe,
+            n_cpu_ffn: b.n_cpu_ffn,
+            moe_cache_mib: b.moe_cache_mib,
             ctx: b.n_ctx,
             cache_type_k: b.cache_type_k.clone(),
             cache_type_v: b.cache_type_v.clone(),
             cache_type_k_enabled: b.cache_type_k_enabled,
             cache_type_v_enabled: b.cache_type_v_enabled,
+            speculative: spec_mode_from_server(b),
+            spec_draft_n_max: b.spec_draft_n_max,
+            spec_draft_n_ubatch: b.spec_draft_n_ubatch,
+            batch_size: b.batch_size,
+            ubatch_size: b.ubatch_size,
+            threads: b.threads,
         }
     }
     pub fn from_record(record: &TuneRecord) -> Self {
         Self {
             ngl: record.ngl,
             ncmoe: record.ncmoe,
+            n_cpu_ffn: record.n_cpu_ffn,
+            moe_cache_mib: record.moe_cache_mib,
             ctx: record.ctx,
             cache_type_k: record.cache_type_k.clone(),
             cache_type_v: record.cache_type_v.clone(),
             cache_type_k_enabled: record.cache_type_k_enabled,
             cache_type_v_enabled: record.cache_type_v_enabled,
+            speculative: if record.speculative.is_empty() { "off".into() } else { record.speculative.clone() },
+            spec_draft_n_max: record.spec_draft_n_max,
+            spec_draft_n_ubatch: record.spec_draft_n_ubatch,
+            batch_size: record.batch_size.max(1),
+            ubatch_size: record.ubatch_size,
+            threads: record.threads,
         }
     }
     fn quantized(mut self, kv: &str) -> Self {
@@ -192,18 +219,98 @@ impl Candidate {
         self.cache_type_v_enabled = true;
         self
     }
+    fn with_spec(mut self, mode: &str) -> Self {
+        self.speculative = mode.into();
+        if mode == "off" {
+            self.spec_draft_n_max = None;
+            self.spec_draft_n_ubatch = 0;
+        }
+        self
+    }
+    fn with_moe_cache(mut self, mib: u32) -> Self {
+        self.moe_cache_mib = mib;
+        self
+    }
+    fn with_batch(mut self, batch: u32, ubatch: u32) -> Self {
+        self.batch_size = batch.max(1).min(self.ctx.max(1));
+        self.ubatch_size = ubatch.max(1).min(self.batch_size);
+        self
+    }
+    fn with_threads(mut self, threads: i32) -> Self {
+        self.threads = if threads > 0 { threads } else { -1 };
+        self
+    }
+    fn with_ngl(mut self, ngl: u32) -> Self {
+        self.ngl = ngl;
+        self
+    }
+}
+
+fn spec_mode_from_server(config: &ServerConfig) -> String {
+    if config.spec_type.as_deref() == Some("draft-dflash") || config.dflash_draft_path.is_some() {
+        "dflash".into()
+    } else if config.spec_type.as_deref() == Some("draft-dspark") || config.dspark_draft_path.is_some() {
+        "dspark".into()
+    } else if config.spec_type.as_deref() == Some("draft-mtp") || config.mtp_draft_path.is_some() {
+        "mtp".into()
+    } else {
+        "off".into()
+    }
+}
+
+fn apply_spec_mode(config: &mut ServerConfig, base: &AutoTuneConfig, mode: &str) {
+    config.mtp_draft_path = None;
+    config.dspark_draft_path = None;
+    config.dflash_draft_path = None;
+    config.spec_type = None;
+    config.spec_draft_n_max = None;
+    config.spec_draft_n_ubatch = 0;
+    match mode {
+        "mtp" if base.supports_mtp || base.mtp_draft_path.is_some() || base.baseline.mtp_draft_path.is_some() => {
+            config.mtp_draft_path = base
+                .mtp_draft_path
+                .clone()
+                .or_else(|| base.baseline.mtp_draft_path.clone());
+            config.spec_type = Some("draft-mtp".into());
+        }
+        "dspark" if base.dspark_draft_path.is_some() || base.baseline.dspark_draft_path.is_some() => {
+            config.dspark_draft_path = base
+                .dspark_draft_path
+                .clone()
+                .or_else(|| base.baseline.dspark_draft_path.clone());
+            config.spec_type = Some("draft-dspark".into());
+        }
+        "dflash" if base.dflash_draft_path.is_some() || base.baseline.dflash_draft_path.is_some() => {
+            config.dflash_draft_path = base
+                .dflash_draft_path
+                .clone()
+                .or_else(|| base.baseline.dflash_draft_path.clone());
+            config.spec_type = Some("draft-dflash".into());
+        }
+        _ => {}
+    }
 }
 
 pub fn build_server_config(base: &AutoTuneConfig, point: &Candidate) -> ServerConfig {
     let mut config = base.baseline.clone();
     config.ngl = point.ngl;
     config.ncmoe = point.ncmoe;
+    config.n_cpu_ffn = point.n_cpu_ffn;
+    config.moe_cache_mib = point.moe_cache_mib;
     config.n_ctx = point.ctx;
+    config.batch_size = point.batch_size.max(1);
+    config.ubatch_size = point.ubatch_size;
+    config.threads = point.threads;
     config.cache_type_k = point.cache_type_k.clone();
     config.cache_type_v = point.cache_type_v.clone();
     config.cache_type_k_enabled = point.cache_type_k_enabled;
     config.cache_type_v_enabled = point.cache_type_v_enabled;
-    // 唯一明确的本地测量策略；不改 ubatch、parallel、sidecars、RoPE 或 CPU 语义。
+    apply_spec_mode(&mut config, base, &point.speculative);
+    if point.speculative != "off" {
+        config.spec_draft_n_max = point.spec_draft_n_max;
+        config.spec_draft_n_ubatch = point.spec_draft_n_ubatch;
+    }
+    // 唯一明确的本地测量策略；不改 parallel、RoPE、mmproj、load-mode 或 CPU 语义。
     config.host = "127.0.0.1".into();
     config.api_key = None;
     config.retry_cpu_fallback = false;
@@ -649,6 +756,14 @@ pub async fn measure_point(
         cache_type_v: point.cache_type_v.clone(),
         cache_type_k_enabled: point.cache_type_k_enabled,
         cache_type_v_enabled: point.cache_type_v_enabled,
+        n_cpu_ffn: point.n_cpu_ffn,
+        moe_cache_mib: point.moe_cache_mib,
+        speculative: point.speculative.clone(),
+        spec_draft_n_max: point.spec_draft_n_max,
+        spec_draft_n_ubatch: point.spec_draft_n_ubatch,
+        batch_size: point.batch_size,
+        ubatch_size: point.ubatch_size,
+        threads: point.threads,
         samples: samples.len() as u32,
         ts_stddev,
         ttft_stddev_ms: ttft_stddev,
@@ -659,66 +774,97 @@ pub async fn measure_point(
     })
 }
 
-/// 可用假测量器驱动的有界搜索状态机。失败不伪装成测速记录。
+/// 可用假测量器驱动的有界搜索状态机：先找固定 ctx 下的显存边界，
+/// 再由 `tuning_candidates` 在同一配置上比较推测解码、KV、缓存、批处理与线程。
 pub struct Search {
     config: AutoTuneConfig,
     queue: VecDeque<Candidate>,
     seen: HashSet<Candidate>,
-    found: bool,
     attempts: usize,
     outcomes: Vec<(Candidate, bool)>,
     supported_kv: Candidate,
+    best: Option<(Candidate, f64)>,
 }
 impl Search {
     pub fn new(config: &AutoTuneConfig) -> Self {
         let baseline = Candidate::baseline(config);
         let mut queue = VecDeque::from([baseline.clone()]);
-        let mut point = baseline;
-        let floor = point.ctx.min(256);
-        // 最多 6 个 ctx 降档，预留 KV/MoE/ngl（含 0）与边界微调预算。
-        for i in 0..6 {
-            if point.ctx <= floor {
-                break;
+        let block = config.block_count;
+        if baseline.ngl > 0 && block > 0 {
+            // 先尽量保留完整 ngl，逐级把 MoE 专家 / 稠密 FFN 留在 CPU；
+            // 再尝试量化 KV，最后才降 ngl。固定 ctx 不参与搜索。
+            let start = if config.is_moe { baseline.ncmoe } else { baseline.n_cpu_ffn };
+            let step = (block / 4).max(1);
+            let mut level = start;
+            while level < block {
+                level = level.saturating_add(step).min(block);
+                let mut next = baseline.clone();
+                if config.is_moe {
+                    next.ncmoe = level;
+                } else {
+                    next.n_cpu_ffn = level;
+                }
+                queue.push_back(next);
             }
-            point.ctx = if i == 5 {
-                floor
+            let mut max_cpu = baseline.clone();
+            if config.is_moe {
+                max_cpu.ncmoe = block;
             } else {
-                (point.ctx / 2).max(floor)
-            };
-            queue.push_back(point.clone());
-        }
-        for kv in ["q8_0", "q4_0"] {
-            point = point.quantized(kv);
-            queue.push_back(point.clone());
-        }
-        if config.is_moe {
-            point.ncmoe = config.block_count;
-            queue.push_back(point.clone());
-        }
-        let step = (point.ngl / 8 + u32::from(point.ngl % 8 != 0)).max(1);
-        while point.ngl > 0 {
-            point.ngl = point.ngl.saturating_sub(step);
-            queue.push_back(point.clone());
+                max_cpu.n_cpu_ffn = block;
+            }
+            for kv in ["q8_0", "q4_0"] {
+                queue.push_back(max_cpu.clone().quantized(kv));
+            }
+            let ngl_step = (baseline.ngl / 4).max(1);
+            let mut ngl = baseline.ngl;
+            while ngl > 0 {
+                ngl = ngl.saturating_sub(ngl_step);
+                queue.push_back(max_cpu.clone().quantized("q4_0").with_ngl(ngl));
+            }
         }
         Self {
             config: config.clone(),
             queue,
             seen: HashSet::new(),
-            found: false,
             attempts: 0,
             outcomes: vec![],
             supported_kv: Candidate::baseline(config),
+            best: None,
         }
     }
     pub fn next(&mut self) -> Option<Candidate> {
-        while self.attempts < POINT_BUDGET {
+        // 起点已经是完整 ngl + 原始配置时，再测更慢的降档没有意义，直接进入调参。
+        if self.best.as_ref().is_some_and(|(point, _)| self.is_optimal(point)) {
+            return None;
+        }
+        while self.attempts < MEMORY_BUDGET {
             let point = self.queue.pop_front()?;
+            // 已经找到可运行配置时，比它更低的 ngl 不可能更快，跳过省预算。
+            if let Some((best, _)) = &self.best {
+                if point.ngl < best.ngl {
+                    continue;
+                }
+            }
             if self.seen.insert(point.clone()) {
                 self.attempts += 1;
                 return Some(point);
             }
         }
         None
+    }
+    fn is_optimal(&self, point: &Candidate) -> bool {
+        let baseline = &self.config.baseline;
+        point.ngl == baseline.ngl
+            && point.ncmoe <= baseline.ncmoe
+            && point.n_cpu_ffn <= baseline.n_cpu_ffn
+            && point.speculative == spec_mode_from_server(baseline)
+            && point.batch_size == baseline.batch_size
+            && point.ubatch_size == baseline.ubatch_size
+            && point.threads == baseline.threads
+            && point.cache_type_k == baseline.cache_type_k
+            && point.cache_type_v == baseline.cache_type_v
+            && point.cache_type_k_enabled == baseline.cache_type_k_enabled
+            && point.cache_type_v_enabled == baseline.cache_type_v_enabled
     }
     pub fn skip_unsupported(&mut self, point: &Candidate) {
         // q4 不支持时不能把该格式带进所有后续 ngl/CPU 候选，回到最近实际可执行的 KV。
@@ -742,65 +888,159 @@ impl Search {
             }
         }
     }
-    pub fn observe(&mut self, point: &Candidate, fits: bool) {
-        self.supported_kv = point.clone();
-        self.outcomes.push((point.clone(), fits));
-        if fits && !self.found {
-            self.found = true;
-            self.queue.clear();
+    pub fn observe(&mut self, point: &Candidate, fits: bool, ts: Option<f64>) {
+        if fits {
+            self.supported_kv = point.clone();
+            let score = ts.unwrap_or(0.0);
+            if self.best.as_ref().map_or(true, |(_, best)| score > *best) {
+                self.best = Some((point.clone(), score));
+            }
         }
+        self.outcomes.push((point.clone(), fits));
         // 只根据实际 OOM/超预算与成功的边界二分；不支持候选不会进入这里。
         for (other, other_fits) in self.outcomes.clone() {
-            if other_fits == fits
-                || other.ctx != point.ctx
-                || other.cache_type_k != point.cache_type_k
-                || other.cache_type_v != point.cache_type_v
-                || other.cache_type_k_enabled != point.cache_type_k_enabled
-                || other.cache_type_v_enabled != point.cache_type_v_enabled
-            {
+            if other_fits == fits || !same_tuning_axis(&other, point) {
                 continue;
             }
             let mut middle = point.clone();
-            if other.ncmoe == point.ncmoe && other.ngl.abs_diff(point.ngl) > 1 {
+            if other.ncmoe == point.ncmoe
+                && other.n_cpu_ffn == point.n_cpu_ffn
+                && other.ngl.abs_diff(point.ngl) > 1
+            {
                 middle.ngl = other.ngl.min(point.ngl) + other.ngl.abs_diff(point.ngl) / 2;
                 self.queue.push_front(middle);
-            } else if other.ngl == point.ngl && other.ncmoe.abs_diff(point.ncmoe) > 1 {
+            } else if other.ngl == point.ngl
+                && other.n_cpu_ffn == point.n_cpu_ffn
+                && other.ncmoe.abs_diff(point.ncmoe) > 1
+            {
                 middle.ncmoe = other.ncmoe.min(point.ncmoe) + other.ncmoe.abs_diff(point.ncmoe) / 2;
+                self.queue.push_front(middle);
+            } else if other.ngl == point.ngl
+                && other.ncmoe == point.ncmoe
+                && other.n_cpu_ffn.abs_diff(point.n_cpu_ffn) > 1
+            {
+                middle.n_cpu_ffn = other.n_cpu_ffn.min(point.n_cpu_ffn)
+                    + other.n_cpu_ffn.abs_diff(point.n_cpu_ffn) / 2;
                 self.queue.push_front(middle);
             }
         }
-        if !fits {
-            return;
+    }
+    pub fn best_fit(&self) -> Option<Candidate> {
+        self.best.as_ref().map(|(point, _)| point.clone())
+    }
+}
+
+fn same_tuning_axis(left: &Candidate, right: &Candidate) -> bool {
+    left.ctx == right.ctx
+        && left.cache_type_k == right.cache_type_k
+        && left.cache_type_v == right.cache_type_v
+        && left.cache_type_k_enabled == right.cache_type_k_enabled
+        && left.cache_type_v_enabled == right.cache_type_v_enabled
+        && left.speculative == right.speculative
+        && left.spec_draft_n_max == right.spec_draft_n_max
+        && left.spec_draft_n_ubatch == right.spec_draft_n_ubatch
+        && left.moe_cache_mib == right.moe_cache_mib
+        && left.batch_size == right.batch_size
+        && left.ubatch_size == right.ubatch_size
+        && left.threads == right.threads
+}
+
+/// 固定 ctx 后，围绕最佳可运行配置比较所有仍会影响速度和显存的参数。
+/// 顺序按预期收益排列；调用方用剩余预算截断。
+pub fn tuning_candidates(config: &AutoTuneConfig, base: &Candidate) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    let mut push = |candidate: Candidate| {
+        if candidate != *base && !out.contains(&candidate) {
+            out.push(candidate);
         }
-        let max_ctx = self.config.max_ctx.min(u32::MAX as u64) as u32;
-        if point.ctx < max_ctx {
-            let mut next = point.clone();
-            next.ctx = point.ctx.saturating_mul(2).min(max_ctx);
-            self.queue.push_back(next);
-        }
-        if self.config.is_moe && point.ncmoe > 0 {
-            let mut next = point.clone();
-            next.ncmoe = point
-                .ncmoe
-                .saturating_sub((self.config.block_count / 4).max(1));
-            self.queue.push_back(next);
-        }
-        // 降档成功后恢复少量 GPU 层，不能把量化 KV 重置回 f16。
-        if point.ngl < self.config.baseline.ngl {
-            let mut next = point.clone();
-            next.ngl = point
-                .ngl
-                .saturating_add((self.config.baseline.ngl / 8).max(1))
-                .min(self.config.baseline.ngl);
-            self.queue.push_back(next);
+    };
+
+    // 1) 推测解码：通常收益最大，先测关闭 / MTP / DSpark / DFlash。
+    let mut modes = vec!["off"];
+    if config.supports_mtp || config.mtp_draft_path.is_some() {
+        modes.push("mtp");
+    }
+    if config.dspark_draft_path.is_some() {
+        modes.push("dspark");
+    }
+    if config.dflash_draft_path.is_some() {
+        modes.push("dflash");
+    }
+    modes.sort_unstable();
+    modes.dedup();
+    for mode in &modes {
+        if *mode != base.speculative {
+            push(base.clone().with_spec(mode));
         }
     }
+    // 侧车可能因显存不足启动失败；同时准备量化 KV 组合。
+    for mode in &modes {
+        if *mode == "off" || *mode == base.speculative {
+            continue;
+        }
+        for kv in ["q8_0", "q4_0"] {
+            push(base.clone().with_spec(mode).quantized(kv));
+        }
+    }
+    if base.speculative != "off" {
+        for depth in [1, 2, 4, 8] {
+            let mut candidate = base.clone();
+            candidate.spec_draft_n_max = Some(depth);
+            push(candidate);
+        }
+    }
+
+    // 2) MoE 专家缓存：只在有 CPU 专家时有效。
+    if config.is_moe && base.ncmoe > 0 {
+        for mib in [1024, 2048, 4096] {
+            push(base.clone().with_moe_cache(mib));
+        }
+    }
+
+    // 3) 独立 K/V 量化；4) 批处理 / 物理批处理。
+    for kv in ["q8_0", "q4_0"] {
+        push(base.clone().quantized(kv));
+    }
+    for batch in [1024, 2048] {
+        for ubatch in [256, 512, 1024] {
+            if ubatch <= batch {
+                push(base.clone().with_batch(batch, ubatch));
+            }
+        }
+    }
+
+    // 5) 设备探测出的 CPU 线程建议；6) 降低 CPU 卸载并用量化 KV 换回 GPU 层。
+    if let Some(threads) = config.recommended_threads {
+        push(base.clone().with_threads(threads));
+    }
+    if config.is_moe && base.ncmoe > config.baseline.ncmoe {
+        let step = (config.block_count / 8).max(1);
+        let ncmoe = base.ncmoe.saturating_sub(step);
+        for kv in ["q8_0", "q4_0"] {
+            let mut candidate = base.clone();
+            candidate.ncmoe = ncmoe;
+            push(candidate.quantized(kv));
+        }
+    } else if !config.is_moe && base.n_cpu_ffn > config.baseline.n_cpu_ffn {
+        let step = (config.block_count / 8).max(1);
+        let n_cpu_ffn = base.n_cpu_ffn.saturating_sub(step);
+        for kv in ["q8_0", "q4_0"] {
+            let mut candidate = base.clone();
+            candidate.n_cpu_ffn = n_cpu_ffn;
+            push(candidate.quantized(kv));
+        }
+    }
+    out
 }
 
 pub fn rank_records(records: &mut [TuneRecord], mode: &SortMode) {
     records.sort_by(|a, b| match mode {
-        SortMode::TsPriority => b.ts.total_cmp(&a.ts).then(b.ctx.cmp(&a.ctx)),
-        SortMode::CtxPriority => b.ctx.cmp(&a.ctx).then(b.ts.total_cmp(&a.ts)),
+        SortMode::TsPriority => b.ts.total_cmp(&a.ts)
+            .then(a.vram_percent.total_cmp(&b.vram_percent))
+            .then(b.ctx.cmp(&a.ctx)),
+        SortMode::CtxPriority => b.ctx.cmp(&a.ctx)
+            .then(b.ts.total_cmp(&a.ts))
+            .then(a.vram_percent.total_cmp(&b.vram_percent)),
     });
 }
 
@@ -821,6 +1061,11 @@ mod tests {
             max_ctx: 131072,
             is_moe: false,
             sort_mode: SortMode::TsPriority,
+            supports_mtp: false,
+            mtp_draft_path: None,
+            dspark_draft_path: None,
+            dflash_draft_path: None,
+            recommended_threads: None,
         }
     }
     fn server_error(kind: &str, details: &str) -> ServerError {
@@ -853,6 +1098,8 @@ mod tests {
         expected.host = "127.0.0.1".into();
         expected.api_key = None;
         expected.retry_cpu_fallback = false;
+        // 基线只有 MTP 草稿路径、没有显式 --spec-type 时，自动调参仍会把它归一化成 draft-mtp。
+        expected.spec_type = Some("draft-mtp".into());
         assert_eq!(
             serde_json::to_value(built).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -905,7 +1152,7 @@ mod tests {
         let mut search = Search::new(&c);
         let mut points = Vec::new();
         while let Some(point) = search.next() {
-            search.observe(&point, false);
+            search.observe(&point, false, None);
             points.push(point);
         }
         assert_eq!(points[0], Candidate::baseline(&c));
@@ -932,7 +1179,7 @@ mod tests {
         let mut reached_cpu = false;
         while let Some(point) = search.next() {
             reached_cpu |= point.ngl == 0;
-            search.observe(&point, false);
+            search.observe(&point, false, None);
         }
         assert!(reached_cpu);
     }
@@ -947,7 +1194,7 @@ mod tests {
         let mut all = Vec::new();
         while let Some(p) = search.next() {
             assert!(p.ncmoe <= 3);
-            search.observe(&p, false);
+            search.observe(&p, false, None);
             all.push(p);
         }
         assert!(all.iter().any(|p| p.ngl == 0 && p.ncmoe == 3));
@@ -965,24 +1212,62 @@ mod tests {
             if fits {
                 best = best.max(p.ngl);
             }
-            search.observe(&p, fits);
+            search.observe(&p, fits, None);
         }
         assert_eq!(best, 23);
     }
 
     #[test]
-    fn fake_measurement_expands_context_only_to_model_boundary() {
+    fn fixed_ctx_does_not_expand_or_reduce_requested_context() {
         let mut c = config();
         c.baseline.n_ctx = 1024;
         c.max_ctx = 10000;
         let mut search = Search::new(&c);
-        let mut max = 0;
         while let Some(p) = search.next() {
-            assert!(p.ctx <= 10000);
-            max = max.max(p.ctx);
-            search.observe(&p, true);
+            assert_eq!(p.ctx, 1024);
+            search.observe(&p, true, Some(10.0));
         }
-        assert_eq!(max, 10000);
+    }
+
+    #[test]
+    fn tuning_candidates_cover_spec_cache_batch_and_threads_at_fixed_ctx() {
+        let mut c = config();
+        c.is_moe = true;
+        c.block_count = 40;
+        c.supports_mtp = true;
+        c.dspark_draft_path = Some("dspark.gguf".into());
+        c.dflash_draft_path = Some("dflash.gguf".into());
+        c.recommended_threads = Some(8);
+        let mut base = Candidate::baseline(&c);
+        base.ncmoe = 20;
+        let points = tuning_candidates(&c, &base);
+        assert!(points.iter().all(|point| point.ctx == base.ctx));
+        assert!(points.iter().any(|point| point.speculative == "mtp"));
+        assert!(points.iter().any(|point| point.speculative == "dspark"));
+        assert!(points.iter().any(|point| point.speculative == "dflash"));
+        assert!(points.iter().any(|point| point.moe_cache_mib > 0));
+        assert!(points.iter().any(|point| point.batch_size > base.batch_size));
+        assert!(points.iter().any(|point| point.threads == 8));
+        assert!(points.len() > 8);
+    }
+
+    #[test]
+    fn switching_spec_mode_rebuilds_only_the_selected_sidecar() {
+        let mut c = config();
+        c.dspark_draft_path = Some("dspark.gguf".into());
+        c.dflash_draft_path = Some("dflash.gguf".into());
+        let mut point = Candidate::baseline(&c);
+        point.speculative = "dflash".into();
+        let built = build_server_config(&c, &point);
+        assert_eq!(built.dflash_draft_path.as_deref(), Some("dflash.gguf"));
+        assert_eq!(built.spec_type.as_deref(), Some("draft-dflash"));
+        assert!(built.dspark_draft_path.is_none());
+        point.speculative = "off".into();
+        let built = build_server_config(&c, &point);
+        assert!(built.mtp_draft_path.is_none());
+        assert!(built.dspark_draft_path.is_none());
+        assert!(built.dflash_draft_path.is_none());
+        assert!(built.spec_type.is_none());
     }
 
     #[test]
@@ -1003,7 +1288,7 @@ mod tests {
             if p.cache_type_k_enabled {
                 search.skip_unsupported(&p);
             } else {
-                search.observe(&p, false);
+                search.observe(&p, false, None);
             }
             if p.ngl == 0 {
                 assert!(!p.cache_type_k_enabled);
@@ -1026,7 +1311,7 @@ mod tests {
             if fits {
                 min = min.min(p.ncmoe);
             }
-            search.observe(&p, fits);
+            search.observe(&p, fits, None);
         }
         assert_eq!(min, 13);
     }

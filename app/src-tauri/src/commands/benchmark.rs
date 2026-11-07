@@ -172,7 +172,28 @@ async fn run_tune(
 ) -> Result<AutoTuneResult, TuneFailure> {
     let state = app.state::<AppState>();
     let gm = &state.gpu_monitor;
-    progress(app, config, "init", "以当前完整配置为起点；仅搜索 ctx、KV、GPU/CPU 卸载层数。ctx 最小 256（当前值更小时保持该下界），几何上探至模型 max_ctx；粗测最多 32 点，候选去重，最优点另做复测。短提示显存读数不代表最大上下文峰值。", None);
+    let device = {
+        let config = state.config.lock().map_err(|e| TuneFailure::fatal(e.to_string()))?.clone();
+        let mut monitor = state.gpu_monitor.lock().map_err(|e| TuneFailure::fatal(e.to_string()))?;
+        crate::services::device_probe::probe(&config, &mut monitor)
+    };
+    progress(
+        app,
+        config,
+        "init",
+        &format!(
+            "设备探测：{} / {} 物理核心 / {:.1} GB 内存 / {} / {:.1} GB 显存 / 内核 {}。自动调参固定 ctx={}，不会缩短上下文。",
+            device.cpu_brand,
+            device.physical_cores,
+            device.memory_total_gb,
+            device.gpus.first().map(|gpu| gpu.name.as_str()).unwrap_or("未检测到 GPU"),
+            device.gpus.first().map(|gpu| gpu.total_vram_gb).unwrap_or(0.0),
+            device.kernel.version.as_deref().unwrap_or("未检测"),
+            config.baseline.n_ctx
+        ),
+        None,
+    );
+    progress(app, config, "init", "先探测设备，再在用户设定的上下文长度下搜索：不改变 ctx，按「完整 GPU 卸载 → CPU 专家/FFN 卸载 → 量化 KV → 降低 ngl」寻找可运行边界；随后在同一配置上比较推测解码、MoE 缓存、KV、批处理与线程。粗测最多 32 点，候选去重，最优点另做复测。短提示显存读数不代表满上下文峰值。", None);
     let mut search = benchmark::Search::new(config);
     while let Some(point) = search.next() {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -183,14 +204,14 @@ async fn run_tune(
             config,
             "coarse",
             &format!(
-                "粗测 ctx={} ngl={} ncmoe={}；短提示负载，不保证满上下文显存",
-                point.ctx, point.ngl, point.ncmoe
+                "显存边界 ctx={} ngl={} ncmoe={} ncffn={} KV={}；短提示负载，不保证满上下文显存",
+                point.ctx, point.ngl, point.ncmoe, point.n_cpu_ffn, point.cache_type_k
             ),
             None,
         );
         match benchmark::measure_point(config, gm, &point, cancel, false).await {
             Ok(record) => {
-                search.observe(&point, record.fits);
+                search.observe(&point, record.fits, Some(record.ts));
                 records.push(record.clone());
                 progress(
                     app,
@@ -205,7 +226,7 @@ async fn run_tune(
                 progress(app, config, "candidate_failed", &error.message, None);
                 benchmark::update_tune_records(&config.run_id, records, failures);
                 if error.kind == FailureKind::Oom {
-                    search.observe(&point, false);
+                    search.observe(&point, false, None);
                 }
                 if error.kind == FailureKind::Unsupported {
                     search.skip_unsupported(&point);
@@ -218,6 +239,65 @@ async fn run_tune(
         }
         benchmark::update_tune_records(&config.run_id, records, failures);
     }
+
+    // 固定 ctx 的参数优化阶段：以显存边界内最快的配置为基准，比较所有仍会影响速度的旋钮。
+    if let Some(base) = search.best_fit() {
+        let mut tuning_config = config.clone();
+        if tuning_config.recommended_threads.is_none() {
+            tuning_config.recommended_threads = Some(device.recommendations.recommended_threads as i32);
+        }
+        let mut measured: std::collections::HashSet<benchmark::Candidate> = records
+            .iter()
+            .map(benchmark::Candidate::from_record)
+            .collect();
+        let mut attempts = records.len() + failures.len();
+        for point in benchmark::tuning_candidates(&tuning_config, &base) {
+            if attempts >= benchmark::POINT_BUDGET {
+                break;
+            }
+            if !measured.insert(point.clone()) {
+                continue;
+            }
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(TuneFailure::cancelled());
+            }
+            attempts += 1;
+            progress(
+                app,
+                config,
+                "tune",
+                &format!(
+                    "参数优化 ctx={} ngl={} ncmoe={} ncffn={} KV={} spec={} cache={}MiB batch={}/{} threads={}",
+                    point.ctx, point.ngl, point.ncmoe, point.n_cpu_ffn,
+                    point.cache_type_k, point.speculative, point.moe_cache_mib,
+                    point.batch_size, point.ubatch_size, point.threads
+                ),
+                None,
+            );
+            match benchmark::measure_point(config, gm, &point, cancel, false).await {
+                Ok(record) => {
+                    records.push(record.clone());
+                    progress(
+                        app,
+                        config,
+                        "tune",
+                        "参数优化测速完成；显存仍为短负载采样值",
+                        Some(record),
+                    );
+                }
+                Err(error) => {
+                    let error = failure(config, &point, error, cancel, failures);
+                    progress(app, config, "candidate_failed", &error.message, None);
+                    if matches!(error.kind, FailureKind::Fatal | FailureKind::Cancelled) {
+                        return Err(error);
+                    }
+                    // 不支持/显存不足的参数组合继续尝试下一组。
+                }
+            }
+            benchmark::update_tune_records(&config.run_id, records, failures);
+        }
+    }
+
     let mut candidates: Vec<TuneRecord> = records.iter().filter(|r| r.fits).cloned().collect();
     benchmark::rank_records(&mut candidates, &config.sort_mode);
     // 最多复测前三名。未复测/复测失败的粗测记录不允许作为最终 best。

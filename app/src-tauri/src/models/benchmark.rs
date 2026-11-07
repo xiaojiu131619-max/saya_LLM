@@ -55,6 +55,18 @@ pub struct AutoTuneConfig {
     pub max_ctx: u64,
     pub is_moe: bool,
     pub sort_mode: SortMode,
+    /// 当前模型可用的推测解码能力与侧车路径；用于在同一 ctx 下比较关闭 / MTP / DSpark / DFlash。
+    #[serde(default)]
+    pub supports_mtp: bool,
+    #[serde(default)]
+    pub mtp_draft_path: Option<String>,
+    #[serde(default)]
+    pub dspark_draft_path: Option<String>,
+    #[serde(default)]
+    pub dflash_draft_path: Option<String>,
+    /// 设备探测得到的最佳 CPU 线程数；None = 不额外尝试。
+    #[serde(default)]
+    pub recommended_threads: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +86,22 @@ pub struct TuneRecord {
     pub cache_type_v: String,
     pub cache_type_k_enabled: bool,
     pub cache_type_v_enabled: bool,
+    #[serde(default)]
+    pub n_cpu_ffn: u32,
+    #[serde(default)]
+    pub moe_cache_mib: u32,
+    #[serde(default)]
+    pub speculative: String,
+    #[serde(default)]
+    pub spec_draft_n_max: Option<u32>,
+    #[serde(default)]
+    pub spec_draft_n_ubatch: u32,
+    #[serde(default)]
+    pub batch_size: u32,
+    #[serde(default)]
+    pub ubatch_size: u32,
+    #[serde(default = "default_threads")]
+    pub threads: i32,
     pub samples: u32,
     pub ts_stddev: f64,
     pub ttft_stddev_ms: f64,
@@ -81,6 +109,10 @@ pub struct TuneRecord {
     pub warmup_ttft_ms: f64,
     pub measurement_phase: String,
     pub vram_available: bool,
+}
+
+fn default_threads() -> i32 {
+    -1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
