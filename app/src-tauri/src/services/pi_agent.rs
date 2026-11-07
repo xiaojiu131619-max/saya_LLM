@@ -220,14 +220,15 @@ pub fn discover() -> PiAgentDiscover {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "node".to_string());
 
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
     if let Ok(path) = std::env::var("PI_AGENT_CLI") {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
-            candidates.push(PathBuf::from(trimmed));
+            // 显式指定视为可信，允许自定义构建，不再校验包名。
+            candidates.push((PathBuf::from(trimmed), false));
         }
     }
-    candidates.push(
+    candidates.push((
         pi_data_root()
             .join("node_modules")
             .join("@earendil-works")
@@ -235,8 +236,9 @@ pub fn discover() -> PiAgentDiscover {
             .join("dist")
             .join("bundle")
             .join("cli.js"),
-    );
-    candidates.push(
+        true,
+    ));
+    candidates.push((
         crate::services::auto_updater::resource_dir()
             .join("pi")
             .join("node_modules")
@@ -245,20 +247,26 @@ pub fn discover() -> PiAgentDiscover {
             .join("dist")
             .join("bundle")
             .join("cli.js"),
-    );
-    candidates.push(
-        std::env::temp_dir()
-            .join("opencode")
-            .join("pi-spike")
-            .join("node_modules")
-            .join("@earendil-works")
-            .join("pi-coding-agent")
-            .join("dist")
-            .join("bundle")
-            .join("cli.js"),
-    );
+        true,
+    ));
+    // %TEMP% 只作开发期候选（本地 spike 残留）：发布版不从这里自动执行，
+    // 否则同用户进程只要往 TEMP 写一份 cli.js，就能实现「写入即执行」。
+    if cfg!(debug_assertions) {
+        candidates.push((
+            std::env::temp_dir()
+                .join("opencode")
+                .join("pi-spike")
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("bundle")
+                .join("cli.js"),
+            true,
+        ));
+    }
     if let Ok(appdata) = std::env::var("APPDATA") {
-        candidates.push(
+        candidates.push((
             PathBuf::from(appdata)
                 .join("npm")
                 .join("node_modules")
@@ -267,13 +275,16 @@ pub fn discover() -> PiAgentDiscover {
                 .join("dist")
                 .join("bundle")
                 .join("cli.js"),
-        );
+            true,
+        ));
     }
 
     let cli_path = candidates
         .into_iter()
-        .find(|path| path.is_file())
-        .map(|path| path.display().to_string());
+        .find(|(path, require_package)| {
+            path.is_file() && (!require_package || discovered_cli_is_trusted(path))
+        })
+        .map(|(path, _)| path.display().to_string());
 
     PiAgentDiscover {
         node_path,
@@ -307,6 +318,30 @@ pub(crate) fn read_pi_version(node_modules: &Path) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     value.get("version")?.as_str().map(str::to_string)
+}
+
+/// 自动发现的 Pi CLI 是否来自可信包：向上找最近的 package.json，要求
+/// `name` 为 `@earendil-works/pi-coding-agent` 且 `version` 非空。
+/// 显式 `PI_AGENT_CLI` 不走该校验（用户自行指定，允许自定义构建）。
+fn discovered_cli_is_trusted(cli: &Path) -> bool {
+    let mut current = cli.parent();
+    for _ in 0..6 {
+        let Some(dir) = current else {
+            return false;
+        };
+        let package = dir.join("package.json");
+        if let Ok(text) = std::fs::read_to_string(&package) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                return false;
+            };
+            let name = value.get("name").and_then(|item| item.as_str());
+            let version = value.get("version").and_then(|item| item.as_str());
+            return name == Some("@earendil-works/pi-coding-agent")
+                && version.map(|item| !item.trim().is_empty()).unwrap_or(false);
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(usize, u64), String> {
@@ -345,6 +380,13 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(usize, u64), String> {
 /// 这一步不是在线安装器：它把已经验证可用的 Node 包正式落到应用数据目录，
 /// 并写 `pi-version.json` 作为版本锁定记录。后续 `discover()` 会优先使用它。
 pub fn install(source: Option<&str>) -> Result<PiAgentInstallResult, String> {
+    // Windows 下 rename 正在使用的 node_modules 会共享冲突；Pi 在跑时直接拒绝。
+    if is_running() {
+        return Err("Pi 正在运行：请先停止 Pi（或等当前任务收尾）再安装。".to_string());
+    }
+    // 复制安装与在线安装 / 回滚共用同一把安装锁，避免并发 rename 互相覆盖。
+    let _install_guard = crate::services::pi_install::InstallGuard::try_acquire()
+        .ok_or_else(|| "已有 Pi 安装 / 回滚正在进行中".to_string())?;
     let source_node_modules = source
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -375,7 +417,14 @@ pub fn install(source: Option<&str>) -> Result<PiAgentInstallResult, String> {
     if temp.exists() {
         let _ = std::fs::remove_dir_all(&temp);
     }
-    let (files, bytes) = copy_tree(&source, &temp)?;
+    let (files, bytes) = match copy_tree(&source, &temp) {
+        Ok(stats) => stats,
+        Err(error) => {
+            // 复制失败必须清掉半成品临时目录，避免几十 MB 残留。
+            let _ = std::fs::remove_dir_all(&temp);
+            return Err(error);
+        }
+    };
 
     let backup = pi_data_root().join(format!(
         "node_modules.old-{}",
@@ -391,9 +440,15 @@ pub fn install(source: Option<&str>) -> Result<PiAgentInstallResult, String> {
     if let Err(error) = std::fs::rename(&temp, &target) {
         let _ = std::fs::remove_dir_all(&temp);
         if backup.exists() {
-            let _ = std::fs::rename(&backup, &target);
+            if let Err(restore_error) = std::fs::rename(&backup, &target) {
+                return Err(format!(
+                    "安装 Pi 失败：{error}；恢复旧安装也失败：{restore_error}（旧安装保留在 {}）",
+                    backup.display()
+                ));
+            }
+            return Err(format!("安装 Pi 失败：{error}；已恢复旧安装。"));
         }
-        return Err(format!("安装 Pi 失败：{error}"));
+        return Err(format!("安装 Pi 失败：{error}；无上一版本可恢复。"));
     }
     let _ = std::fs::remove_dir_all(&backup);
 
@@ -1017,4 +1072,51 @@ pub fn set_error(message: impl Into<String>) {
     let message = message.into();
     push_log(&format!("[pi:error] {message}"));
     set_last_error(Some(message));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 自动发现候选必须校验包身份：非官方包名 / 缺 version 一律拒绝，
+    /// 防止 TEMP 或 npm 目录里的同名假 cli.js 被宿主执行。
+    #[test]
+    fn discovered_cli_requires_matching_package() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-llm-pi-discover-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("@earendil-works").join("pi-coding-agent");
+        let cli = package.join("dist").join("bundle").join("cli.js");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, "// cli").unwrap();
+
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"not-pi","version":"9.9.9"}"#,
+        )
+        .unwrap();
+        assert!(!discovered_cli_is_trusted(&cli), "包名不符必须拒绝");
+
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        assert!(discovered_cli_is_trusted(&cli), "官方包必须通过");
+
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@earendil-works/pi-coding-agent"}"#,
+        )
+        .unwrap();
+        assert!(!discovered_cli_is_trusted(&cli), "缺 version 必须拒绝");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

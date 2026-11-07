@@ -39,6 +39,32 @@ const VERSION_LIST_MAX: usize = 15;
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
+/// 全局安装互斥锁：在线安装、本地复制安装与回滚共用同一把锁。
+///
+/// 这三条路径都会 rename 同一份 `<pi data>/node_modules`，必须串行执行，
+/// 否则 Windows 下并发 rename 会共享冲突 / 互相覆盖。用 RAII 守卫保证任何
+/// 错误路径（含提前 `return` 与 panic  unwind）都会释放锁，避免死锁残留。
+pub(crate) struct InstallGuard {
+    _private: (),
+}
+
+impl InstallGuard {
+    /// 尝试占用安装锁；已被占用时返回 `None`。
+    pub(crate) fn try_acquire() -> Option<Self> {
+        if INSTALLING.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self { _private: () })
+        }
+    }
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiNpmVersionInfo {
@@ -134,9 +160,18 @@ pub fn installed_version() -> Option<String> {
     pi_agent::read_pi_version(&node_modules_root())
 }
 
+/// 回滚点是否是一份可回滚的 Pi 安装：包目录在位且 package.json 带版本号。
+///
+/// 不能用 `find_node_modules`：它只认路径组件名恰好是 `node_modules` 的目录，
+/// 而回滚点叫 `node_modules.backup`，永远匹配不上（曾导致回滚入口被恒隐藏）。
+/// 这里直接读回滚点里的包版本，与 `rollback_inner` 的判定口径一致。
+fn rollback_point_ready(backup: &Path) -> bool {
+    pi_agent::read_pi_version(backup).is_some()
+}
+
 /// 是否存在可回滚的上一版本。
 pub fn rollback_available() -> bool {
-    pi_agent::find_node_modules(&rollback_point()).is_some()
+    rollback_point_ready(&rollback_point())
 }
 
 /// 读 `pi-version.json`；不存在或解析失败时返回 None。
@@ -383,15 +418,42 @@ fn dir_stats(dir: &Path) -> (usize, u64) {
 }
 
 /// 安装失败 / 冒烟失败时把回滚点换回 node_modules。
-fn restore_backup(backup: &Path) {
+///
+/// 返回 `Ok(true)` = 已恢复旧版本；`Ok(false)` = 没有回滚点（首次安装失败，
+/// 无旧版本可恢复）；`Err` = 恢复失败。恢复失败必须写日志并如实上报，绝不能
+/// 谎称「已恢复」——否则用户以为旧版本还在，实际 node_modules 已损坏 / 为空。
+fn restore_backup(backup: &Path) -> Result<bool, String> {
     let target = node_modules_root();
-    if backup.exists() {
-        if target.exists() {
-            let _ = std::fs::remove_dir_all(&target);
-        }
-        let _ = std::fs::rename(backup, &target);
-        pi_agent::add_log("[pi:install] 已恢复上一版本 node_modules");
+    if !backup.exists() {
+        return Ok(false);
     }
+    if target.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&target) {
+            let message = format!("无法移除损坏的 node_modules：{error}");
+            pi_agent::add_log(&format!("[pi:install] 恢复上一版本失败：{message}"));
+            return Err(message);
+        }
+    }
+    if let Err(error) = std::fs::rename(backup, &target) {
+        let message = format!("{error}（回滚点仍在 {}）", backup.display());
+        pi_agent::add_log(&format!("[pi:install] 恢复上一版本失败：{message}"));
+        return Err(message);
+    }
+    pi_agent::add_log("[pi:install] 已恢复上一版本 node_modules");
+    Ok(true)
+}
+
+/// 把安装失败原因与恢复结果拼成面向用户的错误信息。
+///
+/// 只有真正恢复成功才说「已恢复上一版本」；恢复失败 / 无旧版本时如实说明，
+/// 避免误导用户以为旧安装仍然可用。
+fn fail_with_restore(reason: &str, backup: &Path) -> String {
+    let outcome = match restore_backup(backup) {
+        Ok(true) => "已恢复上一版本".to_string(),
+        Ok(false) => "无上一版本可恢复".to_string(),
+        Err(error) => format!("恢复上一版本失败：{error}"),
+    };
+    format!("{reason}；{outcome}。")
 }
 
 fn read_piped(child: &mut Child) -> String {
@@ -453,12 +515,9 @@ pub fn install_online(
     if pi_agent::is_running() {
         return Err("Pi 正在运行：请先停止 Pi（或等当前任务收尾）再安装 / 升级。".to_string());
     }
-    if INSTALLING.swap(true, Ordering::SeqCst) {
-        return Err("已有 Pi 在线安装在进行中".to_string());
-    }
-    let result = install_online_inner(&version, &registry, node_path, proxy_url);
-    INSTALLING.store(false, Ordering::SeqCst);
-    result
+    let _guard = InstallGuard::try_acquire()
+        .ok_or_else(|| "已有 Pi 安装 / 回滚正在进行中".to_string())?;
+    install_online_inner(&version, &registry, node_path, proxy_url)
 }
 
 fn install_online_inner(
@@ -539,8 +598,10 @@ fn install_online_inner(
     ) {
         Ok(child) => child,
         Err(error) => {
-            restore_backup(&backup);
-            return Err(format!("启动 npm 失败：{error}"));
+            return Err(fail_with_restore(
+                &format!("启动 npm 失败：{error}"),
+                &backup,
+            ));
         }
     };
 
@@ -569,27 +630,28 @@ fn install_online_inner(
     let status = match child.wait() {
         Ok(status) => status,
         Err(error) => {
-            restore_backup(&backup);
-            return Err(format!("等待 npm 失败：{error}"));
+            return Err(fail_with_restore(
+                &format!("等待 npm 失败：{error}"),
+                &backup,
+            ));
         }
     };
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
 
     if !status.success() {
-        restore_backup(&backup);
+        let reason = format!("npm 安装失败（exit {status}）");
         return Err(format!(
-            "npm 安装失败（exit {status}），已恢复上一版本；详情见 Pi 运行日志。"
+            "{}详情见 Pi 运行日志。",
+            fail_with_restore(&reason, &backup)
         ));
     }
 
     // npm 可能装出别的东西；必须确认目标包在位且版本一致。
     let installed = pi_agent::read_pi_version(&target).unwrap_or_default();
     if installed != version {
-        restore_backup(&backup);
-        return Err(format!(
-            "npm 完成但安装的版本是 {installed:?}，期望 {version:?}；已恢复上一版本。"
-        ));
+        let reason = format!("npm 完成但安装的版本是 {installed:?}，期望 {version:?}");
+        return Err(fail_with_restore(&reason, &backup));
     }
 
     let cli = target
@@ -603,9 +665,8 @@ fn install_online_inner(
         .filter(|value| !value.is_empty())
         .unwrap_or("node");
     if let Err(error) = smoke_test(node, &cli) {
-        restore_backup(&backup);
         pi_agent::add_log(&format!("[pi:install] 冒烟失败：{error}"));
-        return Err(format!("{error}；已恢复上一版本。"));
+        return Err(fail_with_restore(&format!("冒烟测试失败：{error}"), &backup));
     }
 
     let (files, bytes) = dir_stats(&target);
@@ -643,12 +704,9 @@ pub fn rollback() -> Result<PiAgentInstallResult, String> {
     if pi_agent::is_running() {
         return Err("Pi 正在运行：请先停止 Pi 再回滚。".to_string());
     }
-    if INSTALLING.swap(true, Ordering::SeqCst) {
-        return Err("已有 Pi 在线安装在进行中".to_string());
-    }
-    let result = rollback_inner(&backup);
-    INSTALLING.store(false, Ordering::SeqCst);
-    result
+    let _guard = InstallGuard::try_acquire()
+        .ok_or_else(|| "已有 Pi 安装 / 回滚正在进行中".to_string())?;
+    rollback_inner(&backup)
 }
 
 fn rollback_inner(backup: &Path) -> Result<PiAgentInstallResult, String> {
@@ -718,6 +776,41 @@ mod tests {
         assert!(sanitize_version("").is_err());
         assert!(sanitize_version("1.5.0; rm -rf /").is_err());
         assert!(sanitize_version("1.5.0 & echo").is_err());
+    }
+
+    /// 回滚点判定必须认 `node_modules.backup`（而非名字恰好为 node_modules 的目录）：
+    /// 旧实现用 find_node_modules 恒返回 None，导致回滚入口永远不可见。
+    #[test]
+    fn rollback_point_ready_checks_package_version() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-llm-pi-rollback-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!rollback_point_ready(&root), "空目录不得视为可回滚");
+
+        let package_dir = root.join("@earendil-works").join("pi-coding-agent");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        assert!(
+            rollback_point_ready(&root),
+            "带 valid package.json 的 node_modules.backup 必须可回滚"
+        );
+
+        std::fs::write(package_dir.join("package.json"), "{}").unwrap();
+        assert!(
+            !rollback_point_ready(&root),
+            "缺 version 的 package.json 不得视为可回滚"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
