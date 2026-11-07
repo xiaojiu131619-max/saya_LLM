@@ -1,4 +1,4 @@
-export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata' | 'webui';
+export type ViewType = 'home' | 'chat' | 'settings' | 'tools' | 'kernel' | 'agent' | 'modelLoad' | 'usage' | 'apiStatus' | 'logs' | 'llamaLogs' | 'data' | 'modelTheme' | 'skills' | 'embedding' | 'fast27b' | 'strata' | 'webui' | 'pet' | 'device';
 
 /**
  * 顶层界面：**两棵完全独立的界面树**，各有各的侧边栏与导航。
@@ -462,6 +462,8 @@ export interface ChatSession {
   messages: Message[];
   /** Pi 内核会话 id：每个 Chat 会话独立，切换后恢复各自上下文。 */
   piSessionId?: string;
+  /** 绑定的 Agent 工作区 id；主对话或旧会话缺省。 */
+  workspaceId?: string;
 }
 
 export interface MessageStats {
@@ -576,4 +578,4 @@ export type ChatEngineId = 'main' | 'fast27b' | 'strata';
 export type WebUiEngineId = 'main' | 'fast27b' | 'strata';
 
 /** Agent 页标签（跨面板跳转用；放在全局状态里，画布面板按钮可直接切到 Pi 标签）。 */
-export type AgentTabId = 'pi' | 'canvas';
+export type AgentTabId = 'pi' | 'canvas' | 'skills';

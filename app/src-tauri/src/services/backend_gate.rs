@@ -60,20 +60,3 @@ pub fn ensure_exclusive(target: Backend, app: &AppHandle) -> Result<Vec<&'static
     }
     Ok(stopped)
 }
-
-/// 当前有哪个后端在跑（用于「对话后端自动选择」的兜底判断）。
-///
-/// 三个都不在跑时返回 None。两个以上同时存活属于异常状态（互斥闸门应已阻止），
-/// 此时优先回报主模型，其次 NiNfer，最后 Strata——与启动成本从低到高一致。
-pub fn active_backend() -> Option<Backend> {
-    if process_manager::is_server_running() {
-        return Some(Backend::Main);
-    }
-    if fast27b_manager::is_fast27b_running() {
-        return Some(Backend::Fast27b);
-    }
-    if strata_manager::is_strata_running() {
-        return Some(Backend::Strata);
-    }
-    None
-}

@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Eraser,
   FileText,
   FileWarning,
   Info,
@@ -19,9 +20,10 @@ import {
   Sparkles,
   Square,
   Tag,
-  Trash2,
+  Minimize2,
   Wrench,
   X,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { useSystemStats } from '@/hooks/useSystemStats';
@@ -42,7 +44,21 @@ import {
   type SessionExportOptions,
 } from '@/lib/sessionExport';
 import ExportSessionDialog from '@/features/chat/ExportSessionDialog';
+import ChatWorkPanel from '@/features/chat/ChatWorkPanel';
 import { usePiRuntime } from '@/features/pi/PiRuntimeContext';
+import { piAgentCompact, piAgentSkillsIndex, piAgentStop, type PiPermissionMode, type PiSkillMeta } from '@/lib/ipc/pi';
+import { connectMcpServer, disconnectMcpServer, getMcpStatuses, listMcpServers } from '@/lib/ipc/mcp';
+import {
+  AGENT_WORKSPACES_CHANGED,
+  ensureDefaultAgentWorkspace,
+  loadActiveAgentWorkspaceId,
+  loadAgentWorkspaces,
+  pickAgentWorkspaceFolder,
+  saveActiveAgentWorkspaceId,
+  updateAgentWorkspace,
+  type AgentWorkspace,
+} from '@/lib/workspaces';
+import type { McpServerEntry, McpServerStatus } from '@/types';
 import type { ChatEngineId, ChatMessageContentPart, ToolActivity } from '@/types';
 import { newPiSessionId, sessionWorkDir } from '@/lib/piConfig';
 import {
@@ -66,7 +82,6 @@ import {
 import type { ChatSession, Message } from '@/types';
 import type { ReasoningMode, ReasoningProfile } from '@/types';
 import { planReasoning, reasoningProfileFromModel } from '@/lib/reasoningGears';
-import { toolLabel } from '@/lib/llamaTools';
 import useMediaQuery from '@/hooks/useMediaQuery';
 import {
   FAST27B_SERVICE_COLOR,
@@ -245,6 +260,17 @@ function createStreamFlusher(flush: (content: string) => void, intervalMs = 48) 
   return { push, commit };
 }
 
+const PI_PERMISSION_OPTIONS: Array<{ value: PiPermissionMode; label: string; hint: string }> = [
+  { value: 'plan', label: '只读', hint: '读/列目录放行；写、改、命令一律拒绝' },
+  { value: 'auto', label: '守门', hint: '新建文件放行；覆盖/修改/命令逐条询问' },
+  { value: 'full', label: '放行', hint: '工作区内文件操作放行；命令仍挡危险命令' },
+];
+const PERMISSION_LABELS: Record<PiPermissionMode, string> = {
+  plan: '只读',
+  auto: '守门',
+  full: '放行',
+};
+
 export default function ChatPage() {
   const { state, dispatch } = useApp();
   const [inputText, setInputText] = useState('');
@@ -260,6 +286,9 @@ export default function ChatPage() {
   const attachmentReadsRef = useRef(0);
   const internalTextDragRef = useRef(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const permissionMenuRef = useRef<HTMLDivElement>(null);
+  const toolMenuRef = useRef<HTMLDivElement>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   /** 正在用模型总结标题的会话（侧边栏据此显示转圈）。 */
   const [titleBusyIds, setTitleBusyIds] = useState<Set<string>>(new Set());
@@ -331,6 +360,95 @@ export default function ChatPage() {
   const piRuntime = usePiRuntime();
   const piConfig = piRuntime.config;
   const piStatus = piRuntime.status;
+
+  // ---- Agent 工作区：真实本地文件夹，只有它内部的文件/命令享有 Pi 高权限 ----
+  const [workspaces, setWorkspaces] = useState<AgentWorkspace[]>(() => loadAgentWorkspaces());
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState(() => loadActiveAgentWorkspaceId());
+  const activeWorkspace = useMemo(
+    () => workspaces.find((item) => item.id === activeWorkspaceId) ?? workspaces[0],
+    [workspaces, activeWorkspaceId],
+  );
+
+  useEffect(() => {
+    const sync = () => setWorkspaces(loadAgentWorkspaces());
+    window.addEventListener(AGENT_WORKSPACES_CHANGED, sync);
+    return () => window.removeEventListener(AGENT_WORKSPACES_CHANGED, sync);
+  }, []);
+
+  // 首次进入 Pi 工作区：用 Pi 的默认工作目录补一个工作区，开箱即用。
+  useEffect(() => {
+    if (scope !== 'pi' || workspaces.length > 0) return;
+    const defaultPath = piConfig?.workDir?.trim();
+    if (!defaultPath) return;
+    const created = ensureDefaultAgentWorkspace(defaultPath);
+    if (!created) return;
+    setWorkspaces(loadAgentWorkspaces());
+    setActiveWorkspaceId(created.id);
+    saveActiveAgentWorkspaceId(created.id);
+  }, [scope, workspaces.length, piConfig?.workDir]);
+
+  useEffect(() => {
+    if (workspaces.length === 0) return;
+    if (workspaces.some((item) => item.id === activeWorkspaceId)) return;
+    const nextId = workspaces[0].id;
+    setActiveWorkspaceId(nextId);
+    saveActiveAgentWorkspaceId(nextId);
+  }, [workspaces, activeWorkspaceId]);
+
+  // 工作区权限档跟随：切到某个工作区时把它的权限同步给运行中的 Pi。
+  useEffect(() => {
+    if (scope !== 'pi' || !activeWorkspace) return;
+    if (piConfig?.permissionMode === activeWorkspace.permissionMode) return;
+    void piRuntime.setPermissionMode(activeWorkspace.permissionMode);
+  }, [scope, activeWorkspace, piConfig?.permissionMode, piRuntime]);
+
+  // ---- 输入栏工具浮窗：技能树 + MCP，直接就地操作，不再跳设置页 ----
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const [skillCount, setSkillCount] = useState<number | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerEntry[]>([]);
+  const [mcpStatuses, setMcpStatuses] = useState<McpServerStatus[]>([]);
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!toolMenuOpen) return;
+    let cancelled = false;
+    void (async () => {
+      const dir = piConfig?.skillsDir?.trim();
+      const [skills, servers, statuses] = await Promise.all([
+        dir ? piAgentSkillsIndex(dir).catch(() => [] as PiSkillMeta[]) : Promise.resolve([] as PiSkillMeta[]),
+        listMcpServers().catch(() => [] as McpServerEntry[]),
+        getMcpStatuses().catch(() => [] as McpServerStatus[]),
+      ]);
+      if (cancelled) return;
+      setSkillCount(skills.length);
+      setMcpServers(servers);
+      setMcpStatuses(statuses);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [toolMenuOpen, piConfig?.skillsDir]);
+
+  const toggleMcpServer = async (server: McpServerEntry) => {
+    const status = mcpStatuses.find((item) => item.id === server.id);
+    const connected = status && status.state !== 'stopped' && status.state !== 'error';
+    setMcpBusy(server.id);
+    try {
+      if (connected) await disconnectMcpServer(server.id);
+      else await connectMcpServer(server.id);
+      setMcpStatuses(await getMcpStatuses());
+      // Pi 的工具清单在启动时固定：连接/断开后停掉空闲实例，下一轮发送自动带新工具重启。
+      if (piStatus?.running && !isAnyGenerating) {
+        await piAgentStop().catch(() => undefined);
+        await piRuntime.refreshStatus();
+        setStopMessage('MCP 工具已更新；下一轮发送会自动重启 Pi 并加载新工具。');
+      }
+    } catch (reason) {
+      setStopMessage(`MCP 操作失败：${String(reason instanceof Error ? reason.message : reason)}`);
+    } finally {
+      setMcpBusy(null);
+    }
+  };
 
   // 思考挡位自动识别：按模型对话模板（GGUF 原文，或加载配置里覆盖的自定义模板）
   // 判断该模型到底认哪些挡位，再把界面四挡意图翻译成实际下发的参数。
@@ -414,8 +532,16 @@ export default function ChatPage() {
     () => [...(state.chatSessions[historyKey] ?? [])].sort((a, b) => b.updatedAt - a.updatedAt),
     [state.chatSessions, historyKey]
   );
-  const activeSessionId = state.activeChatSessionIds[historyKey] || chatSessions[0]?.id;
-  const activeSession = chatSessions.find((session) => session.id === activeSessionId) ?? chatSessions[0];
+  // Pi 工作区：Agent 工作区各自的会话互相隔离；主对话保持原样。
+  const workspaceFilteredSessions = useMemo(() => {
+    if (scope !== 'pi' || workspaces.length === 0) return chatSessions;
+    const fallbackId = workspaces[0]?.id;
+    const targetId = activeWorkspace?.id ?? fallbackId;
+    return chatSessions.filter((session) => (session.workspaceId ?? fallbackId) === targetId);
+  }, [chatSessions, scope, workspaces, activeWorkspace?.id]);
+  const activeSessionId = workspaceFilteredSessions.find((session) => session.id === state.activeChatSessionIds[historyKey])?.id
+    || workspaceFilteredSessions[0]?.id;
+  const activeSession = workspaceFilteredSessions.find((session) => session.id === activeSessionId) ?? workspaceFilteredSessions[0];
   // 可对话判据、身份文案、发送入口全部由 scope profile 决定：
   // 主对话看补全后端，Pi 工作区看 CLI 是否可用（发送时自动启动）。
   const piSessionReady = Boolean(
@@ -462,9 +588,11 @@ export default function ChatPage() {
     ) {
       return piStatus.work_dir;
     }
+    // 工作区模式：Pi 的沙箱就是用户选中的真实文件夹，产物也落在这里。
+    if (activeWorkspace?.path) return activeWorkspace.path;
     const root = piConfig?.workDir;
     return root ? sessionWorkDir(root, activeSession.piSessionId) : undefined;
-  }, [scope, activeSession?.piSessionId, piStatus, piConfig?.workDir]);
+  }, [scope, activeSession?.piSessionId, piStatus, activeWorkspace?.path, piConfig?.workDir]);
 
   // 切换 Chat 会话时预启动目标 Pi session；启动期间由 piStarting 禁用发送。
   const prewarmPi = piRuntime.prewarm;
@@ -473,10 +601,10 @@ export default function ChatPage() {
     const piSessionId = activeSession?.piSessionId;
     if (!piSessionId || !piConfig?.cliPath.trim()) return;
     const timer = window.setTimeout(() => {
-      void prewarmPi(piSessionId);
+      void prewarmPi(piSessionId, activeWorkspace?.path);
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [scope, activeSession?.piSessionId, piConfig?.cliPath, prewarmPi]);
+  }, [scope, activeSession?.piSessionId, piConfig?.cliPath, activeWorkspace?.path, prewarmPi]);
   const activeModelSnapshot = engineTarget
     ? { runtimeModelId: chatIdentity.id, modelName: chatIdentity.name, modelColor: chatIdentity.color }
     : activeModel
@@ -574,7 +702,7 @@ export default function ChatPage() {
   };
 
   // 会话搜索：标题模糊匹配 + 对话内正文检索，命中项带着摘要一起给侧边栏。
-  const sessionSearchResult = useMemo(() => searchSessions(chatSessions, sessionSearch), [chatSessions, sessionSearch]);
+  const sessionSearchResult = useMemo(() => searchSessions(workspaceFilteredSessions, sessionSearch), [workspaceFilteredSessions, sessionSearch]);
   const filteredSessions = sessionSearchResult.sessions;
   const sessionSearchHits = sessionSearchResult.hits;
 
@@ -701,6 +829,21 @@ export default function ChatPage() {
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [reasoningMenuOpen]);
+
+  useEffect(() => {
+    if (!permissionMenuOpen && !toolMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (permissionMenuOpen && target && !permissionMenuRef.current?.contains(target)) {
+        setPermissionMenuOpen(false);
+      }
+      if (toolMenuOpen && target && !toolMenuRef.current?.contains(target)) {
+        setToolMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [permissionMenuOpen, toolMenuOpen]);
 
   const handleMessagesScroll = () => {
     const viewport = messagesViewportRef.current;
@@ -1567,8 +1710,17 @@ export default function ChatPage() {
     }
     shouldStickToBottomRef.current = true;
 
-    const session = activeSession ?? createChatSession(historyKey, '新对话', undefined);
+    const session = activeSession ?? {
+      ...createChatSession(historyKey, '新对话', undefined),
+      workspaceId: activeWorkspace?.id,
+    };
     if (!activeSession) dispatch({ type: 'CREATE_CHAT_SESSION', payload: { session } });
+    if (activeWorkspace?.id && session.workspaceId !== activeWorkspace.id) {
+      dispatch({
+        type: 'SET_CHAT_SESSION_WORKSPACE',
+        payload: { modelId: session.modelId, sessionId: session.id, workspaceId: activeWorkspace.id },
+      });
+    }
     const sessionId = session.id;
     const sessionModelId = session.modelId;
     const piSessionId = session.piSessionId || newPiSessionId();
@@ -1615,6 +1767,7 @@ export default function ChatPage() {
       sessionModelId,
       piSessionId,
       messageId: assistantMsgId,
+      workspaceDir: activeWorkspace?.path,
     });
   };
 
@@ -1647,7 +1800,68 @@ export default function ChatPage() {
   };
 
   const handleNewSession = () => {
-    dispatch({ type: 'CREATE_CHAT_SESSION', payload: { session: createChatSession(historyKey, '新对话', isAgentScope ? undefined : activeModelSnapshot) } });
+    const session = {
+      ...createChatSession(historyKey, '新对话', isAgentScope ? undefined : activeModelSnapshot),
+      workspaceId: isAgentScope ? activeWorkspace?.id : undefined,
+    };
+    dispatch({ type: 'CREATE_CHAT_SESSION', payload: { session } });
+  };
+
+  /** 切换工作区：沿用该工作区最近一条会话，没有就新建一条。 */
+  const handleSelectWorkspace = (workspaceId: string) => {
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return;
+    setActiveWorkspaceId(workspaceId);
+    saveActiveAgentWorkspaceId(workspaceId);
+    if (piConfig?.permissionMode !== workspace.permissionMode) {
+      void piRuntime.setPermissionMode(workspace.permissionMode);
+    }
+    const fallbackId = workspaces[0]?.id;
+    const target = chatSessions.find(
+      (session) => (session.workspaceId ?? fallbackId) === workspaceId,
+    );
+    if (target) {
+      dispatch({ type: 'SET_ACTIVE_CHAT_SESSION', payload: { modelId: historyKey, sessionId: target.id } });
+      return;
+    }
+    dispatch({
+      type: 'CREATE_CHAT_SESSION',
+      payload: {
+        session: { ...createChatSession(historyKey, '新对话'), workspaceId },
+      },
+    });
+  };
+
+  /** 选择一个新的本地文件夹作为工作区，并在其中开一条新对话。 */
+  const handlePickWorkspace = async () => {
+    const workspace = await pickAgentWorkspaceFolder().catch(() => null);
+    if (!workspace) return;
+    setWorkspaces(loadAgentWorkspaces());
+    setActiveWorkspaceId(workspace.id);
+    saveActiveAgentWorkspaceId(workspace.id);
+    if (piConfig?.permissionMode !== workspace.permissionMode) {
+      void piRuntime.setPermissionMode(workspace.permissionMode);
+    }
+    dispatch({
+      type: 'CREATE_CHAT_SESSION',
+      payload: {
+        session: { ...createChatSession(historyKey, '新对话'), workspaceId: workspace.id },
+      },
+    });
+  };
+
+  const currentPermissionMode: PiPermissionMode =
+    activeWorkspace?.permissionMode
+    ?? piConfig?.permissionMode
+    ?? (piStatus?.permission_mode === 'plan' || piStatus?.permission_mode === 'full' ? piStatus.permission_mode : 'auto');
+
+  const handlePermissionMode = (mode: PiPermissionMode) => {
+    if (activeWorkspace) {
+      updateAgentWorkspace(activeWorkspace.id, { permissionMode: mode });
+      setWorkspaces(loadAgentWorkspaces());
+    }
+    void piRuntime.setPermissionMode(mode);
+    setStopMessage(`权限已切换为「${PERMISSION_LABELS[mode]}」。`);
   };
 
   const handleSelectSession = (sessionId: string) => {
@@ -1821,11 +2035,10 @@ export default function ChatPage() {
     setSelectionMode(false);
   };
 
-  const handleOpenToolsSettings = () => {
-    if (typeof window !== 'undefined') {
-      window.sessionStorage.setItem('agent-llm-settings-return-view', 'chat');
-    }
-    dispatch({ type: 'SET_VIEW', payload: 'tools' });
+  /** 技能树是 Agent 工作区里的独立页，不再放在设置中心。 */
+  const openSkillsTree = () => {
+    dispatch({ type: 'SET_WORKSPACE', payload: 'agent' });
+    dispatch({ type: 'SET_AGENT_TAB', payload: 'skills' });
   };
 
   const handleClearContext = () => {
@@ -1836,6 +2049,21 @@ export default function ChatPage() {
     setAttachmentError(null);
     setStopMessage('当前对话上下文已清除。');
     shouldStickToBottomRef.current = true;
+  };
+
+  const handleCompactContext = async () => {
+    if (!isAgentScope) return;
+    if (isAnyGenerating) return;
+    if (!piStatus?.running) {
+      setStopMessage('Pi 未启动：先发送一条消息，或在 Agent 页点「启动」。');
+      return;
+    }
+    try {
+      await piAgentCompact();
+      setStopMessage('已请求 Pi 压缩上下文；完成后新任务会从摘要继续。');
+    } catch (reason) {
+      setStopMessage(`压缩上下文失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
   };
 
   const handleOpenModelLoad = () => {
@@ -1862,9 +2090,6 @@ export default function ChatPage() {
   // 展开宽度取用户拖动后保存的值；折叠时固定 64px 图标栏。
   const sidebarWidth = sidebarCollapsed ? 64 : state.sidebarWidth;
   const currentReasoningOption = REASONING_OPTIONS.find((item) => item.mode === state.chatConfig.reasoningMode) ?? REASONING_OPTIONS[1];
-  const enabledToolsText = state.chatConfig.enabledTools.length > 0
-    ? state.chatConfig.enabledTools.map(toolLabel).join('、')
-    : '未启用';
   const runtimeStatusText = isGenerating
     ? '生成中'
     : scopeProfile.statusText(scopeHeaderRuntime);
@@ -1918,6 +2143,11 @@ export default function ChatPage() {
         activeModel={sidebarModel}
         canChat={mainCanChat}
         scope={scope}
+        workspaces={workspaces.map(({ id, name, path }) => ({ id, name, path }))}
+        activeWorkspaceId={activeWorkspace?.id}
+        onSelectWorkspace={handleSelectWorkspace}
+        onPickWorkspace={() => void handlePickWorkspace()}
+        onOpenSkills={openSkillsTree}
         engineIdentity={engineTarget
           ? {
               label: engineTarget.label,
@@ -1969,15 +2199,15 @@ export default function ChatPage() {
         onExport={handleExportConfirm}
       />
 
-      {/* 页头行高 72px：三行（eyebrow 11px + 标题 18px + 状态 12px）实际占约 56px，
+      {/* 页头行高 72px：三行（eyebrow 11px + 标题 22px + 状态 12px）实际占约 50px，
           原先的 60px 在字号令牌修复后会把内容挤到溢出（实测 scrollHeight 61 > clientHeight 59），
-          72px 给上下各留约 8px 余量。 */}
+          72px 给上下各留约 8px 余量；对话页禁用得意黑，标题走正文与 semibold。 */}
       <section className="relative grid min-w-0 flex-1 grid-rows-[72px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)]">
         <header className="flex min-w-0 items-center justify-between border-b border-black/[0.055] px-5 dark:border-white/[0.055]">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
               <div className="eyebrow truncate">{scopeProfile.eyebrow(scopeHeaderRuntime)}</div>
-              <h1 className="heading-brand mt-0.5 line-clamp-2 break-words text-[length:var(--font-page-title)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h1>
+              <h1 className="heading-plain mt-0.5 truncate text-[length:var(--font-display)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h1>
               <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
                 <span className="truncate">{scopeProfile.subtitle(scopeHeaderRuntime)}</span>
                 <span className="h-1 w-1 flex-shrink-0 rounded-full bg-[var(--text-tertiary)] dark:bg-white/30" />
@@ -2055,7 +2285,7 @@ export default function ChatPage() {
             )}
             <IconButton
               icon={showSettings ? PanelRightClose : MoreHorizontal}
-              label={showSettings ? '收起对话参数' : '更多 / 对话参数'}
+              label={showSettings ? '收起工作区' : '工作区 / 更多'}
               onClick={() => setShowSettings((value) => !value)}
             />
           </div>
@@ -2077,7 +2307,12 @@ export default function ChatPage() {
                 className="anim-enter-slide-right h-full w-full max-w-sm border-l border-[var(--border)] bg-[var(--surface-muted)] p-5 shadow-xl dark:border-white/[0.08] dark:bg-[var(--app-bg)]"
                 onClick={(event) => event.stopPropagation()}
               >
-                <ChatSettingsPanel onClose={() => setShowSettings(false)} />
+                <ChatWorkPanel
+                  workspacePath={isAgentScope ? activeWorkspace?.path : undefined}
+                  workspaceName={isAgentScope ? activeWorkspace?.name : undefined}
+                  onClose={() => setShowSettings(false)}
+                  settingsContent={<ChatSettingsPanel onClose={() => setShowSettings(false)} />}
+                />
               </motion.div>
             </motion.div>
           )}
@@ -2106,7 +2341,7 @@ export default function ChatPage() {
                 <div className="flex h-full items-center justify-center text-center">
                   <div className="max-w-md px-8 py-9">
                     <div className="eyebrow mb-3">{scopeProfile.emptyEyebrow}</div>
-                    <h2 className="display-title mb-2">{activeTitle}</h2>
+                    <h2 className="heading-plain mb-2 text-[length:var(--font-display)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{activeTitle}</h2>
                     <p className="text-[length:var(--font-body)] leading-[var(--leading-ui)] text-[var(--text-tertiary)]">{emptyMessage}</p>
                   </div>
                 </div>
@@ -2251,6 +2486,62 @@ export default function ChatPage() {
                       onChange={(event) => void handleAttachFiles(event)}
                     />
                     <InputToolButton icon={Plus} label="上传文件（支持粘贴图片和跨应用拖入）" onClick={() => fileInputRef.current?.click()} disabled={isAnyGenerating} />
+                    {/* Pi 权限：就在输入框里改，不再跳设置页。权限档随工作区记忆。 */}
+                    {isAgentScope && (
+                      <div ref={permissionMenuRef} className="relative flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setPermissionMenuOpen((value) => !value)}
+                          className={`flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] border px-2.5 text-[length:var(--font-caption)] font-medium transition-colors ${
+                            currentPermissionMode === 'full'
+                              ? 'border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] text-[var(--state-warning)]'
+                              : currentPermissionMode === 'plan'
+                                ? 'border-[var(--border)] bg-[var(--surface-muted)] text-[var(--text-secondary)]'
+                                : 'border-transparent bg-transparent text-[var(--text-primary)] hover:bg-black/[0.055] dark:text-[var(--text-secondary)] dark:hover:bg-[var(--surface-raised)]'
+                          }`}
+                          title={`Pi 权限档：${PERMISSION_LABELS[currentPermissionMode]}`}
+                          aria-expanded={permissionMenuOpen}
+                        >
+                          <ShieldCheck className="h-4 w-4" />
+                          <span>{PERMISSION_LABELS[currentPermissionMode]}</span>
+                        </button>
+                        <AnimatePresence>
+                          {permissionMenuOpen && (
+                            <motion.div
+                              initial={false}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                              className="anim-enter-pop absolute bottom-10 left-0 z-20 w-64 overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                            >
+                              {PI_PERMISSION_OPTIONS.map((option) => (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setPermissionMenuOpen(false);
+                                    handlePermissionMode(option.value);
+                                  }}
+                                  className={`w-full rounded-[var(--radius-field)] px-2.5 py-2 text-left transition-colors ${
+                                    currentPermissionMode === option.value
+                                      ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                                      : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[length:var(--font-body)] font-semibold">{option.label}</span>
+                                    {currentPermissionMode === option.value ? <Check className="h-3.5 w-3.5" /> : null}
+                                  </div>
+                                  <div className="mt-0.5 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-secondary)]">{option.hint}</div>
+                                </button>
+                              ))}
+                              <div className="mt-1 border-t border-[var(--border)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)] dark:border-white/[0.08]">
+                                只有当前工作区文件夹内的文件与命令受此档控制。
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    )}
                     <div ref={reasoningMenuRef} className="relative flex-shrink-0">
                       <button
                         onClick={() => {
@@ -2320,12 +2611,89 @@ export default function ChatPage() {
                         )}
                       </AnimatePresence>
                     </div>
-                    <InputToolButton
-                      icon={Wrench}
-                      label={`工具设置：${enabledToolsText}`}
-                      onClick={handleOpenToolsSettings}
-                    />
-                    <InputToolButton icon={Trash2} label="清除上下文" onClick={handleClearContext} disabled={!activeSession || isGenerating} />
+                    <div ref={toolMenuRef} className="relative flex-shrink-0">
+                      <InputToolButton
+                        icon={Wrench}
+                        label="技能与 MCP"
+                        onClick={() => setToolMenuOpen((value) => !value)}
+                      />
+                      <AnimatePresence>
+                        {toolMenuOpen && (
+                          <motion.div
+                            initial={false}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                            className="anim-enter-pop absolute bottom-11 left-0 z-30 w-80 overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                          >
+                            <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
+                              <div className="min-w-0">
+                                <div className="text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">技能</div>
+                                <div className="text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+                                  {skillCount === null ? '读取中…' : `${skillCount} 个技能 · 宿主路由 1–2 个`}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setToolMenuOpen(false);
+                                  openSkillsTree();
+                                }}
+                                className="flex-shrink-0 rounded-[var(--radius-field)] px-2 py-1 text-[length:var(--font-eyebrow)] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-subtle)]"
+                              >
+                                技能树
+                              </button>
+                            </div>
+                            <div className="max-h-64 overflow-y-auto p-1">
+                              <div className="px-2 pb-1 pt-1.5 text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-secondary)]">MCP 服务</div>
+                              {mcpServers.length === 0 ? (
+                                <div className="px-2 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
+                                  还没有 MCP 服务。可在「设置中心 → 工具」添加；连接后会出现在这里。
+                                </div>
+                              ) : (
+                                mcpServers.map((server) => {
+                                  const status = mcpStatuses.find((item) => item.id === server.id);
+                                  const connected = Boolean(status && status.state !== 'stopped' && status.state !== 'error');
+                                  return (
+                                    <div key={server.id} className="flex items-center gap-2 rounded-[var(--radius-field)] px-2 py-1.5 hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.06]">
+                                      <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${connected ? 'bg-[var(--state-success)]' : 'bg-[var(--text-tertiary)]'}`} />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="truncate text-[length:var(--font-caption)] text-[var(--text-primary)]">{server.name}</div>
+                                        <div className="truncate text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+                                          {connected ? `${status?.tools?.length ?? 0} 个工具` : status?.error ? '连接失败' : '未连接'}
+                                        </div>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => void toggleMcpServer(server)}
+                                        disabled={mcpBusy === server.id}
+                                        className="flex-shrink-0 rounded-[var(--radius-field)] border border-[var(--border)] px-2 py-0.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50"
+                                      >
+                                        {mcpBusy === server.id ? '…' : connected ? '断开' : '连接'}
+                                      </button>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                    {isAgentScope ? (
+                      <InputToolButton
+                        icon={Minimize2}
+                        label="压缩上下文（Pi 原生压缩）"
+                        onClick={() => void handleCompactContext()}
+                        disabled={isAnyGenerating || !piStatus?.running}
+                      />
+                    ) : (
+                      <InputToolButton
+                        icon={Eraser}
+                        label="清除上下文"
+                        onClick={handleClearContext}
+                        disabled={!activeSession || isGenerating}
+                      />
+                    )}
                     <span className="ml-auto hidden min-w-0 truncate px-2 text-[length:var(--font-caption)] text-[var(--text-secondary)] min-[960px]:block">
                       Enter 发送，Shift + Enter 换行
                     </span>
@@ -2360,7 +2728,12 @@ export default function ChatPage() {
             className="hidden min-h-0 flex-shrink-0 overflow-hidden border-l border-black/[0.06] bg-[var(--surface-muted)] dark:border-white/[0.06] dark:bg-[var(--app-bg)] xl:block"
           >
             <div className="h-full w-[344px] p-5">
-              <ChatSettingsPanel onClose={() => setShowSettings(false)} />
+              <ChatWorkPanel
+                workspacePath={isAgentScope ? activeWorkspace?.path : undefined}
+                workspaceName={isAgentScope ? activeWorkspace?.name : undefined}
+                onClose={() => setShowSettings(false)}
+                settingsContent={<ChatSettingsPanel onClose={() => setShowSettings(false)} />}
+              />
             </div>
           </motion.aside>
         )}

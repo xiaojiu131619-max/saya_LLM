@@ -41,6 +41,14 @@ pub struct PiAgentStartOptions {
     pub session_id: String,
     #[serde(default)]
     pub session_dir: String,
+    /// 显式工作区目录：非空时直接作为 Pi 的沙箱与当前目录，
+    /// 不再派生 `<workDir>/<session-id>`。Chat 里选中的工作区用它，
+    /// 让同一个真实文件夹成为唯一的权限边界。
+    #[serde(default)]
+    pub workspace_dir: String,
+    /// 模型上下文窗口；缺省 32768。用于写 models.json，避免 Pi 低估可用上下文。
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 fn default_api_key() -> String {
@@ -437,9 +445,56 @@ fn validate(options: &PiAgentStartOptions) -> Result<(), String> {    if options
     Ok(())
 }
 
+/// models.json 停止后的 apiKey 占位符（与设置页的密钥回显约定一致）。
+const PI_API_KEY_PLACEHOLDER: &str = "{{SECRET_PI_API_KEY}}";
+
+/// 把 models.json 里的明文 apiKey 擦成占位符。
+///
+/// Pi 只在启动时读一次 models.json，真实 Key 只需在「运行期间」落盘；
+/// 停止 / 启动失败后就地擦除，避免引擎凭据长期明文留在磁盘上。崩溃残留的
+/// 明文会在下一次启动写盘时被覆盖。解析失败保持原样，不做破坏性改写。
+fn scrub_pi_models_api_key(agent_dir: &str) {
+    let dir = agent_dir.trim();
+    if dir.is_empty() {
+        return;
+    }
+    let path = Path::new(dir).join("models.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut models) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(providers) = models
+        .get_mut("providers")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let mut changed = false;
+    for provider in providers.values_mut() {
+        let needs_scrub = match provider.get("apiKey").and_then(serde_json::Value::as_str) {
+            Some(key) => !key.is_empty() && key != "local" && key != PI_API_KEY_PLACEHOLDER,
+            None => false,
+        };
+        if needs_scrub {
+            provider["apiKey"] = serde_json::Value::String(PI_API_KEY_PLACEHOLDER.to_string());
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&models).unwrap_or_default(),
+        );
+    }
+}
+
 /// 写入 Pi 需要的 `models.json` / `settings.json`。
 ///
 /// 这一步让用户不用手工改 Pi 配置；本轮只支持一个本地 OpenAI 兼容端点。
+/// models.json 里的真实 apiKey 只在 Pi 运行期间落盘（Pi 启动时读一次）；
+/// 停止或启动失败后会由 [`scrub_pi_models_api_key`] 擦成占位符。
 fn write_pi_config(options: &PiAgentStartOptions) -> Result<(), String> {
     let agent_dir = Path::new(options.agent_dir.trim());
     let work_dir = Path::new(options.work_dir.trim());
@@ -457,6 +512,11 @@ fn write_pi_config(options: &PiAgentStartOptions) -> Result<(), String> {
     };
 
     let mut providers = serde_json::Map::new();
+    let context_window = options
+        .context_window
+        .filter(|value| *value >= 2048)
+        .unwrap_or(32768);
+    let max_tokens = (context_window / 4).clamp(1024, 8192);
     providers.insert(
         provider.to_string(),
         serde_json::json!({
@@ -467,9 +527,9 @@ fn write_pi_config(options: &PiAgentStartOptions) -> Result<(), String> {
                 {
                     "id": model,
                     "name": model,
-                    "contextWindow": 32768,
-                    "maxTokens": 4096,
-                    "input": ["text"]
+                    "contextWindow": context_window,
+                    "maxTokens": max_tokens,
+                    "input": ["text", "image"]
                 }
             ]
         }),
@@ -529,6 +589,11 @@ pub fn stop() {
         }
     }
     pi_tools::stop_bridge();
+    let agent_dir = PI_AGENT_DIR
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_default();
+    scrub_pi_models_api_key(&agent_dir);
     PI_PID.store(0, Ordering::SeqCst);
 }
 
@@ -628,9 +693,21 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
     };
     // 每个会话一个独立工作区：<根目录>/<session-id>。路径由宿主派生，
     // 前端只传根目录，避免两边各算一次导致不一致。
-    let work_dir = work_root.join(sanitize_session_name(&session_id));
+    // 显式 workspaceDir 时直接用它：Chat 的工作区就是一个真实文件夹，
+    // 会话共享同一份文件，权限边界也以这个文件夹为准。
+    let explicit_workspace = options.workspace_dir.trim();
+    let work_dir = if explicit_workspace.is_empty() {
+        work_root.join(sanitize_session_name(&session_id))
+    } else {
+        let dir = PathBuf::from(explicit_workspace);
+        if dir.is_absolute() {
+            dir
+        } else {
+            work_root.join(dir)
+        }
+    };
     std::fs::create_dir_all(&work_dir)
-        .map_err(|error| format!("创建 Pi 会话工作区失败：{error}"))?;
+        .map_err(|error| format!("创建 Pi 工作区失败：{error}"))?;
     let session_dir = if options.session_dir.trim().is_empty() {
         default_session_dir()
     } else {
@@ -641,7 +718,13 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
     let session_dir_arg = session_dir.display().to_string();
 
     let (bridge_url, bridge_token) =
-        pi_tools::start_bridge(app.clone(), work_dir.clone(), options.permission_mode)?;
+        pi_tools::start_bridge(app.clone(), work_dir.clone(), options.permission_mode, {
+            app.state::<crate::models::app_state::AppState>()
+                .config
+                .lock()
+                .map(|config| config.mcp_servers.clone())
+                .unwrap_or_default()
+        })?;
     push_log("[pi] 工具桥已启动（127.0.0.1，随机 token）");
 
     let mut command = Command::new(node);
@@ -685,6 +768,7 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
         Ok(child) => child,
         Err(error) => {
             pi_tools::stop_bridge();
+            scrub_pi_models_api_key(&agent_dir.display().to_string());
             return Err(format!(
                 "启动 Pi 失败：{error}（检查 Node 是否在 PATH 或路径是否正确）"
             ));
@@ -697,6 +781,7 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
         _ => {
             process_manager::terminate_process_tree(&mut child, "pi-agent");
             pi_tools::stop_bridge();
+            scrub_pi_models_api_key(&agent_dir.display().to_string());
             return Err("无法获取 Pi 标准流".to_string());
         }
     };
@@ -738,7 +823,21 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
             push_log(&format!("[pi] {line}"));
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(event) => {
-                    let run_id = get_string(&PI_RUN_ID);
+                    // 事件归属哪一轮，以 Pi 的 RPC 应答为准：Pi 认下这条 prompt
+                    // （type=response 且 id 是我们的 run id）之后，后续事件才算这一轮的。
+                    //
+                    // 之前在 run() 里就把全局 run id 换掉，于是「取消上一轮后马上再发」
+                    // 时，上一轮迟迟不来的收尾事件会被打成新的一轮 —— 前端误判收尾、
+                    // 把新一轮的空气泡结掉，真正输出整段丢失。
+                    let mut run_id = get_string(&PI_RUN_ID);
+                    if event.get("type").and_then(|value| value.as_str()) == Some("response") {
+                        if let Some(id) = event.get("id").and_then(|value| value.as_str()) {
+                            if id.starts_with("run-") {
+                                set_string(&PI_RUN_ID, id);
+                                run_id = id.to_string();
+                            }
+                        }
+                    }
                     app_out
                         .emit(
                             "pi:event",
@@ -807,7 +906,7 @@ fn write_command(value: &serde_json::Value) -> Result<(), String> {
 
 /// 发一条任务。`skill_context` 是宿主雷达选中的技能正文；【长期记忆】块
 /// 由宿主读取全局记忆后自动拼在前面。返回本轮 run_id。
-pub fn run(prompt: &str, skill_context: Option<&str>) -> Result<String, String> {
+pub fn run(prompt: &str, skill_context: Option<&str>, images: Option<&[serde_json::Value]>) -> Result<String, String> {
     if !PI_RUNNING.load(Ordering::SeqCst) {
         push_log(&format!(
             "[pi] run rejected: not running pid={} session={}",
@@ -821,7 +920,8 @@ pub fn run(prompt: &str, skill_context: Option<&str>) -> Result<String, String> 
         return Err("任务不能为空".to_string());
     }
     let run_id = format!("run-{}", PI_RUN_SEQ.fetch_add(1, Ordering::SeqCst));
-    set_string(&PI_RUN_ID, &run_id);
+    // 注意：这里不要动 PI_RUN_ID。当前轮次要等 Pi 的 RPC 应答确认后才在 stdout
+    // 线程里切换，否则上一轮未收尾的事件会被算到这一轮头上（见 stdout 线程注释）。
     let mut sections = String::new();
     let memory = crate::services::pi_memory::render_memory_context();
     if !memory.is_empty() {
@@ -834,11 +934,15 @@ pub fn run(prompt: &str, skill_context: Option<&str>) -> Result<String, String> 
         ));
     }
     sections.push_str(&format!("【用户任务】\n{text}"));
-    write_command(&serde_json::json!({
+    let mut command = serde_json::json!({
         "id": run_id,
         "type": "prompt",
         "message": sections
-    }))?;
+    });
+    if let Some(images) = images.filter(|list| !list.is_empty()) {
+        command["images"] = serde_json::Value::Array(images.to_vec());
+    }
+    write_command(&command)?;
     push_log(&format!(
         "[pi] prompt {run_id}: {}",
         text.chars().take(120).collect::<String>()
@@ -853,6 +957,24 @@ pub fn cancel() -> Result<(), String> {
     }
     write_command(&serde_json::json!({ "type": "abort" }))?;
     push_log("[pi] abort");
+    Ok(())
+}
+
+/// 触发一次 Pi 原生上下文压缩（RPC `compact`）。
+///
+/// 由 Chat 输入栏的「压缩上下文」按钮调用；Pi 会用当前模型把较早的对话
+/// 汇总成摘要，后续请求从摘要继续，而不是无限增长。压缩期间不应再发新任务。
+pub fn compact(custom_instructions: Option<&str>) -> Result<(), String> {
+    if !PI_RUNNING.load(Ordering::SeqCst) {
+        return Err("Pi 未启动".to_string());
+    }
+    let id = format!("compact-{}", PI_RUN_SEQ.fetch_add(1, Ordering::SeqCst));
+    let mut command = serde_json::json!({ "id": id, "type": "compact" });
+    if let Some(text) = custom_instructions.map(str::trim).filter(|value| !value.is_empty()) {
+        command["customInstructions"] = serde_json::Value::String(text.to_string());
+    }
+    write_command(&command)?;
+    push_log("[pi] compact");
     Ok(())
 }
 

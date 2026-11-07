@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "media",
+      "label": "媒体生成",
+      "triggers": ["生成图片", "画一张", "生图", "做视频", "生成视频", "写歌", "生成音乐", "配音", "语音合成", "放大", "超分"],
+      "children": [
+        { "id": "image", "label": "图像", "members": ["image-gen", "media-enhance", "about-me-avatar", "retro-tech-illustration-cn", "living-ascii-wallpaper"] },
+        { "id": "video", "label": "视频", "members": ["video-gen", "video-studio", "video-compare-tool"] },
+        { "id": "audio", "label": "音频", "members": ["music-gen", "podcast-blueprint", "podcast-episode-writer"] },
+        { "id": "voice", "label": "语音", "members": ["edge-tts", "tts-local"] },
+        { "id": "canvas", "label": "画布转发", "members": ["comfyui-workflows"] }
+      ]
+    },
+    {
+      "id": "viz",
+      "label": "图表与信息图",
+      "triggers": ["图表", "可视化", "信息图", "时间线", "甘特图", "热力图"],
+      "children": [
+        { "id": "chart", "label": "图表", "members": ["chart-gen", "data-viz-gen", "svg-drawing", "code-to-chart", "risk-heatmap"] },
+        { "id": "timeline", "label": "时间线", "members": ["chrono-flow", "timeline-builder", "gantt-chart-builder"] },
+        { "id": "infographic", "label": "信息图与版面", "members": ["baoyu-infographic", "design-lab", "photo-magazine-cn", "journalistic-portrait-cn"] }
+      ]
+    },
+    {
+      "id": "cad3d",
+      "label": "3D 与工程",
+      "triggers": ["3d打印", "三维建模", "零件", "参数化", "电路图", "日照", "tech pack", "服装规格"],
+      "children": [
+        { "id": "modeling", "label": "三维建模", "members": ["cad-codegen", "mesh-modeling"] },
+        { "id": "print", "label": "三维打印", "members": ["print3d"] },
+        { "id": "drawing", "label": "工程与图纸", "members": ["circuit-drawing", "fashion-sketch-cn", "sun-path", "sunlight-analysis"] }
+      ]
+    },
+    {
+      "id": "docs",
+      "label": "办公文档",
+      "triggers": ["word文档", "excel表格", "电子表格", "ppt", "幻灯片", "会议纪要", "公文", "流程文档"],
+      "children": [
+        { "id": "document", "label": "文档", "members": ["docx", "pdf", "process-doc", "sop-writer", "work-report-writer"] },
+        { "id": "sheet", "label": "表格", "members": ["xlsx"] },
+        { "id": "slides", "label": "演示文稿", "members": ["guizang-ppt-skill", "geo-magazine-slides-cn", "slide-forge"] },
+        { "id": "minutes", "label": "会议纪要", "members": ["meeting-recap", "structured-minutes"] }
+      ]
+    },
+    {
+      "id": "efficiency",
+      "label": "效率与通信",
+      "triggers": ["下载", "邮件", "收件箱", "日历", "日程", "分块读取", "文件太大", "算一下"],
+      "children": [
+        { "id": "files", "label": "文件与下载", "members": ["download", "batch-download", "longread"] },
+        { "id": "mail", "label": "邮件与日程", "members": ["email-manager", "imap-smtp-email", "email-to-calendar", "pro-email-composer", "html-mail-builder"] },
+        { "id": "notes", "label": "笔记与知识库", "members": ["obsidian-markdown", "offline-kb"] },
+        { "id": "calc", "label": "计算工具", "members": ["math-compute", "workload-calculator"] }
+      ]
+    },
+    {
+      "id": "data",
+      "label": "数据与统计",
+      "triggers": ["统计检验", "显著性", "相关性", "回归分析", "异常值", "数据质量", "加权打分"],
+      "children": [
+        { "id": "stats", "label": "统计检验", "members": ["auto-hypothesis-test", "auto-stat-test", "stats-analysis", "corr-insight", "correlation-auditor", "regression-insight", "outlier-scan"] },
+        { "id": "quality", "label": "数据质量", "members": ["dataset-health-audit", "database-inspector"] },
+        { "id": "scoring", "label": "评估与决策", "members": ["weighted-scorer", "weighted-scoring", "split-test-evaluator", "saas-analyzer", "saas-metrics-coach"] }
+      ]
+    },
+    {
+      "id": "dev",
+      "label": "开发工程",
+      "triggers": ["重构", "单元测试", "压测", "部署", "日志排查", "代码审查", "api文档", "落地页原型"],
+      "children": [
+        { "id": "web", "label": "Web 与后端", "members": ["backend-building", "webapp-building", "matlab-translator"] },
+        { "id": "devdoc", "label": "API 与教程文档", "members": ["api-doc-gen", "dev-guide-generator", "dev-guide-writer", "route-to-openapi"] },
+        { "id": "quality", "label": "代码质量与测试", "members": ["code-arch-optimizer", "deep-module-refactor", "code-safety-audit", "test-driven-dev", "tdd-coach", "test-suite-architect", "software-testing-guide", "hands-on-testing", "graded-review", "independent-review", "web-security-audit"] },
+        { "id": "ops", "label": "运维与性能", "members": ["kubectl", "k8s-cluster-ops", "terraform-deploy-traps", "http-load-profiler", "http-load-tester", "py-perf-analyzer", "log-diagnostic", "log-error-digest", "storage-analyzer-khazix", "incident-retrospective", "incident-review-guide"] },
+        { "id": "workflow", "label": "协作与规范", "members": ["smart-commit-gen", "git-repo-audit", "gitlab-cli-guide", "locale-guard", "localization-toolkit", "ddd-glossary-gen", "domain-glossary"] },
+        { "id": "designeng", "label": "设计工程", "members": ["ui-blueprint", "interface-design-lab", "api-shape-explorer", "design-system-builder", "theme-kit", "lp-proto-gen", "musepool"] }
+      ]
+    },
+    {
+      "id": "writing",
+      "label": "写作与翻译",
+      "triggers": ["写一篇文章", "润色", "论文", "翻译", "演讲稿", "去AI味"],
+      "children": [
+        { "id": "general", "label": "通用写作", "members": ["general-writing", "creative-writing", "report-writing", "humanizer-zh", "copy-editor"] },
+        { "id": "academic", "label": "学术写作", "members": ["paper-writing", "research-paper-refiner", "scholarly-writing-refiner", "sci-paper-cn", "academic-paper-reviewer", "paper-review-coach", "ref-style-converter"] },
+        { "id": "translation", "label": "翻译", "members": ["translation-craft", "xindaya-translator"] },
+        { "id": "speech", "label": "演讲与修辞", "members": ["keynote-composer", "rhetoric-speech-craft"] }
+      ]
+    },
+    {
+      "id": "marketing",
+      "label": "营销与运营",
+      "triggers": ["文案", "广告", "seo", "小红书", "公众号", "知乎", "竞品分析", "客服话术", "留存"],
+      "children": [
+        { "id": "copy", "label": "文案", "members": ["ad-copywriter", "ad-creative", "copywriting", "marketing-writer", "ecom-copy-assistant"] },
+        { "id": "brand", "label": "品牌与定价", "members": ["brand-naming-lab", "campaign-planner", "pricing-advisor", "pricing-strategy"] },
+        { "id": "seo", "label": "SEO 与竞品", "members": ["seo-analyzer", "seo-copywriting-guide", "competitive-seo-intel", "competitor-analysis"] },
+        { "id": "social", "label": "社媒内容", "members": ["xhs-note-creator", "zhihu-viral-answer", "x-thread-crafter", "wechat-post-craft", "short-video-script", "video-outline-planner", "cross-platform-adapter"] },
+        { "id": "customer", "label": "客户经营", "members": ["churn-prevention", "retention-manager", "customer-reply-craft", "support-response-writer"] }
+      ]
+    },
+    {
+      "id": "research",
+      "label": "研究与查询",
+      "triggers": ["深度调研", "查证", "帮我查", "搜一下", "市场洞察", "开题"],
+      "children": [
+        { "id": "deep", "label": "深度调研", "members": ["deep-research-v2", "primary-market-research", "market-insight-report", "market-research-brief", "interactive-research-report-en", "content-research-writer", "research-writer", "research-advisor", "scientific-problem-selection"] },
+        { "id": "browse", "label": "浏览与抓取", "members": ["browse", "browse-cli", "smart-web-scraper"] },
+        { "id": "lookup", "label": "领域查证", "members": ["astro-lookup", "astro-observation-report-cn", "biology-lookup", "chemistry-lookup", "geo-lookup"] }
+      ]
+    },
+    {
+      "id": "finance",
+      "label": "金融与投资",
+      "triggers": ["股票", "a股", "行情", "财报", "估值", "etf", "基金", "融资", "投研", "大宗商品"],
+      "children": [
+        { "id": "cn", "label": "A 股与数据", "members": ["cn-finance-data", "cn-market-lookup"] },
+        { "id": "equity", "label": "个股研究", "members": ["equity-earnings-review", "equity-research-report-cn", "equity-researcher", "stock-finance-profiler", "stock-research-report-cn", "stock-tech-analysis", "commodity-research-outlook"] },
+        { "id": "fund", "label": "基金与策略", "members": ["event-etf-study", "fund-risk-analyzer", "trading-strategy-backtest", "value-invest-scorer"] },
+        { "id": "valuation", "label": "估值与财务", "members": ["cashflow-valuation", "financial-ratio-toolkit", "financial-report-reader", "financial-statement-analyzer", "investment-memo", "investor-letter-writer"] },
+        { "id": "fundraising", "label": "融资与 BP", "members": ["business-plan-ppt", "fundraising-bp-planner", "investor-pitch-planner", "vc-industry-research"] }
+      ]
+    },
+    {
+      "id": "legal",
+      "label": "法律与合规",
+      "triggers": ["法律", "合同", "合规", "隐私政策", "用户协议", "风险条款", "iso27001"],
+      "members": ["legal-contract-gen", "legal-lookup-cn", "legal-risk-analyzer", "tos-risk-checker", "compliance-review-planner", "iso-27001-evidence-collection", "regulatory-audit-generator"]
+    },
+    {
+      "id": "pm",
+      "label": "产品与项目",
+      "triggers": ["prd", "需求文档", "okr", "sprint", "排期", "向上汇报", "连环追问"],
+      "children": [
+        { "id": "product", "label": "产品定义", "members": ["idea-to-prd", "product-spec-writer", "user-story-canvas", "story-map-builder", "pipeline-blueprint", "project-sizing-guide"] },
+        { "id": "plan", "label": "计划管理", "members": ["okr-planner", "sprint-plan-builder", "iteration-planner"] },
+        { "id": "comms", "label": "沟通与追问", "members": ["audience-adapter", "audience-adaptive-comms", "cross-examine", "grilling", "deep-probe"] }
+      ]
+    },
+    {
+      "id": "learning",
+      "label": "学习与成长",
+      "triggers": ["背卡片", "复习", "测验", "教我", "面试模拟", "简历", "adhd"],
+      "children": [
+        { "id": "memory", "label": "记忆与测验", "members": ["anki-card-maker", "flashcard-studio", "bloom-quiz-maker"] },
+        { "id": "teach", "label": "教学与辅导", "members": ["teach-assist", "programming-tutor", "code-mentor", "sql-tutor"] },
+        { "id": "career", "label": "求职与个人", "members": ["interview-simulator", "resume-craft", "adhd-assistant", "adhd-daily-planner"] }
+      ]
+    },
+    {
+      "id": "medical",
+      "label": "医疗健康",
+      "triggers": ["鉴别诊断", "症状", "病历", "循证医学"],
+      "members": ["ddx-assist", "medical-evidence", "medical-record-gen"]
+    },
+    {
+      "id": "swarm",
+      "label": "多智能体与技能工厂",
+      "triggers": ["swarm", "子代理", "多代理协作", "造技能", "找技能", "蒸馏skill"],
+      "children": [
+        { "id": "factory", "label": "技能工厂", "members": ["skill-creator", "skill-creator-swarm", "nuwa-by-huashu", "skill-finder"] },
+        { "id": "swarms", "label": "Swarm 协作", "members": ["swarm-workspace", "squad-manager", "backend-building-swarm", "webapp-building-swarm", "deep-research-swarm", "vibecoding-general-swarm", "vibecoding-webapp-swarm"] }
+      ]
+    }
+  ],
+  "links": [
+    { "from": "print3d", "type": "complement", "to": "cad-codegen", "note": "打印前常需要参数化建模" },
+    { "from": "print3d", "type": "complement", "to": "mesh-modeling", "note": "打印前常需要网格修模" },
+    { "from": "cad-codegen", "type": "complement", "to": "mesh-modeling", "note": "参数化建模与网格雕刻互补" },
+    { "from": "xlsx", "type": "complement", "to": "chart-gen", "note": "表格数据常要出图" },
+    { "from": "docx", "type": "complement", "to": "pdf", "note": "文档与 PDF 处理配套" },
+    { "from": "chart-gen", "type": "complement", "to": "data-viz-gen", "note": "静态图表与交互信息图互补" },
+    { "from": "video-gen", "type": "complement", "to": "video-studio", "note": "生成视频后常要剪辑加工" },
+    { "from": "edge-tts", "type": "complement", "to": "tts-local", "note": "在线与本地语音合成二选一" },
+    { "from": "equity-research-report-cn", "type": "complement", "to": "cn-finance-data", "note": "研报常需要拉行情与财务数据" },
+    { "from": "deep-research-v2", "type": "complement", "to": "research-writer", "note": "调研结果常要成文" },
+    { "from": "browse", "type": "complement", "to": "smart-web-scraper", "note": "浏览与抓取配套" },
+    { "from": "kubectl", "type": "complement", "to": "k8s-cluster-ops", "note": "同一 kubectl 工具链" },
+    { "from": "skill-creator", "type": "complement", "to": "skill-finder", "note": "找不到技能就造一个" },
+    { "from": "idea-to-prd", "type": "complement", "to": "product-spec-writer", "note": "PRD 之后常要细化规格" },
+    { "from": "meeting-recap", "type": "complement", "to": "structured-minutes", "note": "会议纪要两种产出形态" },
+    { "from": "auto-stat-test", "type": "complement", "to": "stats-analysis", "note": "自动选检验与手工分析互补" },
+    { "from": "business-plan-ppt", "type": "complement", "to": "fundraising-bp-planner", "note": "BP 大纲与路演 PPT 配套" },
+    { "from": "code-safety-audit", "type": "complement", "to": "web-security-audit", "note": "通用与 Web 安全审计互补" },
+    { "from": "seo-analyzer", "type": "complement", "to": "competitor-analysis", "note": "SEO 体检常带竞品对比" },
+    { "from": "image-gen", "type": "depends", "to": "media-enhance", "note": "生成后常要放大增强" }
+  ]
+}

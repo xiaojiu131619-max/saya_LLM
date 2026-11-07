@@ -99,6 +99,20 @@ export interface PiAgentStartOptions {
   permissionMode: PiPermissionMode;
   sessionId: string;
   sessionDir: string;
+  /** 显式工作区目录：非空时直接作为 Pi 沙箱与当前目录（Chat 选中的工作区）。 */
+  workspaceDir?: string;
+  /** 模型上下文窗口（写进 models.json）；缺省 32768。 */
+  contextWindow?: number;
+}
+
+export interface PiSkillLink {
+  /** 对方技能名。 */
+  name: string;
+  /** complement（配套）/ depends（依赖）/ delegate（委托）。 */
+  kind: string;
+  /** outbound（from 方）/ inbound（to 方）。 */
+  direction: string;
+  note?: string;
 }
 
 export interface PiSkillMeta {
@@ -111,6 +125,12 @@ export interface PiSkillMeta {
   kind?: string;
   path: string;
   bodyChars: number;
+  /** 技能树分类路径（如 ["媒体生成","图像"]）；未收录时为空。 */
+  categoryPath?: string[];
+  /** 顶层分支声明序（_tree.json 顺序）；未收录为很大数，UI 据此给分支排序。 */
+  categoryOrder?: number;
+  /** 关联技能（_tree.json 的 links，双向展开）。 */
+  related?: PiSkillLink[];
 }
 
 export interface PiSelectedSkill {
@@ -120,11 +140,14 @@ export interface PiSelectedSkill {
   score: number;
   kind?: string;
   body: string;
+  categoryPath?: string[];
 }
 
 export interface PiSkillSelection {
   skills: PiSelectedSkill[];
   context: string;
+  /** 两级路由晋级的顶层分支名；未启用（无 _tree.json）时为空。 */
+  branches?: string[];
 }
 
 /** 会话工作区内按文件名解析出的产物位置。 */
@@ -223,11 +246,23 @@ export async function piAgentStart(options: PiAgentStartOptions) {
   return invoke<PiAgentStatus>('pi_agent_start', { options });
 }
 
-export async function piAgentRun(prompt: string, skillContext?: string) {
+export interface PiImageInput {
+  type: 'image';
+  /** base64（不含 data URL 前缀）。 */
+  data: string;
+  mimeType: string;
+}
+
+export async function piAgentRun(
+  prompt: string,
+  skillContext?: string,
+  images?: PiImageInput[],
+) {
   if (!isDesktopRuntime()) return null;
   return invoke<string>('pi_agent_run', {
     prompt,
     skillContext: skillContext?.trim() ? skillContext : null,
+    images: images && images.length > 0 ? images : null,
   });
 }
 
@@ -256,6 +291,53 @@ export async function piAgentSelectSkills(
 export async function piAgentCancel() {
   if (!isDesktopRuntime()) return;
   await invoke('pi_agent_cancel');
+}
+
+/** 手动触发 Pi 原生上下文压缩。 */
+export async function piAgentCompact(customInstructions?: string) {
+  if (!isDesktopRuntime()) return;
+  await invoke('pi_agent_compact', {
+    customInstructions: customInstructions?.trim() ? customInstructions : null,
+  });
+}
+
+/** 工作区文件树的一项。 */
+export interface WorkspaceEntry {
+  name: string;
+  relPath: string;
+  kind: 'dir' | 'file';
+  size: number;
+  modified: number;
+}
+
+export interface WorkspaceCommandOutput {
+  output: string;
+  exitCode: number;
+  timedOut: boolean;
+  truncated: boolean;
+  elapsedMs: number;
+}
+
+export async function workspaceListDir(workDir: string, relPath = '.') {
+  if (!isDesktopRuntime()) return [] as WorkspaceEntry[];
+  return invoke<WorkspaceEntry[]>('workspace_list_dir', {
+    workDir,
+    relPath: relPath.trim() || '.',
+  });
+}
+
+export async function workspaceRunCommand(workDir: string, command: string, timeout = 60) {
+  if (!isDesktopRuntime()) return null;
+  return invoke<WorkspaceCommandOutput>('workspace_run_command', {
+    workDir,
+    command,
+    timeout,
+  });
+}
+
+export async function workspaceOpenPath(workDir: string, relPath: string) {
+  if (!isDesktopRuntime()) return;
+  await invoke('workspace_open_path', { workDir, relPath });
 }
 
 /** 在会话工作区内解析产物；workDir 为空时用当前 Pi 会话。 */
@@ -303,6 +385,12 @@ export async function piAgentSetPermissionMode(mode: PiPermissionMode) {
   return invoke<string>('pi_agent_set_permission_mode', { mode });
 }
 
+/** 权限请求超时：后端已按「拒绝」处理，前端据此关掉弹窗并说明原因。 */
+export interface PiPermissionExpired {
+  id: string;
+  tool: string;
+}
+
 export interface PiAgentSubscriptions {
   onEvent: (payload: PiAgentEventPayload) => void;
   onLog: (payload: PiAgentLogPayload) => void;
@@ -311,6 +399,7 @@ export interface PiAgentSubscriptions {
   onExit: (payload: { message?: string }) => void;
   onError: (payload: { message?: string }) => void;
   onPermission: (request: PiPermissionRequest) => void;
+  onPermissionExpired: (payload: PiPermissionExpired) => void;
 }
 
 /** 订阅 Pi 进程的 Tauri 事件。返回一个统一取消订阅的函数。 */
@@ -325,6 +414,10 @@ export function subscribePiAgent(subscriptions: PiAgentSubscriptions) {
     listenDesktopEvent<{ message?: string }>('pi:exit', subscriptions.onExit),
     listenDesktopEvent<{ message?: string }>('pi:error', subscriptions.onError),
     listenDesktopEvent<PiPermissionRequest>('pi:permission', subscriptions.onPermission),
+    listenDesktopEvent<PiPermissionExpired>(
+      'pi:permission_expired',
+      subscriptions.onPermissionExpired,
+    ),
   ];
 
   return () => {

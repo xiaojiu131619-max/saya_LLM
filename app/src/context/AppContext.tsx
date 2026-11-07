@@ -98,8 +98,9 @@ type Action =
   | { type: 'DELETE_CHAT_SESSION'; payload: { modelId: string; sessionId: string } }
   | { type: 'RENAME_CHAT_SESSION'; payload: { modelId: string; sessionId: string; title: string } }
   | { type: 'ADD_MESSAGE'; payload: { modelId: string; sessionId: string; message: Message } }
-  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[]; warnings?: string[]; piSteps?: PiStep[]; piTurnId?: string; piState?: Message['piState']; artifacts?: Message['artifacts'] } }
+  | { type: 'UPDATE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string; content?: string; reasoningContent?: string; toolActivity?: ToolActivity[]; warnings?: string[]; piSteps?: PiStep[]; piTurnId?: string; piState?: Message['piState']; artifacts?: Message['artifacts']; stats?: Message['stats'] } }
   | { type: 'SET_CHAT_SESSION_PI_ID'; payload: { modelId: string; sessionId: string; piSessionId: string } }
+  | { type: 'SET_CHAT_SESSION_WORKSPACE'; payload: { modelId: string; sessionId: string; workspaceId: string } }
   | { type: 'SET_MESSAGE_STREAMING'; payload: { modelId: string; sessionId: string; messageId: string; streaming: boolean; stats?: Message['stats'] } }
   | { type: 'REPLACE_MESSAGE_AND_TRUNCATE_AFTER'; payload: { modelId: string; sessionId: string; messageId: string; message: Message } }
   | { type: 'DELETE_MESSAGE'; payload: { modelId: string; sessionId: string; messageId: string } }
@@ -700,7 +701,7 @@ function hasStreamingMessage(sessionsByModel: Record<string, ChatSession[]>) {
 }
 
 /** 设置中心里的分页：这些视图属于设置界面，不属于 Agent 工作区。 */
-const SETTINGS_VIEWS: ViewType[] = ['settings', 'kernel', 'usage', 'tools', 'skills', 'data', 'webui'];
+const SETTINGS_VIEWS: ViewType[] = ['settings', 'kernel', 'usage', 'tools', 'skills', 'data', 'webui', 'pet', 'device'];
 
 function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -910,6 +911,9 @@ function appReducer(state: AppState, action: Action): AppState {
           ...(action.payload.piTurnId !== undefined ? { piTurnId: action.payload.piTurnId } : {}),
           ...(action.payload.piState !== undefined ? { piState: action.payload.piState } : {}),
           ...(action.payload.artifacts !== undefined ? { artifacts: action.payload.artifacts } : {}),
+          // Pi 收尾时把本轮性能指标写在 UPDATE_MESSAGE 上；漏掉这一行，
+          // Pi 工作区的气泡永远只有「-- tok / --s TTFT」。
+          ...(action.payload.stats !== undefined ? { stats: action.payload.stats } : {}),
         } : m),
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
@@ -920,6 +924,14 @@ function appReducer(state: AppState, action: Action): AppState {
         ...session,
         piSessionId: action.payload.piSessionId,
         updatedAt: Date.now(),
+      }));
+      return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
+    }
+    case 'SET_CHAT_SESSION_WORKSPACE': {
+      const sessions = state.chatSessions[action.payload.modelId] || [];
+      const nextSessions = updateSessionList(sessions, action.payload.sessionId, (session) => ({
+        ...session,
+        workspaceId: action.payload.workspaceId,
       }));
       return { ...state, chatSessions: { ...state.chatSessions, [action.payload.modelId]: nextSessions } };
     }

@@ -34,6 +34,9 @@ const MAX_COMMAND_OUTPUT: usize = 32 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 const PERMISSION_TIMEOUT_SECS: u64 = 120;
+/// auto 档人工确认时允许完整展示的代码/命令上限（字符数）。超过即整体拒绝，
+/// 绝不退回截断预览——确认弹窗必须能看到将要执行的全部内容。
+const MAX_REVIEWABLE_CHARS: usize = 20_000;
 
 /// 权限三档，与界面的「只读 / 守门 / 放行」一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +115,7 @@ impl PermissionPrompt for TauriPermissionPrompt {
         let id = format!("perm-{}", PERMISSION_SEQ.fetch_add(1, Ordering::SeqCst));
         let (tx, rx) = mpsc::channel();
         if let Ok(mut pending) = PENDING_PERMISSIONS.lock() {
-            pending.insert(id.clone(), tx);
+            pending.insert(id.clone(), (tx, tool.to_string()));
         }
         let request = PiPermissionRequest {
             id: id.clone(),
@@ -122,9 +125,22 @@ impl PermissionPrompt for TauriPermissionPrompt {
             mode: mode.as_str().to_string(),
         };
         self.app.emit("pi:permission", &request).ok();
-        let allow = rx
-            .recv_timeout(Duration::from_secs(PERMISSION_TIMEOUT_SECS))
-            .unwrap_or(false);
+        // 超时按「拒绝」处理，但必须把这件事告诉前端：弹窗要自己关掉并说明原因。
+        // 否则用户隔了一分钟再回来点「允许」，只会看到一句「权限回传失败」，
+        // 而真实情况是这次操作早被静默拒了。
+        let allow = match rx.recv_timeout(Duration::from_secs(PERMISSION_TIMEOUT_SECS)) {
+            Ok(allow) => allow,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.app
+                    .emit(
+                        "pi:permission_expired",
+                        serde_json::json!({ "id": id, "tool": tool }),
+                    )
+                    .ok();
+                false
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => false,
+        };
         if let Ok(mut pending) = PENDING_PERMISSIONS.lock() {
             pending.remove(&id);
         }
@@ -138,6 +154,8 @@ pub struct PiToolState {
     pub prompt: Arc<dyn PermissionPrompt>,
     /// 长期记忆目录；`save_memory` 的落点，测试可注入隔离目录。
     pub memory_dir: PathBuf,
+    /// 已启用的 MCP 服务器配置；Pi 通过 `mcp__<服务器>__<工具>` 调用的路由表。
+    pub mcp_servers: Vec<crate::models::mcp_types::McpServerConfig>,
 }
 
 static BRIDGE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -146,8 +164,13 @@ static PERMISSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static BRIDGE_TOKEN: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 static PERMISSION_MODE: Lazy<Mutex<PiPermissionMode>> =
     Lazy::new(|| Mutex::new(PiPermissionMode::Auto));
-static PENDING_PERMISSIONS: Lazy<Mutex<HashMap<String, mpsc::Sender<bool>>>> =
+/// 挂起的权限确认：id → (应答通道, 工具名)。工具名用于失效事件回显。
+static PENDING_PERMISSIONS: Lazy<Mutex<HashMap<String, (mpsc::Sender<bool>, String)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 发权限事件用的 AppHandle；start_bridge 时刷新。
+/// deny_all_pending（停止 / 重启 Pi）要靠它通知前端关闭失效弹窗。
+static PROMPT_APP: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
 
 static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
@@ -223,16 +246,38 @@ pub fn answer_permission(id: &str, allow: bool) -> Result<(), String> {
         .lock()
         .map_err(|_| "权限请求表锁失败".to_string())?
         .remove(id)
+        .map(|(sender, _tool)| sender)
         .ok_or_else(|| "没有待确认的请求（可能已超时）".to_string())?;
     sender
         .send(allow)
         .map_err(|_| "确认请求已失效".to_string())
 }
 
+/// 拒绝并清空所有挂起的权限确认（停止 / 重启 Pi 时调用）。
+///
+/// 除了唤醒工具线程按「拒绝」处理，还要给前端补发 `pi:permission_expired`：
+/// 弹窗是为这次请求挂出来的，后端单方面失效后前端并不知道，用户隔一会儿
+/// 再点「允许」只是对着一个已不存在的请求确认。超时路径在 `ask` 里发同一事件。
 fn deny_all_pending() {
-    if let Ok(mut pending) = PENDING_PERMISSIONS.lock() {
-        for (_, sender) in pending.drain() {
-            let _ = sender.send(false);
+    let drained: Vec<(String, String)> = if let Ok(mut pending) = PENDING_PERMISSIONS.lock() {
+        pending
+            .drain()
+            .map(|(id, (sender, tool))| {
+                let _ = sender.send(false);
+                (id, tool)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if drained.is_empty() {
+        return;
+    }
+    let app = PROMPT_APP.lock().ok().and_then(|slot| slot.clone());
+    if let Some(app) = app {
+        for (id, tool) in drained {
+            app.emit("pi:permission_expired", json!({ "id": id, "tool": tool }))
+                .ok();
         }
     }
 }
@@ -242,6 +287,7 @@ pub fn start_bridge(
     app: AppHandle,
     sandbox: PathBuf,
     mode: PiPermissionMode,
+    mcp_servers: Vec<crate::models::mcp_types::McpServerConfig>,
 ) -> Result<(String, String), String> {
     stop_bridge();
     std::fs::create_dir_all(&sandbox)
@@ -260,6 +306,9 @@ pub fn start_bridge(
     let token = random_token();
     set_mode(mode);
     set_string(&BRIDGE_TOKEN, &token);
+    if let Ok(mut slot) = PROMPT_APP.lock() {
+        *slot = Some(app.clone());
+    }
     let generation = BRIDGE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     BRIDGE_RUNNING.store(true, Ordering::SeqCst);
 
@@ -267,6 +316,7 @@ pub fn start_bridge(
         sandbox,
         prompt: Arc::new(TauriPermissionPrompt { app: app.clone() }),
         memory_dir: crate::services::pi_memory::memory_dir(),
+        mcp_servers,
     });
 
     thread::spawn(move || {
@@ -331,6 +381,14 @@ fn handle_request(state: &std::sync::Arc<PiToolState>, mut request: tiny_http::R
             request,
             401,
             &json!({ "ok": false, "error": "未授权的工具请求", "denied": true }),
+        );
+        return;
+    }
+    if request.method() == &Method::Get && request.url() == "/mcp-tools" {
+        respond_json(
+            request,
+            200,
+            &json!({ "tools": collect_mcp_tools(state) }),
         );
         return;
     }
@@ -558,6 +616,82 @@ fn permission_for_write(
     }
 }
 
+/// 汇总已连接 MCP 服务器的工具，供 Pi 扩展在 session_start 时注册。
+fn collect_mcp_tools(state: &PiToolState) -> Vec<Value> {
+    let mut out = Vec::new();
+    for config in &state.mcp_servers {
+        if !config.enabled {
+            continue;
+        }
+        let status = crate::services::mcp_client::status(config);
+        for tool in status.tools {
+            out.push(json!({
+                "server": config.name,
+                "name": tool.name,
+                "qualifiedName": tool.qualified_name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+                "readOnly": tool.read_only,
+                "destructive": tool.destructive,
+            }));
+        }
+    }
+    out
+}
+
+/// 执行一个 MCP 工具：工具名必须是已连接服务器暴露的完整名。
+fn execute_mcp_tool(
+    state: &PiToolState,
+    mode: PiPermissionMode,
+    tool: &str,
+    args: &Value,
+) -> PiToolResult {
+    let mut matched: Option<(crate::models::mcp_types::McpServerConfig, bool, bool)> = None;
+    for config in &state.mcp_servers {
+        if !config.enabled {
+            continue;
+        }
+        let status = crate::services::mcp_client::status(config);
+        if let Some(info) = status.tools.iter().find(|item| item.qualified_name == tool) {
+            matched = Some((config.clone(), info.read_only, info.destructive));
+            break;
+        }
+    }
+    let Some((config, read_only, destructive)) = matched else {
+        return PiToolResult::err(
+            format!("MCP 工具 {tool} 不在已连接服务器中，请先在工具浮窗里连接对应服务"),
+            true,
+        );
+    };
+    match mode {
+        PiPermissionMode::Plan if !read_only => {
+            return PiToolResult::err("只读档：不允许调用会修改数据的 MCP 工具", true);
+        }
+        PiPermissionMode::Auto if !read_only && (destructive || !read_only) => {
+            let allow = state.prompt.ask(
+                tool,
+                "调用 MCP 工具",
+                &format!("{}\n参数：{}", config.name, args),
+                mode,
+            );
+            if !allow {
+                return PiToolResult::err("用户拒绝了这次 MCP 工具调用", true);
+            }
+        }
+        _ => {}
+    }
+    match crate::services::mcp_client::call_tool(&config, tool, args.clone()) {
+        Ok(result) => {
+            if result.is_error {
+                PiToolResult::err(result.text, false)
+            } else {
+                PiToolResult::ok(result.text, None)
+            }
+        }
+        Err(error) => PiToolResult::err(error, false),
+    }
+}
+
 /// 执行一个宿主工具。所有路径/权限判定都在这里，扩展本身不碰文件系统。
 pub fn execute_tool(
     state: &PiToolState,
@@ -565,6 +699,9 @@ pub fn execute_tool(
     tool: &str,
     args: &Value,
 ) -> PiToolResult {
+    if tool.starts_with("mcp__") {
+        return execute_mcp_tool(state, mode, tool, args);
+    }
     match tool {
         "read_file" => {
             let raw = match arg_str(args, "path") {
@@ -689,6 +826,75 @@ pub fn execute_tool(
                 lines.join("\n"),
                 Some(json!({ "path": display_path(&path), "count": lines.len() })),
             )
+        }
+        "run_python" => {
+            let code = match arg_str(args, "code") {
+                Some(value) if !value.trim().is_empty() => value.to_string(),
+                _ => return PiToolResult::err("code 不能为空", true),
+            };
+            let timeout = args
+                .get("timeout")
+                .and_then(Value::as_u64)
+                .unwrap_or(60)
+                .clamp(1, MAX_COMMAND_TIMEOUT_SECS);
+            match mode {
+                PiPermissionMode::Plan => {
+                    return PiToolResult::err("只读档：代码执行一律拒绝", true);
+                }
+                PiPermissionMode::Auto => {
+                    // 人工守门必须看到完整代码：截断预览等于让用户给没看到的后半段盲签。
+                    // 超出可展示上限时整体拒绝，不退回截断预览。
+                    let char_count = code.chars().count();
+                    if char_count > MAX_REVIEWABLE_CHARS {
+                        return PiToolResult::err(
+                            format!(
+                                "代码共 {char_count} 字符，超过人工确认上限（{MAX_REVIEWABLE_CHARS}），已拒绝执行。请拆分代码，或改用 Full 档。"
+                            ),
+                            true,
+                        );
+                    }
+                    let allow = state
+                        .prompt
+                        .ask("run_python", "执行 Python 代码", &code, mode);
+                    if !allow {
+                        return PiToolResult::err("用户拒绝了这段 Python 代码", true);
+                    }
+                }
+                PiPermissionMode::Full => {}
+            }
+            match run_python(&state.sandbox, &code, timeout) {
+                Ok(output) => {
+                    let meta = json!({
+                        "exitCode": output.exit_code,
+                        "timedOut": output.timed_out,
+                        "truncated": output.truncated,
+                        "elapsedMs": output.elapsed_ms,
+                    });
+                    if output.timed_out {
+                        PiToolResult {
+                            ok: false,
+                            data: None,
+                            error: Some(format!("Python 超过 {timeout} 秒未结束，已强制终止")),
+                            denied: false,
+                            meta: Some(meta),
+                        }
+                    } else if output.exit_code != 0 {
+                        PiToolResult {
+                            ok: false,
+                            data: None,
+                            error: Some(format!(
+                                "退出码 {}\n{}",
+                                output.exit_code, output.output
+                            )),
+                            denied: false,
+                            meta: Some(meta),
+                        }
+                    } else {
+                        PiToolResult::ok(output.output, Some(meta))
+                    }
+                }
+                Err(error) => PiToolResult::err(error, false),
+            }
         }
         "run_command" => {
             let command = match arg_str(args, "command") {
@@ -865,9 +1071,30 @@ pub fn execute_tool(
                 Err(error) => PiToolResult::err(error, false),
             }
         }
-        "canvas_cancel" => match crate::services::canvas_agent::cancel() {
-            Ok(()) => PiToolResult::ok("已请求中断 ComfyUI 当前任务".to_string(), None),
-            Err(error) => PiToolResult::err(error, false),
+        // 打断画布不是只读操作：/interrupt 断的是 ComfyUI 整个队列，
+        // 用户自己排的生图也会黄掉。所以按权限档判定，跟 canvas_run 一致。
+        "canvas_cancel" => {
+            match mode {
+                PiPermissionMode::Plan => {
+                    return PiToolResult::err("只读档：不能中断画布任务", true);
+                }
+                PiPermissionMode::Auto => {
+                    let allow = state.prompt.ask(
+                        "canvas_cancel",
+                        "中断画布任务",
+                        "会打断 ComfyUI 当前队列里的生图任务",
+                        mode,
+                    );
+                    if !allow {
+                        return PiToolResult::err("用户拒绝了这次中断", true);
+                    }
+                }
+                PiPermissionMode::Full => {}
+            }
+            match crate::services::canvas_agent::cancel() {
+                Ok(()) => PiToolResult::ok("已请求中断 ComfyUI 当前任务".to_string(), None),
+                Err(error) => PiToolResult::err(error, false),
+            }
         }
         _ => PiToolResult::err(format!("未知工具：{tool}"), true),
     }
@@ -1010,6 +1237,241 @@ fn run_powershell(
     })
 }
 
+/// 在工作区内执行一段 Python 代码。
+///
+/// 技能库里的 office / 数据类技能普遍要求 `run_python`；Windows 下优先
+/// `py -3`，没有再退回 `python`。脚本写到工作区 `.pi-tmp/`，执行完删除。
+fn run_python(
+    sandbox: &Path,
+    code: &str,
+    timeout_secs: u64,
+) -> Result<CommandOutput, String> {
+    let tmp_dir = sandbox.join(".pi-tmp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|error| format!("创建临时目录失败：{error}"))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    let script = tmp_dir.join(format!("pi-script-{stamp}.py"));
+    std::fs::write(&script, code).map_err(|error| format!("写入脚本失败：{error}"))?;
+
+    let candidates: [(&str, &[&str]); 2] = [("py", &["-3"]), ("python", &[])];
+    let mut last_error = String::from("没有找到 Python 解释器");
+    for (program, extra) in candidates {
+        let mut process = Command::new(program);
+        process
+            .args(extra)
+            .arg(&script)
+            .current_dir(sandbox)
+            .env_remove("PI_HOST_BRIDGE_URL")
+            .env_remove("PI_HOST_BRIDGE_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            process.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        let mut child = match process.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                last_error = format!("无法启动 Python（{program}）：{error}");
+                continue;
+            }
+        };
+        process_manager::attach_child_job(&child, "pi-python");
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "无法读取 Python stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "无法读取 Python stderr".to_string())?;
+        let out_handle = read_limited(stdout, MAX_COMMAND_OUTPUT);
+        let err_handle = read_limited(stderr, MAX_COMMAND_OUTPUT);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        timed_out = true;
+                        process_manager::terminate_process_tree(&mut child, "pi-python");
+                        break None;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    process_manager::terminate_process_tree(&mut child, "pi-python");
+                    let _ = std::fs::remove_file(&script);
+                    return Err(format!("等待 Python 结束失败：{error}"));
+                }
+            }
+        };
+        let (stdout, stdout_truncated) = out_handle.join().unwrap_or_default();
+        let (stderr, stderr_truncated) = err_handle.join().unwrap_or_default();
+        let mut output = stdout;
+        if !stderr.trim().is_empty() {
+            output.push_str("\n[stderr]\n");
+            output.push_str(&stderr);
+        }
+        let _ = std::fs::remove_file(&script);
+        return Ok(CommandOutput {
+            output,
+            exit_code: status.and_then(|status| status.code()).unwrap_or(-1),
+            timed_out,
+            truncated: stdout_truncated || stderr_truncated,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    let _ = std::fs::remove_file(&script);
+    Err(last_error)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntry {
+    pub name: String,
+    /// 相对工作区的路径，前端直接拿来回读文件。
+    pub rel_path: String,
+    /// dir / file
+    pub kind: String,
+    pub size: u64,
+    /// 修改时间（毫秒，Unix epoch）；取不到时为 0。
+    pub modified: u64,
+}
+
+/// 工作区文件树：只列一层，前端按需展开。越界与符号链接逃逸交给 resolve_inside。
+pub fn list_workspace(root: &str, rel_path: &str) -> Result<Vec<WorkspaceEntry>, String> {
+    let root_path = PathBuf::from(root.trim());
+    if !root_path.is_dir() {
+        return Err(format!("工作区不存在：{}", root.trim()));
+    }
+    let dir = resolve_inside(&root_path, if rel_path.trim().is_empty() { "." } else { rel_path })?;
+    if !dir.is_dir() {
+        return Err("不是目录".to_string());
+    }
+    let canonical_root = root_path
+        .canonicalize()
+        .map_err(|error| format!("工作区不可用：{error}"))?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|error| format!("读取目录失败：{error}"))?
+        .flatten()
+        .take(2000)
+    {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        let is_dir = meta.is_dir();
+        let rel = path
+            .strip_prefix(&canonical_root)
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0);
+        entries.push(WorkspaceEntry {
+            name: entry.file_name().to_string_lossy().to_string(),
+            rel_path: rel,
+            kind: if is_dir { "dir".to_string() } else { "file".to_string() },
+            size: if is_dir { 0 } else { meta.len() },
+            modified,
+        });
+    }
+    entries.sort_by(|a, b| {
+        let a_dir = a.kind == "dir";
+        let b_dir = b.kind == "dir";
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCommandOutput {
+    pub output: String,
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+
+/// 工作区终端：用户显式发起的命令，直接在工作区目录里跑 PowerShell。
+pub fn run_workspace_command(
+    root: &str,
+    command: &str,
+    timeout_secs: u64,
+) -> Result<WorkspaceCommandOutput, String> {
+    let root_path = PathBuf::from(root.trim());
+    if !root_path.is_dir() {
+        return Err(format!("工作区不存在：{}", root.trim()));
+    }
+    let sandbox = root_path
+        .canonicalize()
+        .map_err(|error| format!("工作区不可用：{error}"))?;
+    let output = run_powershell(&sandbox, command, timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS))?;
+    Ok(WorkspaceCommandOutput {
+        output: output.output,
+        exit_code: output.exit_code,
+        timed_out: output.timed_out,
+        truncated: output.truncated,
+        elapsed_ms: output.elapsed_ms,
+    })
+}
+
+/// 拼 `cmd /C start` 的整条命令行。
+///
+/// 目标必须整体用双引号包住：cmd 在引号里不解释 `&`、`|`、`^` 这些元字符。
+/// 否则一个叫 `x&calc.exe` 的文件会被 cmd 拆成「start x」+「执行 calc.exe」。
+fn open_command_line(target: &Path) -> String {
+    format!("/C start \"\" \"{}\"", target.display())
+}
+
+/// 用系统默认程序打开工作区里的文件 / 文件夹（Office 修改走这里）。
+pub fn open_workspace_path(root: &str, rel_path: &str) -> Result<(), String> {
+    let root_path = PathBuf::from(root.trim());
+    let target = resolve_inside(&root_path, rel_path)?;
+    if !target.exists() {
+        return Err("路径不存在".to_string());
+    }
+    let mut command = Command::new("cmd");
+    // 不能把路径原样交给 `cmd /C start`：cmd 会把 `&`、`|`、`^` 当命令分隔符，
+    // 一个叫 `x&calc.exe` 的文件会被拆成「start x」+「执行 calc.exe」。
+    // 用 raw_arg 拼整条命令行并给目标加引号 —— cmd 在双引号里不解释元字符。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(open_command_line(&target));
+    }
+    #[cfg(not(windows))]
+    {
+        command.args(["/C", "start", ""]).arg(&target);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开文件失败：{error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,6 +1523,7 @@ mod tests {
             sandbox: sandbox.to_path_buf(),
             prompt,
             memory_dir: sandbox.join("memory"),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -1295,6 +1758,48 @@ mod tests {
             std::fs::read_to_string(sandbox.join("a.txt")).unwrap(),
             "one two two"
         );
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn open_command_line_quotes_the_target() {
+        // 文件名里带 `&` 时，cmd 会把它当命令分隔符；目标整体加引号才不会。
+        let target = Path::new("C:\\ws\\x&calc.exe");
+        let line = open_command_line(target);
+        assert!(line.ends_with(&format!("\"{}\"", target.display())), "{line}");
+        assert_eq!(line.matches('"').count(), 4, "{line}");
+    }
+
+    #[test]
+    fn plan_denies_canvas_cancel_without_prompt() {
+        // 只读档不能打断画布：/interrupt 断的是用户自己排的整个队列。
+        let sandbox = temp_sandbox("canvas-plan");
+        let prompt = Arc::new(TestPrompt::new(true));
+        let result = execute_tool(
+            &state(&sandbox, prompt.clone()),
+            PiPermissionMode::Plan,
+            "canvas_cancel",
+            &json!({}),
+        );
+        assert!(!result.ok);
+        assert!(result.denied);
+        assert!(prompt.calls().is_empty(), "只读档不应弹权限");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn auto_asks_before_canvas_cancel() {
+        let sandbox = temp_sandbox("canvas-auto");
+        let prompt = Arc::new(TestPrompt::new(false));
+        let result = execute_tool(
+            &state(&sandbox, prompt.clone()),
+            PiPermissionMode::Auto,
+            "canvas_cancel",
+            &json!({}),
+        );
+        assert!(!result.ok);
+        assert_eq!(prompt.calls().len(), 1, "守门档必须问一次");
+        assert!(prompt.calls()[0].starts_with("canvas_cancel|"), "{:?}", prompt.calls());
         let _ = std::fs::remove_dir_all(&sandbox);
     }
 

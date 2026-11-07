@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentType } from 'react';
-import { Bot, Infinity as InfinityIcon } from 'lucide-react';
+import { Bot, Infinity as InfinityIcon, Sparkles } from 'lucide-react';
 import {
   canvasGetSummary,
   isDesktopRuntime,
@@ -9,6 +9,7 @@ import {
 } from '@/lib/desktop';
 import PiPanel from '@/pages/agent/PiPanel';
 import CanvasPanel from '@/pages/agent/CanvasPanel';
+import SkillsPage from '@/pages/SkillsPage';
 import { useApp } from '@/context/AppContext';
 import type { AgentTabId } from '@/types';
 
@@ -27,12 +28,14 @@ const DOT_CLASS: Record<TabBadgeState, string> = {
 
 const TABS: { id: AgentTab; label: string; icon: ComponentType<{ className?: string }>; hint: string }[] = [
   { id: 'pi', label: 'Pi', icon: Bot, hint: 'Pi 内核：RPC 直连、宿主工具代理、权限三档、会话隔离与技能路由；对话在 Chat 的 Pi 工作区' },
+  { id: 'skills', label: '技能', icon: Sparkles, hint: '技能树：索引全部技能、查看触发词与工具，并按任务文本试跑宿主路由' },
   { id: 'canvas', label: '画布', icon: InfinityIcon, hint: '无限画布 · 本地 ComfyUI 生图/视频工作台：启动网关与画布，在独立窗口里创作' },
 ];
 
 /** 标签圆点的悬停提示。 */
 function badgeTitle(id: AgentTab, badge: TabBadgeState): string {
   if (id === 'pi') return badge === 'running' ? 'Pi 内核在运行' : 'Pi 未启动';
+  if (id === 'skills') return '技能库已索引';
   if (id === 'canvas') {
     if (badge === 'running') return '画布正在运行';
     if (badge === 'missing') return '画布模块或 Node 运行时未安装';
@@ -87,6 +90,7 @@ export default function AgentPage() {
   const badgeByTab: Record<AgentTab, TabBadgeState> = {
     // Pi：只看内核进程在不在跑。
     pi: piStatus?.running ? 'running' : 'disabled',
+    skills: 'ready',
     // 画布：运行中绿点；缺模块或 Node 红点；其余灰点。
     canvas: canvasStatus?.running
       ? 'running'
@@ -103,7 +107,7 @@ export default function AgentPage() {
           <div
             role="tablist"
             aria-label="Agent 界面切换"
-            className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1"
+            className="grid grid-cols-3 gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1"
           >
             {TABS.map(({ id, label, icon: Icon, hint }) => {
               const active = tab === id;
@@ -138,7 +142,7 @@ export default function AgentPage() {
 
       {/* 活动面板：各自携带滚动容器与 PageHeader */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {tab === 'pi' ? <PiPanel /> : <CanvasPanel />}
+        {tab === 'pi' ? <PiPanel /> : tab === 'skills' ? <SkillsPage /> : <CanvasPanel />}
       </div>
     </div>
   );

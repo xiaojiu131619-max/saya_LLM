@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { ShieldAlert, X } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { useApp } from '@/context/AppContext';
 import { judgeArtifactDelivery } from '@/features/chat/artifactGate';
@@ -18,11 +19,13 @@ import {
   piAgentPermissionAnswer,
   piAgentRun,
   piAgentSelectSkills,
+  piAgentSetPermissionMode,
   piAgentStop,
   piResolveArtifacts,
   subscribePiAgent,
   type PiAgentEventPayload,
   type PiAgentStatus,
+  type PiPermissionMode,
   type PiPermissionRequest,
 } from '@/lib/ipc/pi';
 import {
@@ -37,6 +40,7 @@ import {
   PI_CONFIG_CHANGED_EVENT,
   ensurePiForSession,
   hydratePiConfig,
+  isNoEngineError,
   loadPiConfig,
   savePiConfig,
   sessionWorkDir,
@@ -85,6 +89,8 @@ export interface PiTaskInput {
   sessionModelId: string;
   piSessionId: string;
   messageId: string;
+  /** 该会话绑定的工作区目录（真实本地文件夹）；缺省走旧会话子目录。 */
+  workspaceDir?: string;
 }
 
 interface PiRuntimeValue {
@@ -95,10 +101,12 @@ interface PiRuntimeValue {
   startingSessionId: string | null;
   sendTask: (input: PiTaskInput) => Promise<void>;
   cancelTask: () => Promise<void>;
-  prewarm: (piSessionId: string) => Promise<void>;
-  startSession: (piSessionId: string, coldStart?: boolean) => Promise<PiAgentStatus>;
+  prewarm: (piSessionId: string, workspaceDir?: string) => Promise<void>;
+  startSession: (piSessionId: string, coldStart?: boolean, workspaceDir?: string) => Promise<PiAgentStatus>;
   refreshStatus: () => Promise<void>;
   reloadConfig: () => Promise<void>;
+  /** 切换权限档：写入共享配置，运行中立即生效。 */
+  setPermissionMode: (mode: PiPermissionMode) => Promise<void>;
 }
 
 const PiRuntimeContext = createContext<PiRuntimeValue | null>(null);
@@ -123,7 +131,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
   const statusRef = useRef<PiAgentStatus | null>(null);
   const ensureChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const prewarmSeqRef = useRef(0);
-  const pendingPrewarmRef = useRef<string | null>(null);
+  const pendingPrewarmRef = useRef<{ piSessionId: string; workspaceDir?: string } | null>(null);
   // 自动启动优先复用最近一次 Pi 会话，避免开机先起 pi-auto、进对话又重启一次。
   const chatSessionsRef = useRef(state.chatSessions);
   useEffect(() => {
@@ -166,10 +174,10 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
     };
   }, [refreshStatus, reloadConfig]);
 
-  const startSession = useCallback(async (piSessionId: string, coldStart = true) => {
+  const startSession = useCallback(async (piSessionId: string, coldStart = true, workspaceDir?: string) => {
     const next = ensureChainRef.current
       .catch(() => undefined)
-      .then(() => ensurePiForSession(piSessionId, coldStart));
+      .then(() => ensurePiForSession(piSessionId, coldStart, workspaceDir));
     ensureChainRef.current = next;
     const result = await next;
     setStatus(result);
@@ -205,6 +213,8 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
           if (!disposed) setError(null);
         } catch (reason) {
           if (disposed) return;
+          // 没加载模型时自动启动失败是常态，不当错误弹横幅。
+          if (isNoEngineError(reason)) return;
           setError(
             `Pi 自动启动失败：${String(reason instanceof Error ? reason.message : reason)}`,
           );
@@ -240,11 +250,11 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
   }, [autoSessionId, startSession]);
 
   const prewarm = useCallback(
-    async (piSessionId: string) => {
+    async (piSessionId: string, workspaceDir?: string) => {
       if (!piSessionId.trim()) return;
       const active = runRef.current;
       if (active) {
-        if (active.piSessionId !== piSessionId) pendingPrewarmRef.current = piSessionId;
+        if (active.piSessionId !== piSessionId) pendingPrewarmRef.current = { piSessionId, workspaceDir };
         return;
       }
       const current = statusRef.current;
@@ -257,9 +267,9 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       setStartingSessionId(piSessionId);
       setError(null);
       try {
-        await startSession(piSessionId, loadPiConfig().autoStart);
+        await startSession(piSessionId, loadPiConfig().autoStart, workspaceDir);
       } catch (reason) {
-        if (prewarmSeqRef.current === seq) {
+        if (prewarmSeqRef.current === seq && !isNoEngineError(reason)) {
           setError(
             `Pi 预启动失败：${String(reason instanceof Error ? reason.message : reason)}`,
           );
@@ -325,9 +335,13 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       const outputTokens = usage?.output ?? 0;
       const firstTokenDelay =
         run.firstDeltaTs !== null ? (run.firstDeltaTs - run.promptSentTs) / 1000 : 0;
+      // 生成耗时从「发出 prompt」算到「最后一个增量」，与主对话的 elapsedRequestStats
+      // 同一口径（都含首字延迟与工具执行间隙）。
+      // 之前只算首末增量之间的差：整轮只有一次增量时差值为 0，
+      // 界面上 TTFT / tok/s / 生成耗时三格会一起变成「--」。
       const genTime =
-        run.firstDeltaTs !== null && run.lastDeltaTs !== null
-          ? Math.max(0, (run.lastDeltaTs - run.firstDeltaTs) / 1000)
+        run.lastDeltaTs !== null
+          ? Math.max(0, (run.lastDeltaTs - run.promptSentTs) / 1000)
           : 0;
       const tokensPerSec = genTime > 0 && outputTokens > 0 ? outputTokens / genTime : 0;
       const ctxUsed = (usage?.input ?? 0) + (usage?.cacheRead ?? 0);
@@ -440,7 +454,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
 
       const pending = pendingPrewarmRef.current;
       pendingPrewarmRef.current = null;
-      if (pending) void prewarm(pending);
+      if (pending) void prewarm(pending.piSessionId, pending.workspaceDir);
     },
     [dispatch, finalizeStats, prewarm, pushStep],
   );
@@ -612,6 +626,12 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         void finalizeRun('aborted');
       },
       onPermission: (request) => setPendingPermission(request),
+      // 后端等到超时就会按「拒绝」处理并回一条失效事件：弹窗要自己关掉，
+      // 否则用户点「允许」只会得到一句「权限回传失败」。
+      onPermissionExpired: ({ id, tool }) => {
+        setPendingPermission((prev) => (prev && prev.id === id ? null : prev));
+        setError(`Pi 的「${tool}」权限请求已超时，已自动拒绝。`);
+      },
     });
     return dispose;
   }, [applyEvent, finalizeRun, pushStep]);
@@ -641,7 +661,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       cancelRequestedRef.current = false;
       pendingPrewarmRef.current = null;
       try {
-        const next = await startSession(input.piSessionId, loadPiConfig().autoStart);
+        const next = await startSession(input.piSessionId, loadPiConfig().autoStart, input.workspaceDir);
         setStatus(next);
         const cfg = await hydratePiConfig(loadPiConfig());
         savePiConfig(cfg);
@@ -752,8 +772,25 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
     }
     const pending = pendingPrewarmRef.current;
     pendingPrewarmRef.current = null;
-    if (pending) void prewarm(pending);
+    if (pending) void prewarm(pending.piSessionId, pending.workspaceDir);
   }, [dispatch, finalizeStats, prewarm]);
+
+  /** 切换权限档：写共享配置；运行中立即同步到 Pi 进程。 */
+  const setPermissionMode = useCallback(
+    async (mode: PiPermissionMode) => {
+      const next = { ...loadPiConfig(), permissionMode: mode };
+      savePiConfig(next);
+      setConfig(next);
+      if (!statusRef.current?.running) return;
+      try {
+        await piAgentSetPermissionMode(mode);
+        await refreshStatus();
+      } catch (reason) {
+        setError(`切换权限失败：${String(reason instanceof Error ? reason.message : reason)}`);
+      }
+    },
+    [refreshStatus],
+  );
 
   const answerPermission = useCallback(
     async (allow: boolean) => {
@@ -790,6 +827,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       startSession,
       refreshStatus,
       reloadConfig,
+      setPermissionMode,
     }),
     [
       cancelTask,
@@ -799,6 +837,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       refreshStatus,
       reloadConfig,
       sendTask,
+      setPermissionMode,
       startSession,
       startingSessionId,
       status,
@@ -812,9 +851,17 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         open={Boolean(pendingPermission)}
         title="Pi 请求权限"
         description={
-          pendingPermission
-            ? `${pendingPermission.title || '工具调用'}\n${pendingPermission.detail}`
-            : ''
+          pendingPermission ? (
+            // 命令/代码预览必须完整可读：等宽 + 滚动渲染全量内容，
+            // 截断交给后端的上限判定，前端不做二次截断。
+            <div className="mono-font max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
+              {pendingPermission.title || '工具调用'}
+              {'\n'}
+              {pendingPermission.detail}
+            </div>
+          ) : (
+            ''
+          )
         }
         bullets={pendingPermission ? [`当前权限档：${pendingPermission.mode}`] : undefined}
         confirmLabel="允许"
@@ -823,6 +870,28 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         onConfirm={() => answerPermission(true)}
         onCancel={() => void answerPermission(false)}
       />
+      {/* Pi 运行期错误的唯一出口：自动启动失败、预启动失败、权限回传失败、运行出错等
+          都写在这个 error 里。以前没人渲染它，失败信息全被吞掉，界面只剩「没反应」。 */}
+      {error ? (
+        <div
+          role="alert"
+          className="fixed right-4 top-12 z-[100] flex max-w-md items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--state-danger-border)] bg-[var(--surface)] px-3 py-2 shadow-[var(--shadow-card)]"
+        >
+          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[var(--state-danger)]" />
+          <p className="min-w-0 flex-1 text-[length:var(--font-caption)] leading-relaxed text-[var(--text-primary)]">
+            {error}
+          </p>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="关闭 Pi 错误提示"
+            title="关闭"
+            className="flex-shrink-0 rounded p-0.5 text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-secondary)]"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
     </PiRuntimeContext.Provider>
   );
 }

@@ -14,12 +14,13 @@
 //! 选中全部转发器），不要随意调整；口径与 `shyi-ai/shiyi/kernel/skill_loader.py`
 //! 的 radar 保持一致。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 
 static TRIGGER_BLOCK: Lazy<Regex> =
@@ -41,7 +42,7 @@ static CHINESE_RUN: Lazy<Regex> =
 static ENGLISH_WORD: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[A-Za-z][A-Za-z0-9_-]{2,}").unwrap());
 
-/// 默认技能库：显式配置 → 环境变量 → 资源目录 → 应用数据目录 → 本地开发技能库。
+/// 默认技能库：显式配置 → 环境变量 → 仓库内 pi 专属技能树 → 资源目录 → 应用数据目录。
 ///
 /// 这里只定位目录，不把技能注册成 Pi skills；路由仍然在宿主侧完成。
 pub fn default_skills_dir(configured: Option<&str>) -> Option<PathBuf> {
@@ -63,13 +64,25 @@ pub fn default_skills_dir(configured: Option<&str>) -> Option<PathBuf> {
     let resources = crate::services::auto_updater::resource_dir();
     let data = crate::services::storage_paths::app_data_root().join("pi");
     let candidates = [
-        resources.join("pi").join("skills"),
-        resources.join("skills"),
-        data.join("skills"),
-        // 本地开发机上的技能库；正式分发不依赖它。
-        PathBuf::from(r"D:\Projects\shyi-ai\data\skills"),
+        // 仓库内的 pi 专属技能树：开发态直接命中。
+        repo_skills_dir(),
+        // 打包态：把这份目录放到 exe 旁的 resources/pi/skills。
+        Some(resources.join("pi").join("skills")),
+        Some(resources.join("skills")),
+        Some(data.join("skills")),
     ];
-    candidates.into_iter().find(|path| path.is_dir())
+    candidates.into_iter().flatten().find(|path| path.is_dir())
+}
+
+/// 仓库内的 pi 专属技能树：`<repo>/app/resources/pi/skills`。
+///
+/// 编译期路径只在开发机上成立；正式分发时该目录不存在，
+/// 自动落到 exe 旁的 `resources/pi/skills` 或应用数据目录。
+fn repo_skills_dir() -> Option<PathBuf> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_dir = manifest.parent()?; // <repo>/app
+    let candidate = app_dir.join("resources").join("pi").join("skills");
+    candidate.is_dir().then_some(candidate)
 }
 
 /// 查询型技能：依赖外部数据源可达性，同等条件下优先生成型技能。
@@ -116,6 +129,7 @@ fn aliases_for(name: &str) -> &'static [&'static str] {
         "equity-research-report-cn" => &["研报", "股票", "财报", "报告"],
         "market-research-brief" => &["市场", "调研", "简报", "报告"],
         "print3d-check" => &["打印件", "切片"],
+        "longread" => &["大文件", "长文件", "文件太大", "读不下", "分块读取", "读取截断"],
         _ => &[],
     }
 }
@@ -211,6 +225,144 @@ fn delegated_target() -> &'static str {
     "comfyui-workflows"
 }
 
+// ── 技能树（taxonomy）───────────────────────────────────────
+// 层级与关联数据放 `_tree.json`（与 SKILL.md 平级，随技能库目录走），
+// 不写进每个 SKILL.md 的 frontmatter——那样 239 个文件要逐个改，
+// 且拾一原库同步时会被上游覆盖。文件缺失或非法时整体退化为平铺路由。
+
+/// 技能库根目录下的分类映射文件。
+const TAXONOMY_FILE: &str = "_tree.json";
+
+/// 未收录进 `_tree.json` 的技能归入这个隐式分支（与真实分支同等参与两级路由）。
+const UNCLASSIFIED_LABEL: &str = "未分类";
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct TaxonomyFile {
+    categories: Vec<TaxCategoryFile>,
+    links: Vec<TaxLink>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaxCategoryFile {
+    id: String,
+    label: String,
+    #[serde(default)]
+    triggers: Vec<String>,
+    #[serde(default)]
+    children: Vec<TaxChildFile>,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaxChildFile {
+    label: String,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaxLink {
+    from: String,
+    to: String,
+    /// complement（配套）/ depends（依赖）/ delegate（委托）。
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// 加载后的运行时分类表：顶层分支（用于两级路由）+ 成员路径 + 关联图。
+#[derive(Debug, Clone, Default)]
+pub struct Taxonomy {
+    branches: Vec<TaxBranch>,
+    /// 技能名 → [大类名, 子类名]（子类直挂时只有一层）。
+    member_path: HashMap<String, Vec<String>>,
+    links: Vec<TaxLink>,
+}
+
+#[derive(Debug, Clone)]
+struct TaxBranch {
+    label: String,
+    triggers: Vec<String>,
+}
+
+impl Taxonomy {
+    fn is_empty(&self) -> bool {
+        self.branches.is_empty()
+    }
+
+    fn branch_label(&self, skill: &str) -> &str {
+        self.member_path
+            .get(skill)
+            .and_then(|path| path.first())
+            .map(String::as_str)
+            .unwrap_or(UNCLASSIFIED_LABEL)
+    }
+
+    fn category_path(&self, skill: &str) -> Vec<String> {
+        self.member_path.get(skill).cloned().unwrap_or_default()
+    }
+
+    /// 顶层分支声明序；未收录的技能给 usize::MAX（自然垫底）。
+    fn category_order(&self, skill: &str) -> usize {
+        self.member_path
+            .get(skill)
+            .and_then(|path| path.first())
+            .and_then(|label| self.branches.iter().position(|b| &b.label == label))
+            .unwrap_or(usize::MAX)
+    }
+}
+
+/// 解析 `_tree.json`；文件缺失、非法 JSON 或分支缺 label 时整体退化为空表
+/// （空表 = 不做分支裁剪，路由行为与旧版平铺一致）。
+fn load_taxonomy(root: &Path) -> Taxonomy {
+    let path = root.join(TAXONOMY_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Taxonomy::default(),
+    };
+    let file: TaxonomyFile = match serde_json::from_str(&text) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("[pi_skills] {TAXONOMY_FILE} 解析失败，按平铺路由处理：{error}");
+            return Taxonomy::default();
+        }
+    };
+    let mut taxonomy = Taxonomy {
+        branches: Vec::with_capacity(file.categories.len()),
+        member_path: HashMap::new(),
+        links: file.links,
+    };
+    for category in file.categories {
+        if category.id.is_empty() || category.label.is_empty() {
+            continue;
+        }
+        taxonomy.branches.push(TaxBranch {
+            label: category.label.clone(),
+            triggers: category.triggers,
+        });
+        for member in &category.members {
+            taxonomy
+                .member_path
+                .insert(member.clone(), vec![category.label.clone()]);
+        }
+        for child in &category.children {
+            if child.label.is_empty() {
+                continue;
+            }
+            for member in &child.members {
+                taxonomy.member_path.insert(
+                    member.clone(),
+                    vec![category.label.clone(), child.label.clone()],
+                );
+            }
+        }
+    }
+    taxonomy
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiSkillMeta {
@@ -223,6 +375,26 @@ pub struct PiSkillMeta {
     pub kind: String,
     pub path: String,
     pub body_chars: usize,
+    /// 技能树分类路径（如 ["媒体生成", "图像"]）；未收录时为空。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub category_path: Vec<String>,
+    /// 顶层分支的声明序（_tree.json 顺序）；未收录为 usize::MAX，UI 据此给分支排序。
+    pub category_order: usize,
+    /// 关联技能（_tree.json 的 links，双向展开）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<PiSkillLink>,
+}
+
+/// 技能间关联：direction = outbound（from 方）/ inbound（to 方）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiSkillLink {
+    pub name: String,
+    /// complement / depends / delegate。
+    pub kind: String,
+    pub direction: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +406,18 @@ pub struct PiSelectedSkill {
     pub score: f32,
     pub kind: String,
     pub body: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub category_path: Vec<String>,
+}
+
+/// 一次路由的完整结果：入选技能 + 晋级分支（两级路由的透明度）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRoute {
+    pub skills: Vec<PiSelectedSkill>,
+    /// 本轮晋级的顶层分支名；未启用两级路由（无 taxonomy）时为空。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
 }
 
 fn split_frontmatter(text: &str) -> (Option<YamlValue>, String) {
@@ -263,8 +447,38 @@ fn yaml_str(front: &Option<YamlValue>, key: &str) -> Option<String> {
         .as_ref()?
         .get(key)?
         .as_str()
-        .map(|value| value.trim().to_string())
+        .map(flatten_ws)
         .filter(|value| !value.is_empty())
+}
+
+/// 压平多行值里的换行与缩进。
+///
+/// 拾一的 Python 解析器用 `re.sub(r"\s*\n\s*", " ", raw)` 压平，
+/// serde_yaml 保留原始换行 —— 两边口径不一致时，触发词与 not_for
+/// 的抽取正则会被换行截断，同一个技能在两个宿主里的命中情况就不同。
+/// 这里跟拾一对齐：只把「含换行的空白段」压成一个空格，段内空格保留。
+fn flatten_ws(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            let start = index;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            let run: String = chars[start..index].iter().collect();
+            if run.contains('\n') {
+                out.push(' ');
+            } else {
+                out.push_str(&run);
+            }
+        } else {
+            out.push(chars[index]);
+            index += 1;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn yaml_list(front: &Option<YamlValue>, key: &str) -> Vec<String> {
@@ -291,11 +505,47 @@ fn yaml_list(front: &Option<YamlValue>, key: &str) -> Vec<String> {
 }
 
 fn push_trigger(out: &mut Vec<String>, value: &str) {
-    let value = value.trim();
-    let len = value.chars().count();
+    // 抽出来的短语常带引号与尾部标点（'review my paper,' / '" "simulate peer review'），
+    // 这些形态在用户输入里永远不会原样出现，等于白抽。清洗后再入表。
+    let cleaned = clean_trigger(value);
+    let len = cleaned.chars().count();
     if (2..=40).contains(&len) {
-        out.push(value.to_string());
+        out.push(cleaned);
     }
+}
+
+/// 剪除抽出来的短语中的句内标点前的部分。
+///
+/// 例如 longread 描述里的 `NOT for structured data (CSV, DTA, XLSX, etc.)`，
+/// 抽词会拉出 `then proceed accordingly. Supports PDF` 这种跨句碎片——
+/// 它们既不是触发词，也不会在用户输入里出现。
+fn truncate_at_clause(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '.' | ',' | '\u{3001}' | '\u{ff0c}' | ';' | '\u{ff1b}' | ':' | '\u{ff1a}' | '?') {
+            break;
+        }
+        out.push(ch);
+    }
+    out.trim().to_string()
+}
+
+/// 去掉首尾的引号与标点（中英文引号、逗号、句号等）。
+fn clean_trigger(value: &str) -> String {
+    const EDGE: &[char] = &[
+        '"', '\'', '\u{201c}', '\u{201d}', '\u{2018}', '\u{2019}', '\u{300c}', '\u{300d}', '\u{300e}',
+        '\u{300f}', ',', '\u{3001}', '\u{ff0c}', ';', '\u{ff1b}', '|', '\u{00b7}', '.', '!', '?',
+        '\u{3002}', '\u{ff01}', '\u{ff1f}',
+    ];
+    let mut text = value.trim();
+    loop {
+        let before = text;
+        text = text.trim_matches(EDGE).trim();
+        if text == before {
+            break;
+        }
+    }
+    text.to_string()
 }
 
 fn push_split(out: &mut Vec<String>, text: &str) {
@@ -337,6 +587,12 @@ fn derived_triggers(description: &str) -> Vec<String> {
     for caps in QUOTED.captures_iter(description) {
         push_trigger(&mut out, &caps[1]);
     }
+    // 引号短语常是整句剪归的，先剪到句内标点前，再去标点。
+    out = out
+        .into_iter()
+        .map(|value| truncate_at_clause(&value))
+        .filter(|value| !value.is_empty())
+        .collect();
     dedupe(out)
 }
 
@@ -401,39 +657,79 @@ fn delegated_body(routes: &str, handoff: &str) -> String {
 /// 只读技能元数据，不返回正文。
 ///
 /// 带进程级缓存：技能库 238 个 SKILL.md 全量读一遍约 150ms，Chat 每次发送
-/// 都要做一次路由，不能每次都重扫。签名 = 根目录 mtime + 技能数（与拾一
-/// 的缓存失效口径一致）：新增/删除技能会变，改单个 SKILL.md 内容不会变——
-/// 那种情况重启应用或碰一下技能根目录即可。
+/// 都要做一次路由，不能每次都重扫。签名 = 根目录 mtime + 技能数 + `_tree.json`
+/// mtime（与拾一的缓存失效口径一致）：新增/删除技能或改分类表会失效，
+/// 改单个 SKILL.md 内容不会变——那种情况重启应用或碰一下技能根目录即可。
 pub fn index_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
+    cached_index(root).map(|snapshot| snapshot.metas)
+}
+
+/// 索引快照：元数据（已按 `_tree.json` 补分类路径与关联）+ 分类表。
+#[derive(Clone)]
+struct IndexSnapshot {
+    metas: Vec<PiSkillMeta>,
+    taxonomy: Taxonomy,
+}
+
+fn cached_index(root: &Path) -> Result<IndexSnapshot, String> {
     if !root.is_dir() {
         return Err(format!("技能库目录不存在：{}", root.display()));
     }
     let signature = index_signature(root);
     if let Some(entry) = INDEX_CACHE.lock().ok().and_then(|guard| guard.clone()) {
         if entry.root == root && Some(entry.signature) == signature {
-            return Ok(entry.metas);
+            return Ok(IndexSnapshot {
+                metas: entry.metas,
+                taxonomy: entry.taxonomy,
+            });
         }
     }
-    let metas = scan_skills(root)?;
+    let taxonomy = load_taxonomy(root);
+    let mut metas = scan_skills(root)?;
+    apply_taxonomy(&mut metas, &taxonomy);
     if let Ok(mut guard) = INDEX_CACHE.lock() {
         if let Some(signature) = signature {
             *guard = Some(IndexCacheEntry {
                 root: root.to_path_buf(),
                 signature,
                 metas: metas.clone(),
+                taxonomy: taxonomy.clone(),
             });
         }
     }
-    Ok(metas)
+    Ok(IndexSnapshot { metas, taxonomy })
 }
 
-type IndexSignature = (std::time::SystemTime, usize);
+/// 把分类路径与关联技能写进元数据（缓存里存的就是补全后的版本）。
+fn apply_taxonomy(metas: &mut [PiSkillMeta], taxonomy: &Taxonomy) {
+    for meta in metas.iter_mut() {
+        meta.category_path = taxonomy.category_path(&meta.name);
+        meta.category_order = taxonomy.category_order(&meta.name);
+        meta.related = taxonomy
+            .links
+            .iter()
+            .filter(|link| link.from == meta.name || link.to == meta.name)
+            .map(|link| {
+                let outbound = link.from == meta.name;
+                PiSkillLink {
+                    name: if outbound { link.to.clone() } else { link.from.clone() },
+                    kind: link.kind.clone(),
+                    direction: if outbound { "outbound" } else { "inbound" }.to_string(),
+                    note: link.note.clone(),
+                }
+            })
+            .collect();
+    }
+}
+
+type IndexSignature = (std::time::SystemTime, usize, Option<std::time::SystemTime>);
 
 #[derive(Clone)]
 struct IndexCacheEntry {
     root: PathBuf,
     signature: IndexSignature,
     metas: Vec<PiSkillMeta>,
+    taxonomy: Taxonomy,
 }
 
 static INDEX_CACHE: Lazy<Mutex<Option<IndexCacheEntry>>> = Lazy::new(|| Mutex::new(None));
@@ -445,7 +741,10 @@ fn index_signature(root: &Path) -> Option<IndexSignature> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().join("SKILL.md").is_file())
         .count();
-    Some((modified, count))
+    let tree = std::fs::metadata(root.join(TAXONOMY_FILE))
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    Some((modified, count, tree))
 }
 
 fn scan_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
@@ -475,7 +774,11 @@ fn scan_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
             continue;
         }
         let description = yaml_str(&front, "description").unwrap_or_default();
-        let mut triggers = yaml_list(&front, "triggers");
+        let mut triggers: Vec<String> = yaml_list(&front, "triggers")
+            .into_iter()
+            .map(|value| truncate_at_clause(&value))
+            .filter(|value| !value.is_empty())
+            .collect();
         if triggers.is_empty() {
             triggers = derived_triggers(&description);
         }
@@ -531,6 +834,9 @@ fn scan_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
             kind: kind.to_string(),
             path: file.display().to_string(),
             body_chars: body.chars().count(),
+            category_path: Vec::new(),
+            category_order: usize::MAX,
+            related: Vec::new(),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -558,28 +864,53 @@ fn format_terms_in_text(lower: &str) -> Vec<&'static str> {
     out
 }
 
+/// 一次打分结果：分数 + 是否带「豁免级」强信号。
+///
+/// 豁免 = 命中过技能名或格式词——这两类信号歧义最低（STL/XLSX/技能名），
+/// 两级路由里即使所属分支没晋级，也保留入选资格，跨类任务
+/// （如「生成图表并写进报告」里的 xlsx）不被分支一票否决。
+struct ScoredSkill {
+    meta: PiSkillMeta,
+    score: f32,
+    escape: bool,
+}
+
+/// 两级路由取多少个分支晋级。
+const BRANCH_TOP_K: usize = 2;
+
 /// 按任务文本选 1–2 个技能，并把正文截到 `max_chars` 以内。
+///
+/// 有 `_tree.json` 时走两级路由：
+/// 1. 阶段 0：逐技能打分，权重与门槛与平铺版完全一致（排障基线不动）；
+/// 2. 阶段 1：分支晋级——分支分 = 分支内最高成员分 + 类级触发词命中每个 +2，取 Top-2；
+/// 3. 阶段 2：候选 = 晋级分支成员 ∪ 豁免技能，再做转发器互斥与 top_k 截断。
+///
+/// 无 `_tree.json`（或解析失败）时整库只有一个「未分类」分支，
+/// 不做任何裁剪，行为与旧版平铺路由一致。
 pub fn select_skills(
     root: &Path,
     text: &str,
     top_k: usize,
     max_chars: usize,
-) -> Result<Vec<PiSelectedSkill>, String> {
-    let metas = index_skills(root)?;
+) -> Result<SkillRoute, String> {
+    let snapshot = cached_index(root)?;
     let lower = text.to_lowercase();
     let text_tokens = tokens(text);
     let formats = format_terms_in_text(&lower);
-    let mut scored: Vec<(f32, PiSkillMeta)> = Vec::new();
-    for meta in metas {
+    let mut scored: Vec<ScoredSkill> = Vec::new();
+    for meta in snapshot.metas {
         let mut score = 0.0f32;
         // 强信号：名称 / 别名 / 触发词 / 格式词至少命中一个。纯描述 token
         // 命中太弱（真机实测：「帮我看看工作区里有什么文件」会误中市场查询
         // 类技能），不允许仅凭描述入选。
         let mut strong = false;
+        // 豁免：名称与格式词的歧义最低，其余强信号（别名/触发词）不够格。
+        let mut escape = false;
         let name_lower = meta.name.to_lowercase();
         if lower.contains(&name_lower) {
             score += 3.0;
             strong = true;
+            escape = true;
         }
         // 格式词命中 +3：STL/MP4/XLSX 这类歧义最低；要求词出现在技能
         // 描述或名字里，避免「pdf」命中所有无关技能。
@@ -588,6 +919,7 @@ pub fn select_skills(
             if description_lower.contains(term) || name_lower.contains(term) {
                 score += 3.0;
                 strong = true;
+                escape = true;
             }
         }
         for alias in aliases_for(&meta.name) {
@@ -626,26 +958,136 @@ pub fn select_skills(
             score >= 2.5
         };
         if qualifies {
-            scored.push((score, meta));
+            scored.push(ScoredSkill { meta, score, escape });
         }
     }
     scored.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.name.cmp(&b.1.name))
+            .then_with(|| a.meta.name.cmp(&b.meta.name))
     });
+
+    // 配套技能加成：关联对两端都已入选时各 +1（_tree.json 的 links），
+    // 只影响排序与分支分，不改变入选资格。
+    if !snapshot.taxonomy.links.is_empty() && scored.len() > 1 {
+        let index_of: HashMap<String, usize> = scored
+            .iter()
+            .enumerate()
+            .map(|(index, skill)| (skill.meta.name.clone(), index))
+            .collect();
+        for link in &snapshot.taxonomy.links {
+            if let (Some(&a), Some(&b)) = (
+                index_of.get(link.from.as_str()),
+                index_of.get(link.to.as_str()),
+            ) {
+                if a != b {
+                    scored[a].score += 1.0;
+                    scored[b].score += 1.0;
+                }
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.meta.name.cmp(&b.meta.name))
+        });
+    }
+
+    // 阶段 1：分支晋级。分支分 = 分支内最高成员分 + 类级触发词命中每个 +2。
+    // 未收录进 `_tree.json` 的技能组成隐式「未分类」分支，同等参与竞争。
+    let mut advancing_branches: Vec<String> = Vec::new();
+    if !snapshot.taxonomy.is_empty() && !scored.is_empty() {
+        struct RankedBranch {
+            label: String,
+            score: f32,
+            members: Vec<usize>,
+        }
+        let mut ranked: Vec<RankedBranch> = Vec::new();
+        let mut unclassified: Vec<usize> = Vec::new();
+        for branch in &snapshot.taxonomy.branches {
+            ranked.push(RankedBranch {
+                label: branch.label.clone(),
+                score: 0.0,
+                members: Vec::new(),
+            });
+        }
+        for (index, skill) in scored.iter().enumerate() {
+            let label = snapshot.taxonomy.branch_label(&skill.meta.name);
+            match ranked.iter_mut().find(|entry| entry.label == label) {
+                Some(entry) => {
+                    entry.score = entry.score.max(skill.score);
+                    entry.members.push(index);
+                }
+                None => unclassified.push(index),
+            }
+        }
+        if !unclassified.is_empty() {
+            let best = unclassified
+                .iter()
+                .map(|&index| scored[index].score)
+                .fold(0.0f32, f32::max);
+            ranked.push(RankedBranch {
+                label: UNCLASSIFIED_LABEL.to_string(),
+                score: best,
+                members: unclassified,
+            });
+        }
+        for entry in ranked.iter_mut() {
+            let branch = snapshot
+                .taxonomy
+                .branches
+                .iter()
+                .find(|branch| branch.label == entry.label);
+            if let Some(branch) = branch {
+                for trigger in &branch.triggers {
+                    if matches(text, &lower, trigger) {
+                        entry.score += 2.0;
+                    }
+                }
+            }
+        }
+        ranked.retain(|entry| entry.score > 0.0);
+        // sort_by 稳定：同分保持 `_tree.json` 声明顺序。
+        ranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if !ranked.is_empty() {
+            let top_count = BRANCH_TOP_K.min(ranked.len());
+            let allowed: std::collections::HashSet<usize> = ranked
+                .iter()
+                .take(top_count)
+                .flat_map(|entry| entry.members.iter().copied())
+                .collect();
+            advancing_branches = ranked
+                .iter()
+                .take(top_count)
+                .map(|entry| entry.label.clone())
+                .collect();
+            let mut kept = Vec::with_capacity(scored.len());
+            for (index, skill) in scored.into_iter().enumerate() {
+                if allowed.contains(&index) || skill.escape {
+                    kept.push(skill);
+                }
+            }
+            scored = kept;
+        }
+    }
 
     // 转发器互斥：同一件事只留分最高的那一个转发器。
     let mut picked: Vec<(f32, PiSkillMeta)> = Vec::new();
     let mut seen_forwarder = false;
-    for (score, meta) in scored {
-        if meta.kind == "delegated" {
+    for skill in scored {
+        if skill.meta.kind == "delegated" {
             if seen_forwarder {
                 continue;
             }
             seen_forwarder = true;
         }
-        picked.push((score, meta));
+        picked.push((skill.score, skill.meta));
         if picked.len() >= top_k.max(1) {
             break;
         }
@@ -705,6 +1147,7 @@ pub fn select_skills(
             score: 0.0,
             kind: meta.kind,
             body,
+            category_path: meta.category_path.clone(),
         });
     }
     // 分数在展开循环里丢了；从 picked 重新对齐，未展开的目标技能给 0。
@@ -713,7 +1156,10 @@ pub fn select_skills(
             skill.score = *score;
         }
     }
-    Ok(out)
+    Ok(SkillRoute {
+        skills: out,
+        branches: advancing_branches,
+    })
 }
 
 fn index_lookup(root: &Path, name: &str) -> Option<PiSkillMeta> {
@@ -797,6 +1243,18 @@ mod tests {
     }
 
     #[test]
+    fn default_skills_dir_prefers_repo_pi_tree() {
+        // 仓库内的 pi 专属技能树必须能被找到，
+        // 且优先于应用数据目录（否则开发机上会误用旧副本）。
+        let repo = repo_skills_dir().expect("仓库内应存在 app/resources/pi/skills");
+        assert!(repo.ends_with("skills"));
+        assert!(repo.join("comfyui-workflows").join("SKILL.md").is_file());
+        assert!(repo.join("living-ascii-wallpaper").join("SKILL.md").is_file());
+        let resolved = default_skills_dir(None).expect("应能定位到技能树");
+        assert_eq!(resolved, repo);
+    }
+
+    #[test]
     fn index_and_select_doc_skill() {
         let root = temp_root("doc");
         write_skill(
@@ -822,10 +1280,13 @@ mod tests {
         assert_eq!(img.kind, "delegated");
         // 转发器触发词带上了 image 场景别名
         assert!(img.triggers.contains(&"画一张".to_string()));
-        let selected = select_skills(&root, "帮我写一份报告", 2, 4000).expect("select");
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "doc-writer");
-        assert!(selected[0].body.contains("先列大纲"));
+        let route = select_skills(&root, "帮我写一份报告", 2, 4000).expect("select");
+        // 临时目录没有 _tree.json：分类路径为空、分支不晋级（平铺路由）。
+        assert!(route.skills[0].category_path.is_empty());
+        assert!(route.branches.is_empty());
+        assert_eq!(route.skills.len(), 1);
+        assert_eq!(route.skills[0].name, "doc-writer");
+        assert!(route.skills[0].body.contains("先列大纲"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -844,12 +1305,11 @@ mod tests {
             "name: image-gen\ndescription: 生图\ntriggers:\n  - 生图\n  - 画图",
             "生图走 ComfyUI。",
         );
-        let selected =
-            select_skills(&root, "不要写报告，直接生图", 2, 4000).expect("select");
-        assert!(selected.iter().all(|skill| skill.name != "doc-writer"));
-        assert!(selected.iter().any(|skill| skill.name == "image-gen"));
+        let route = select_skills(&root, "不要写报告，直接生图", 2, 4000).expect("select");
+        assert!(route.skills.iter().all(|skill| skill.name != "doc-writer"));
+        assert!(route.skills.iter().any(|skill| skill.name == "image-gen"));
         // 转发器正文被替换成画布工具转发说明
-        let img = selected.iter().find(|skill| skill.name == "image-gen").unwrap();
+        let img = route.skills.iter().find(|skill| skill.name == "image-gen").unwrap();
         assert!(img.body.contains("canvas_run"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -876,8 +1336,8 @@ mod tests {
             "旧正文。",
         );
         // 「放大到4K」在拾一真机曾同时选中 4 个转发器；现在只允许一个
-        let selected = select_skills(&root, "把这张图放大到 4k", 2, 4000).expect("select");
-        let forwarders: Vec<&str> = selected
+        let route = select_skills(&root, "把这张图放大到 4k", 2, 4000).expect("select");
+        let forwarders: Vec<&str> = route.skills
             .iter()
             .filter(|skill| skill.kind == "delegated")
             .map(|skill| skill.name.as_str())
@@ -904,8 +1364,8 @@ mod tests {
             "画图。",
         );
         // 拾一轮教训：「画个手柄底座的 STL」原来命中了 image-gen
-        let selected = select_skills(&root, "画个手柄底座的 stl", 1, 4000).expect("select");
-        assert_eq!(selected[0].name, "print3d");
+        let route = select_skills(&root, "画个手柄底座的 stl", 1, 4000).expect("select");
+        assert_eq!(route.skills[0].name, "print3d");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -925,8 +1385,8 @@ mod tests {
             "输出 SVG。",
         );
         // 同分时查询型 −0.5，生成型（svg-drawing）应排在前面
-        let selected = select_skills(&root, "画硫酸根结构式存 svg", 2, 4000).expect("select");
-        assert_eq!(selected[0].name, "svg-drawing");
+        let route = select_skills(&root, "画硫酸根结构式存 svg", 2, 4000).expect("select");
+        assert_eq!(route.skills[0].name, "svg-drawing");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -946,8 +1406,8 @@ mod tests {
             "音乐。",
         );
         // tts-local 没写 not_for，DEFAULT_NEGATIVE 从描述兜底（朗读/配音都在描述里）
-        let selected = select_skills(&root, "唱一首关于春天的歌", 2, 4000).expect("select");
-        assert!(selected.iter().all(|skill| skill.name != "tts-local"));
+        let route = select_skills(&root, "唱一首关于春天的歌", 2, 4000).expect("select");
+        assert!(route.skills.iter().all(|skill| skill.name != "tts-local"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -961,10 +1421,10 @@ mod tests {
             "name: long-skill\ndescription: 长技能\ntriggers:\n  - 长任务",
             &body,
         );
-        let selected = select_skills(&root, "做一个长任务", 1, 300).expect("select");
-        assert_eq!(selected.len(), 1);
-        assert!(selected[0].body.chars().count() <= 330);
-        assert!(selected[0].body.contains("已截断"));
+        let route = select_skills(&root, "做一个长任务", 1, 300).expect("select");
+        assert_eq!(route.skills.len(), 1);
+        assert!(route.skills[0].body.chars().count() <= 330);
+        assert!(route.skills[0].body.contains("已截断"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -977,6 +1437,7 @@ mod tests {
             score: 4.0,
             kind: "generate".to_string(),
             body: "先列大纲".to_string(),
+            category_path: Vec::new(),
         }];
         let text = render_skill_context(&skills);
         assert!(text.contains("技能：doc-writer"));
@@ -984,12 +1445,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn real_skills_router_regression() {
-        let root = Path::new(r"D:\Projects\shyi-ai\data\skills");
+        // 用宿主真正会用的目录，不要写死路径：技能树换位后路由可能断。
+        let Some(root) = default_skills_dir(None) else {
+            return;
+        };
         if !root.is_dir() {
             return;
         }
+        let root = root.as_path();
         let metas = index_skills(root).expect("index real skills");
         println!("技能总数：{}", metas.len());
         let delegated_count = metas
@@ -997,6 +1461,11 @@ mod tests {
             .filter(|meta| meta.kind == "delegated")
             .count();
         assert_eq!(delegated_count, 4, "应有 4 个转发器");
+
+        // 技能树（_tree.json）必须让绝大多数技能带上分类路径。
+        let classified = metas.iter().filter(|meta| !meta.category_path.is_empty()).count();
+        println!("已分类：{classified}/{}", metas.len());
+        assert!(classified as f32 >= metas.len() as f32 * 0.95, "分类覆盖率不足：{classified}/{}", metas.len());
 
         let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
             // (输入, 必须命中其一, 不得命中)
@@ -1013,11 +1482,17 @@ mod tests {
             ("画硫酸根结构式存 svg", vec!["svg-drawing", "chemistry-lookup"], vec![]),
         ];
         for (text, expect_any, forbid) in &cases {
-            let selected = select_skills(root, text, 2, 8000).expect("select");
-            let names: Vec<&str> = selected.iter().map(|skill| skill.name.as_str()).collect();
-            println!("{text} -> {names:?}");
+            let route = select_skills(root, text, 2, 8000).expect("select");
+            let names: Vec<&str> = route.skills.iter().map(|skill| skill.name.as_str()).collect();
+            println!("{text} -> {names:?}（分支：{:?}）", route.branches);
+            // 两级路由在真库上必须真的启用（_tree.json 已入库）；
+            // 零命中的输入（如「看看工作区里有什么文件」）没有晋级分支属正常。
+            if !expect_any.is_empty() {
+                assert!(!route.branches.is_empty(), "{text} 没有晋级分支：{names:?}");
+            }
             // 全局不变量：任何输入最多命中一个转发器；且不允许重复注入。
-            let forwarders = selected
+            let forwarders = route
+                .skills
                 .iter()
                 .filter(|skill| skill.kind == "delegated")
                 .count();
@@ -1041,5 +1516,151 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 写一份 `_tree.json` 到临时技能库根目录。
+    fn write_tree(root: &Path, json: &str) {
+        std::fs::write(root.join("_tree.json"), json).unwrap();
+    }
+
+    #[test]
+    fn two_stage_gating_cuts_offbranch_and_escape_saves_format_hit() {
+        // 四个分支：媒体(4.0) 数据(3.0,格式词) 工程(3.0,格式词) 文档(2.0)。
+        // Top-2 = 媒体 + 数据；工程分支的 budget-tool 靠 xlsx 格式词豁免活下来，
+        // 文档分支的 doc-writer（无豁免）被裁掉。
+        let root = temp_root("two-stage");
+        write_skill(
+            &root,
+            "notepad",
+            "name: notepad\ndescription: 记事本\ntools:\n  - write_file\ntriggers:\n  - 数据\n  - 导出",
+            "记录数据。",
+        );
+        write_skill(
+            &root,
+            "doc-writer",
+            "name: doc-writer\ndescription: 写正式文档\ntriggers:\n  - 报表",
+            "写文档。",
+        );
+        write_skill(
+            &root,
+            "sheet-helper",
+            "name: sheet-helper\ndescription: 把数据导出成 xlsx 表格",
+            "导出表格。",
+        );
+        write_skill(
+            &root,
+            "budget-tool",
+            "name: budget-tool\ndescription: 预算表处理，读写 xlsx",
+            "处理预算。",
+        );
+        write_tree(
+            &root,
+            r#"{"version":1,"categories":[
+                {"id":"media","label":"媒体","children":[{"id":"img","label":"图像","members":["notepad"]}]},
+                {"id":"docs","label":"文档","members":["doc-writer"]},
+                {"id":"data","label":"数据","members":["sheet-helper"]},
+                {"id":"eng","label":"工程","members":["budget-tool"]}
+            ]}"#,
+        );
+        let route = select_skills(&root, "把这份数据导出成 xlsx 报表", 3, 4000).expect("select");
+        let names: Vec<&str> = route.skills.iter().map(|s| s.name.as_str()).collect();
+        println!("两级路由 -> {names:?}（分支：{:?}）", route.branches);
+        assert_eq!(route.branches, vec!["数据".to_string(), "媒体".to_string()]);
+        assert!(names.contains(&"notepad"), "最高分在晋级分支内：{names:?}");
+        assert!(names.contains(&"sheet-helper"), "格式词豁免技能应入选：{names:?}");
+        assert!(names.contains(&"budget-tool"), "工程分支被裁，但 xlsx 格式词豁免应保住 budget-tool：{names:?}");
+        assert!(!names.contains(&"doc-writer"), "文档分支未晋级且无豁免，应被裁掉：{names:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn branch_trigger_boosts_branch_ranking() {
+        // music-gen 自身零命中，但「写首歌」命中媒体分支的类级触发词，
+        // 让媒体分支晋级，从而 notepad（晋级分支成员）胜出。
+        let root = temp_root("branch-trigger");
+        write_skill(
+            &root,
+            "music-gen",
+            "name: music-gen\ndescription: 音乐生成",
+            "音乐。",
+        );
+        write_skill(
+            &root,
+            "doc-writer",
+            "name: doc-writer\ndescription: 写正式文档\ntriggers:\n  - 报表",
+            "写文档。",
+        );
+        write_skill(
+            &root,
+            "notepad",
+            "name: notepad\ndescription: 记事本\ntriggers:\n  - 记一下\ntools:\n  - write_file",
+            "记录。",
+        );
+        write_tree(
+            &root,
+            r#"{"version":1,"categories":[
+                {"id":"media","label":"媒体","triggers":["写首歌"],"children":[{"id":"img","label":"图像","members":["music-gen","notepad"]}]},
+                {"id":"docs","label":"文档","members":["doc-writer"]}
+            ]}"#,
+        );
+        let route = select_skills(&root, "写首歌，顺便记一下备忘", 2, 4000).expect("select");
+        let names: Vec<&str> = route.skills.iter().map(|s| s.name.as_str()).collect();
+        println!("类级触发词 -> {names:?}（分支：{:?}）", route.branches);
+        assert!(route.branches.contains(&"媒体".to_string()), "类级触发词应让媒体分支晋级：{:?}", route.branches);
+        assert!(names.contains(&"notepad"), "notepad 应入选：{names:?}");
+        assert!(!names.contains(&"doc-writer"), "文档分支未晋级且 doc-writer 无豁免：{names:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn linked_complements_outrank_strangers() {
+        // 三个同分技能按名字序本会选 alpha/mid；links 让 zeta↔alpha 各 +1，
+        // 于是 zeta 与 alpha 双双入选，mid 被挤掉。单分支避免门控干扰。
+        let root = temp_root("links");
+        for (name, trigger) in [("zeta", "清单"), ("alpha", "清单"), ("mid", "清单")] {
+            write_skill(
+                &root,
+                name,
+                &format!("name: {name}\ndescription: 通用处理\ntriggers:\n  - {trigger}"),
+                "正文。",
+            );
+        }
+        write_tree(
+            &root,
+            r#"{"version":1,"categories":[
+                {"id":"misc","label":"通用","members":["zeta","alpha","mid"]}
+            ],
+            "links":[{"from":"zeta","type":"complement","to":"alpha","note":"配套"}]}"#,
+        );
+        let route = select_skills(&root, "帮我整理这份清单", 2, 4000).expect("select");
+        let names: Vec<&str> = route.skills.iter().map(|s| s.name.as_str()).collect();
+        println!("关联加成 -> {names:?}");
+        assert!(names.contains(&"zeta") && names.contains(&"alpha"), "配套对应一起入选：{names:?}");
+        assert!(!names.contains(&"mid"), "无关联的 mid 应被挤出 Top-2：{names:?}");
+        // 索引里能查到双向关联。
+        let metas = index_skills(&root).expect("index");
+        let zeta = metas.iter().find(|meta| meta.name == "zeta").unwrap();
+        assert!(zeta.related.iter().any(|link| link.name == "alpha" && link.direction == "outbound"));
+        assert_eq!(zeta.category_path, vec!["通用".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn broken_tree_json_falls_back_to_flat() {
+        let root = temp_root("broken-tree");
+        write_skill(
+            &root,
+            "doc-writer",
+            "name: doc-writer\ndescription: 写正式文档\ntriggers:\n  - 报告",
+            "写文档。",
+        );
+        write_tree(&root, "{ 这不是合法 JSON");
+        let metas = index_skills(&root).expect("index");
+        assert!(metas[0].category_path.is_empty(), "非法 tree.json 应按未分类处理");
+        let route = select_skills(&root, "帮我写一份报告", 2, 4000).expect("select");
+        assert_eq!(route.skills.len(), 1);
+        assert_eq!(route.skills[0].name, "doc-writer");
+        assert!(route.branches.is_empty(), "退化平铺时不该有晋级分支");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

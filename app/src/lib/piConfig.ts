@@ -7,6 +7,7 @@ import {
   type PiAgentStatus,
 } from '@/lib/ipc/pi';
 import { getServerApiKey } from '@/lib/ipc/server';
+import { isLoopbackPiEndpoint, resolveAutoPiEndpoint } from '@/lib/piEndpoint';
 
 /**
  * Pi 内核的共享配置。
@@ -24,6 +25,11 @@ export interface PiConfig extends PiAgentStartOptions {
   skillRoutingEnabled: boolean;
   /** 随应用启动 Pi：启动软件时自动拉起，关闭软件一并停止；关闭则完全不自动启动。 */
   autoStart: boolean;
+  /**
+   * 自动对接模型端点：检测正在运行的 NiNfer / Strata / llama-server，
+   * 自动填基址、模型与 Key。关闭后使用手动填写的端点配置。
+   */
+  autoEndpoint: boolean;
 }
 
 export const PI_CONFIG_KEY = 'pi-agent-config-v1';
@@ -47,6 +53,8 @@ export function defaultPiConfig(): PiConfig {
     skillRoutingEnabled: true,
     // 默认开启：保持原有「Pi 随用随起」的体验；关掉后才是「不自动启动」。
     autoStart: true,
+    // 默认自动对接正在运行的引擎：用户不该在这里再填一遍地址和模型 ID。
+    autoEndpoint: true,
   };
 }
 
@@ -71,6 +79,10 @@ export function loadPiConfig(): PiConfig {
           : defaults.skillRoutingEnabled,
       autoStart:
         typeof parsed.autoStart === 'boolean' ? parsed.autoStart : defaults.autoStart,
+      autoEndpoint:
+        typeof parsed.autoEndpoint === 'boolean'
+          ? parsed.autoEndpoint
+          : defaults.autoEndpoint,
     };
   } catch {
     return defaults;
@@ -84,6 +96,20 @@ export function savePiConfig(config: PiConfig) {
   } catch {
     // 配额不足时静默；不影响当前运行
   }
+}
+
+/** 自动对接模式下「没检测到引擎」的固定提示串。 */
+export const PI_NO_ENGINE_HINT = '没有检测到正在运行的模型引擎';
+
+/**
+ * 判断是不是「本机没跑模型引擎」。
+ *
+ * 这不是错误：应用常在没加载模型时就启动，Pi 没有端点可用是常态。
+ * 真要提示用户，由发送消息时的失败提示承担（那里写清了怎么做）。
+ */
+export function isNoEngineError(reason: unknown): boolean {
+  const text = reason instanceof Error ? reason.message : String(reason ?? '');
+  return text.includes(PI_NO_ENGINE_HINT);
 }
 
 /** 会话工作目录由宿主派生，这里只做展示/兜底。 */
@@ -107,13 +133,32 @@ export const PI_AUTO_SESSION_ID = 'pi-auto';
 
 const PI_RUN_SIGNATURE_KEY = 'pi-agent-run-signature';
 
-/** 决定「需要重启 Pi 才能生效」的配置指纹（端点 / Provider / 模型 / Key）。 */
+/**
+ * 签名指纹里不能存 Key 原文——这份指纹会写进 localStorage（明文落盘）。
+ * 这里只需要「Key 变没变」的判别力，不要求可逆、不防对抗：用两个相反
+ * 混合方向的 FNV-1a 拼成 64 位摘要即可。
+ *
+ * 注意：2026-11 前的旧指纹含 Key 原文，升级后第一次比对必然不一致，
+ * 会触发一次 Pi 重启，属预期行为。
+ */
+function hashApiKey(value: string): string {
+  if (!value) return '';
+  let forward = 0x811c9dc5;
+  let backward = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    forward = Math.imul(forward ^ value.charCodeAt(i), 0x01000193) >>> 0;
+    backward = Math.imul(backward ^ value.charCodeAt(value.length - 1 - i), 0x01000193) >>> 0;
+  }
+  return forward.toString(16).padStart(8, '0') + backward.toString(16).padStart(8, '0');
+}
+
+/** 决定「需要重启 Pi 才能生效」的配置指纹（端点 / Provider / 模型 / Key 摘要）。 */
 export function runSignature(config: PiConfig, model: string): string {
   return [
     config.baseUrl.trim(),
     config.provider.trim(),
     model.trim(),
-    config.apiKey.trim(),
+    hashApiKey(config.apiKey.trim()),
   ].join('\u0000');
 }
 
@@ -135,7 +180,12 @@ function writeRunSignature(signature: string) {
 
 /** 探测并补齐空白路径；不覆盖用户已经填过的值。 */
 export async function hydratePiConfig(config: PiConfig): Promise<PiConfig> {
-  if (config.cliPath.trim() && config.workDir.trim() && config.agentDir.trim()) {
+  if (
+    config.cliPath.trim() &&
+    config.workDir.trim() &&
+    config.agentDir.trim() &&
+    config.skillsDir.trim()
+  ) {
     return config;
   }
   const discover = await piAgentDiscover().catch(() => null);
@@ -166,40 +216,89 @@ async function probeModel(baseUrl: string, apiKey: string): Promise<string> {
   return id;
 }
 
+/** 路径比较用：Windows 大小写不敏感，末尾分隔符不影响「是不是同一个目录」。 */
+function sameWorkDir(a: string | null | undefined, b: string): boolean {
+  if (!a) return false;
+  const norm = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+}
+
 /**
  * 确保 Pi 以指定会话运行。
  *
- * - 已在同一会话：直接返回状态；
- * - 正在跑别的会话：先停止再启动（Pi 是单进程）；
+ * - 已在同一会话与同一工作区：直接返回状态；
+ * - 正在跑别的会话 / 换了工作区：先停止再启动（Pi 是单进程）；
  * - 未运行：按共享配置启动。
  *
  * `coldStart` 表示「没有实例时是否允许拉起」。用户手点启动、开关刚打开时传 true；
  * 普通发送 / 预启动传 false——否则「随应用启动」关掉后，发一条消息又会把 Pi 拉起来。
+ *
+ * `workspaceDir` 是 Chat 里选中的工作区（真实本地文件夹）。传入后直接作为 Pi
+ * 的沙箱目录，不再派生 `<workDir>/<session>`；不传则保持旧的会话隔离方式。
  */
 export async function ensurePiForSession(
   piSessionId: string,
   coldStart = true,
+  workspaceDir?: string,
 ): Promise<PiAgentStatus> {
   const config = await hydratePiConfig(loadPiConfig());
-  // 本机端点：服务可能因为对外开放而启用鉴权，Pi 必须带同一把 Key。
-  // 用户不需要知道这把 Key 是什么——直接从宿主当前运行的服务读出来。
-  if (isLoopbackBaseUrl(config.baseUrl)) {
-    const serverKey = await getServerApiKey().catch(() => null);
-    const trimmed = serverKey?.trim();
-    if (trimmed) config.apiKey = trimmed;
-  }
-  savePiConfig(config);
   if (!config.cliPath.trim()) {
     throw new Error('未找到 Pi CLI（cli.js）。请到 Agent 页的「Pi」设置里填写路径。');
   }
   if (!config.workDir.trim()) {
     throw new Error('Pi 工作目录为空。请到 Agent 页的「Pi」设置里检查。');
   }
+  savePiConfig(config);
+
+  // 端点：自动模式下探测正在运行的引擎（NiNfer 优先，llama 兜底）。
+  // 探测结果只用于本次启动，不写回 localStorage——否则会把某一刻的端口钉死。
+  let baseUrl = config.baseUrl.trim();
+  let apiKey = config.apiKey;
+  let contextWindow: number | undefined;
+  if (config.autoEndpoint) {
+    const detected = await resolveAutoPiEndpoint();
+    if (!detected) {
+      throw new Error(
+        '没有检测到正在运行的模型引擎。请先在模型页加载模型，或启动 NiNfer / Strata 后再发送。',
+      );
+    }
+    baseUrl = detected.baseUrl;
+    apiKey = detected.apiKey;
+    contextWindow = detected.contextWindow;
+    // 引擎的模型 id 会随变体变化；探测不到时清空，强制以 `/v1/models` 为准，
+    // 避免把上一个引擎的模型 ID 带到新端点上。
+    config.model = detected.model ?? '';
+  } else if (isLoopbackPiEndpoint(baseUrl)) {
+    // 手动模式 + 本机端点：服务可能因为对外开放而启用鉴权，Pi 必须带同一把 Key。
+    const serverKey = await getServerApiKey().catch(() => null);
+    const trimmed = serverKey?.trim();
+    if (trimmed) apiKey = trimmed;
+  }
+  // 模型 ID：引擎的模型会随变体变化，以实际 `/v1/models` 为准；
+  // 解析必须在「是否需要重启」之前完成，否则每次 ensure 都会因签名不一致重启 Pi。
+  let model = config.model.trim();
+  const engineEndpoint = config.autoEndpoint || /:(8094|8082)(\/|$)/.test(baseUrl);
+  if (!model || engineEndpoint) {
+    const probed = await probeModel(baseUrl, apiKey).catch((error) => {
+      // 用户显式填了模型时，探测失败就沿用原值（远端/离线场景不该被这段逻辑改坏）。
+      if (!model) throw error;
+      return null;
+    });
+    if (probed) model = probed;
+  }
+  config.model = model;
+  savePiConfig(config);
+
+  const desiredWorkDir = workspaceDir?.trim()
+    ? workspaceDir.trim()
+    : sessionWorkDir(config.workDir, piSessionId);
 
   const current = await piAgentGetStatus().catch(() => null);
   // 端点 / 模型 / Key 变了，必须重启才能生效：旧进程不会自己换配置。
-  const signature = runSignature(config, config.model);
-  const needsRestart = current?.running && readRunSignature() !== signature;
+  const signature = runSignature({ ...config, baseUrl, apiKey }, model);
+  const needsRestart =
+    current?.running &&
+    (readRunSignature() !== signature || !sameWorkDir(current.work_dir, desiredWorkDir));
   if (current?.running && current.session_id === piSessionId && !needsRestart) {
     return current;
   }
@@ -212,27 +311,13 @@ export async function ensurePiForSession(
     await piAgentStop();
   }
 
-  let model = config.model.trim();
-  // NiNfer / Strata 的模型 ID 会随所选变体变化（bonsai/saluki、gyro-s/gyro-m）。
-  // 端点固定指向本机引擎端口时，以引擎实际 `/v1/models` 为准：旧配置里钉死的
-  // `qwen3.8-27b` / `underdog-saluki-27b` 不会让 Pi 一直 404。
-  const engineEndpoint = /:(8094|8082)(\/|$)/.test(config.baseUrl.trim());
-  if (!model || engineEndpoint) {
-    const probed = await probeModel(config.baseUrl, config.apiKey).catch((error) => {
-      // 用户显式填了模型时，探测失败就沿用原值（远端/离线场景不该被这段逻辑改坏）。
-      if (!model) throw error;
-      return null;
-    });
-    if (probed && probed !== model) {
-      model = probed;
-      config.model = probed;
-      savePiConfig(config);
-    }
-  }
-
   const next = await piAgentStart({
     ...config,
+    baseUrl,
+    apiKey,
     model,
+    contextWindow,
+    workspaceDir: workspaceDir?.trim() || undefined,
     workDir: config.workDir,
     sessionId: piSessionId,
     sessionDir: config.sessionDir,
@@ -241,6 +326,6 @@ export async function ensurePiForSession(
   if (!next.running) {
     throw new Error(next.message || 'Pi 启动失败，请查看 Agent 页的运行日志。');
   }
-  writeRunSignature(runSignature(config, model));
+  writeRunSignature(signature);
   return next;
 }

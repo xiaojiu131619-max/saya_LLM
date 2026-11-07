@@ -19,6 +19,7 @@ const HOST_TOOLS = [
   "edit_file",
   "list_dir",
   "run_command",
+  "run_python",
   "save_memory",
   "canvas_status",
   "canvas_list_workflows",
@@ -26,6 +27,9 @@ const HOST_TOOLS = [
   "canvas_run",
   "canvas_cancel",
 ] as const;
+
+/** 本次会话已注册的 MCP 工具名：注入系统提示，避免模型不知道可以调用。 */
+let activeMcpToolNames: string[] = [];
 
 type HostResult = {
   ok?: boolean;
@@ -87,18 +91,69 @@ async function callHost(
   }
 }
 
+type McpToolDef = {
+  server: string;
+  name: string;
+  qualifiedName: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  readOnly?: boolean;
+  destructive?: boolean;
+};
+
+async function listMcpTools(): Promise<McpToolDef[]> {
+  if (!BRIDGE_URL || !BRIDGE_TOKEN) return [];
+  try {
+    const response = await fetch(`${BRIDGE_URL}/mcp-tools`, {
+      headers: { "X-Pi-Token": BRIDGE_TOKEN },
+    });
+    if (!response.ok) return [];
+    const payload = (await response.json().catch(() => ({}))) as { tools?: McpToolDef[] };
+    return Array.isArray(payload.tools) ? payload.tools : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function (pi: ExtensionAPI) {
-  // 强制只保留宿主代理工具。即使 builtin 被别的配置重新打开，这里也会踢掉。
+  // 强制只保留宿主代理工具与已连接的 MCP 工具。
+  // MCP 是用户在「工具」页配置的服务，连接状态只有宿主知道；这里在会话开始时拉一次清单，
+  // 再按真实 schema 注册。即使 builtin 被别的配置重新打开，这里也会踢掉。
   pi.on("session_start", async () => {
-    pi.setActiveTools([...HOST_TOOLS]);
+    const names: string[] = [...HOST_TOOLS];
+    const mcpTools = await listMcpTools();
+    for (const tool of mcpTools) {
+      if (names.includes(tool.qualifiedName)) continue;
+      try {
+        pi.registerTool({
+          name: tool.qualifiedName,
+          label: `${tool.server} · ${tool.name}`,
+          description:
+            tool.description ||
+            `MCP 工具 ${tool.qualifiedName}（${tool.server}）。参数按服务端 schema。`,
+          parameters: Type.Unsafe(
+            (tool.inputSchema ?? { type: "object", properties: {} }) as never,
+          ),
+          async execute(_toolCallId, params, signal) {
+            return callHost(tool.qualifiedName, (params ?? {}) as Record<string, unknown>, signal);
+          },
+        });
+        names.push(tool.qualifiedName);
+      } catch {
+        // 单个 MCP 工具的 schema 不被接受时，跳过它，不影响宿主工具。
+      }
+    }
+    pi.setActiveTools(names);
+    activeMcpToolNames = names.filter((name) => name.startsWith("mcp__"));
   });
 
   // 双保险：任何非宿主工具调用直接阻断。
   pi.on("tool_call", async (event) => {
-    if (!HOST_TOOLS.includes(event.toolName as (typeof HOST_TOOLS)[number])) {
+    const isHost = HOST_TOOLS.includes(event.toolName as (typeof HOST_TOOLS)[number]);
+    if (!isHost && !event.toolName.startsWith("mcp__")) {
       return {
         block: true,
-        reason: `工具 ${event.toolName} 已被宿主禁用；只能使用 ${HOST_TOOLS.join(" / ")}`,
+        reason: `工具 ${event.toolName} 已被宿主禁用；只能使用宿主工具或已连接的 MCP 工具`,
       };
     }
   });
@@ -106,7 +161,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => ({
     systemPrompt:
       event.systemPrompt +
-      "\n\n工具说明：所有文件与命令都通过宿主代理执行。文件路径必须在工作区内；auto 档的覆盖/删除/命令会请求用户确认，full 档仍会拦截危险命令。长期记忆跨会话共享：需要记住用户偏好、任务结论或踩过的坑时，用 save_memory 写入；每轮任务开头收到的【长期记忆】就是之前存下的内容。\n\n画布（无限画布生图）：需要生成/修改图片时先 canvas_status 确认画布在线，再 canvas_list_workflows 拿真实工作流 ID，最后 canvas_run 提交（参数 workflow/prompt/negative/size/output_name）。不要编造工作流 ID，不要把工作流 JSON 复制出来假装生成；产物会自动存到工作区 canvas/ 目录。",
+      (activeMcpToolNames.length > 0
+        ? `\n\n已连接的 MCP 工具（可直接调用）：${activeMcpToolNames.join("、")}。需要外部数据或服务时优先用它们，不要编造结果。`
+        : "") +
+      "\n\n运行环境：Windows。技能说明里出现的 python3 / 终端命令请改写为宿主工具：Python 用 run_python，Shell 用 run_command（PowerShell），不要假设 bash/apt/brew 可用；文件路径统一用工作区相对路径。技能说明如果要求当前工具列表里没有的工具（如 web_search / browser / image_search），改用等价的宿主工具或明确说明无法执行，不要假装调用。\n\n工具说明：所有文件与命令都通过宿主代理执行。文件路径必须在工作区内；auto 档的覆盖/删除/命令会请求用户确认，full 档仍会拦截危险命令。长期记忆跨会话共享：需要记住用户偏好、任务结论或踩过的坑时，用 save_memory 写入；每轮任务开头收到的【长期记忆】就是之前存下的内容。\n\n画布（无限画布生图）：需要生成/修改图片时先 canvas_status 确认画布在线，再 canvas_list_workflows 拿真实工作流 ID，最后 canvas_run 提交（参数 workflow/prompt/negative/size/output_name）。不要编造工作流 ID，不要把工作流 JSON 复制出来假装生成；产物会自动存到工作区 canvas/ 目录。",
   }));
 
   pi.registerTool({
@@ -186,6 +244,26 @@ export default function (pi: ExtensionAPI) {
       return callHost(
         "run_command",
         { command: params.command, timeout: params.timeout },
+        signal,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "run_python",
+    label: "运行 Python",
+    description:
+      "在工作区内运行一段 Python 代码（3.x），用于 office 文档处理、数据分析、脚本类技能。代码里用相对工作区的路径；auto 档会请求确认，full 档直接执行。",
+    parameters: Type.Object({
+      code: Type.String({ description: "要执行的 Python 代码（完整脚本，可多行）" }),
+      timeout: Type.Optional(
+        Type.Number({ description: "超时秒数，默认 60，最大 300" }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return callHost(
+        "run_python",
+        { code: params.code, timeout: params.timeout },
         signal,
       );
     },

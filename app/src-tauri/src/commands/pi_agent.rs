@@ -119,8 +119,12 @@ pub fn pi_agent_start(
 }
 
 #[tauri::command]
-pub fn pi_agent_run(prompt: String, skill_context: Option<String>) -> Result<String, String> {
-    pi_agent::run(&prompt, skill_context.as_deref())
+pub fn pi_agent_run(
+    prompt: String,
+    skill_context: Option<String>,
+    images: Option<Vec<serde_json::Value>>,
+) -> Result<String, String> {
+    pi_agent::run(&prompt, skill_context.as_deref(), images.as_deref())
 }
 
 /// 只读技能索引（名称/描述/触发词/工具），不返回正文。
@@ -134,6 +138,9 @@ pub fn pi_agent_skills_index(skills_dir: String) -> Result<Vec<PiSkillMeta>, Str
 pub struct PiSkillSelection {
     pub skills: Vec<PiSelectedSkill>,
     pub context: String,
+    /// 两级路由晋级的分支名；未启用（无 `_tree.json`）时为空。
+    #[serde(default)]
+    pub branches: Vec<String>,
 }
 
 /// 宿主雷达：按任务文本选 1–2 个技能，并返回截断后的正文与可直接注入的文本。
@@ -144,14 +151,18 @@ pub fn pi_agent_select_skills(
     top_k: Option<usize>,
     max_chars: Option<usize>,
 ) -> Result<PiSkillSelection, String> {
-    let skills = pi_skills::select_skills(
+    let route = pi_skills::select_skills(
         Path::new(skills_dir.trim()),
         &text,
         top_k.unwrap_or(2),
         max_chars.unwrap_or(8000),
     )?;
-    let context = pi_skills::render_skill_context(&skills);
-    Ok(PiSkillSelection { skills, context })
+    let context = pi_skills::render_skill_context(&route.skills);
+    Ok(PiSkillSelection {
+        skills: route.skills,
+        context,
+        branches: route.branches,
+    })
 }
 
 /// 在指定会话工作区内按文件名/相对路径解析产物。
@@ -183,6 +194,12 @@ pub async fn pi_read_artifact(
 #[tauri::command]
 pub fn pi_agent_cancel() -> Result<(), String> {
     pi_agent::cancel()
+}
+
+/// 手动压缩 Pi 会话上下文（Pi 原生 compaction）。
+#[tauri::command]
+pub fn pi_agent_compact(custom_instructions: Option<String>) -> Result<(), String> {
+    pi_agent::compact(custom_instructions.as_deref())
 }
 
 #[tauri::command]
@@ -217,4 +234,33 @@ pub fn pi_agent_permission_answer(id: String, allow: bool) -> Result<(), String>
 pub fn pi_agent_set_permission_mode(mode: PiPermissionMode) -> String {
     pi_tools::set_mode(mode);
     mode.as_str().to_string()
+}
+
+/// 工作区文件树（单层）；`rel_path` 为空表示根目录。
+#[tauri::command]
+pub fn workspace_list_dir(
+    work_dir: String,
+    rel_path: Option<String>,
+) -> Result<Vec<pi_tools::WorkspaceEntry>, String> {
+    pi_tools::list_workspace(&work_dir, rel_path.as_deref().unwrap_or("."))
+}
+
+/// 工作区终端：在工作区目录里执行 PowerShell。
+#[tauri::command]
+pub async fn workspace_run_command(
+    work_dir: String,
+    command: String,
+    timeout: Option<u64>,
+) -> Result<pi_tools::WorkspaceCommandOutput, String> {
+    tokio::task::spawn_blocking(move || {
+        pi_tools::run_workspace_command(&work_dir, &command, timeout.unwrap_or(60))
+    })
+    .await
+    .map_err(|error| format!("执行命令失败：{error}"))?
+}
+
+/// 用系统默认程序打开工作区文件（Office 修改 / 预览）。
+#[tauri::command]
+pub fn workspace_open_path(work_dir: String, rel_path: String) -> Result<(), String> {
+    pi_tools::open_workspace_path(&work_dir, &rel_path)
 }

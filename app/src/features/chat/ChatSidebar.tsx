@@ -5,7 +5,10 @@ import {
   ArrowLeftRight,
   Bot,
   CheckSquare,
+  ChevronDown,
   Download,
+  FolderOpen,
+  FolderPlus,
   Loader2,
   MessageSquarePlus,
   PanelLeftClose,
@@ -37,6 +40,12 @@ interface ChatSidebarProps {
   canChat: boolean;
   /** 当前对话归属：主对话 / Agent 工作区。 */
   scope: ChatScope;
+  /** Agent 工作区列表（仅 Pi 工作区显示切换栏）。 */
+  workspaces?: Array<{ id: string; name: string; path: string }>;
+  activeWorkspaceId?: string;
+  onSelectWorkspace?: (workspaceId: string) => void;
+  onPickWorkspace?: () => void;
+  onOpenSkills?: () => void;
   /**
    * 引擎后端身份（主对话切到 NiNfer / Strata 时非空）。
    * 身份区跟随引擎显示；不传则按 GGUF 模型显示。
@@ -83,6 +92,11 @@ export default function ChatSidebar({
   activeModel,
   canChat,
   scope,
+  workspaces = [],
+  activeWorkspaceId,
+  onSelectWorkspace,
+  onPickWorkspace,
+  onOpenSkills,
   engineIdentity = null,
   onOpenEnginePage,
   onSelectScope,
@@ -162,6 +176,8 @@ export default function ChatSidebar({
   // 会话右键菜单：坐标取指针位置，节点渲染到 body——侧边栏是 overflow-hidden 的，
   // 菜单若留在 DOM 树里会被裁成一条。任何点击 / Esc / 滚动都关闭。
   const [contextMenu, setContextMenu] = useState<{ session: ChatSession; x: number; y: number } | null>(null);
+  // 工作区下拉（仅 Pi 工作区使用）：列出已绑定文件夹 + 新建入口。
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
@@ -290,6 +306,88 @@ export default function ChatSidebar({
             {!collapsed && <motion.span {...expandedMotion}>新建对话</motion.span>}
           </AnimatePresence>
         </button>
+
+        {/* 工作区：Agent 对话的真实本地文件夹。只有这个文件夹内的文件/命令
+            享有 Pi 的高权限，切换工作区即切换目录与权限档。 */}
+        {scope === 'pi' && !collapsed && (
+          <div className="relative mt-1.5">
+            <button
+              type="button"
+              onClick={() => setWorkspaceMenuOpen((value) => !value)}
+              className="flex h-9 w-full min-w-0 items-center gap-2 rounded-[var(--radius-field)] px-3 text-left text-[length:var(--font-caption)] text-[var(--text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.07]"
+              title="切换 Agent 工作区"
+              aria-expanded={workspaceMenuOpen}
+            >
+              <FolderOpen className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+              <span className="min-w-0 flex-1 truncate">
+                {workspaces.find((item) => item.id === activeWorkspaceId)?.name ?? '未选择工作区'}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-tertiary)]" />
+            </button>
+            <AnimatePresence>
+              {workspaceMenuOpen && (
+                <motion.div
+                  initial={false}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                  className="anim-enter-pop absolute left-0 top-full z-40 mt-1 w-full min-w-[220px] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--app-bg)] p-1 shadow-xl dark:border-white/[0.08] dark:bg-[var(--surface-raised)]"
+                >
+                  {workspaces.length === 0 ? (
+                    <div className="px-3 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
+                      还没有工作区。选择一个本地文件夹后，Pi 才能读写其中的文件。
+                    </div>
+                  ) : (
+                    workspaces.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setWorkspaceMenuOpen(false);
+                          onSelectWorkspace?.(item.id);
+                        }}
+                        className={`flex w-full min-w-0 flex-col items-start gap-0.5 rounded-[var(--radius-field)] px-2.5 py-1.5 text-left transition-colors ${
+                          item.id === activeWorkspaceId
+                            ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                            : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]'
+                        }`}
+                      >
+                        <span className="w-full truncate text-[length:var(--font-caption)] font-medium">{item.name}</span>
+                        <span className="w-full truncate text-[length:var(--font-micro)] text-[var(--text-tertiary)]" title={item.path}>
+                          {item.path}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                  <div className="my-1 border-t border-[var(--border-subtle)]" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWorkspaceMenuOpen(false);
+                      onPickWorkspace?.();
+                    }}
+                    className="flex w-full items-center gap-2 rounded-[var(--radius-field)] px-2.5 py-1.5 text-left text-[length:var(--font-caption)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]"
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                    选择本地文件夹…
+                  </button>
+                  {onOpenSkills ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWorkspaceMenuOpen(false);
+                        onOpenSkills();
+                      }}
+                      className="flex w-full items-center gap-2 rounded-[var(--radius-field)] px-2.5 py-1.5 text-left text-[length:var(--font-caption)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] dark:hover:bg-white/[0.07]"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      技能树
+                    </button>
+                  ) : null}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
 
         <AnimatePresence initial={false}>
           {!collapsed && (

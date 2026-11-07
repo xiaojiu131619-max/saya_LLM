@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Send, ShieldAlert, Square, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react';
+import { Languages, Loader2, Send, ShieldAlert, Square, X } from 'lucide-react';
 import {
   piAgentCancel,
   piAgentGetStatus,
@@ -7,6 +7,7 @@ import {
   piAgentSelectSkills,
   subscribePiAgent,
   type PiAgentStatus,
+  type PiImageInput,
 } from '@/lib/ipc/pi';
 import {
   describePiFailure,
@@ -34,6 +35,33 @@ import { isDesktopRuntime } from '@/lib/desktopRuntime';
 
 const FLOAT_SESSION = 'pi-float';
 
+interface FloatImage {
+  id: string;
+  name: string;
+  dataUrl: string;
+  data: string;
+  mimeType: string;
+}
+
+async function readFloatImage(file: Blob, name = '截图'): Promise<FloatImage | null> {
+  if (!file.type.startsWith('image/')) return null;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('读取图片失败'));
+    reader.readAsDataURL(file);
+  });
+  const data = dataUrl.split(',')[1] ?? '';
+  if (!data) return null;
+  return {
+    id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name,
+    dataUrl,
+    data,
+    mimeType: file.type || 'image/png',
+  };
+}
+
 interface FloatEntry {
   id: number;
   role: 'user' | 'assistant';
@@ -45,6 +73,7 @@ export default function PiFloatApp() {
   const [status, setStatus] = useState<PiAgentStatus | null>(null);
   const [entries, setEntries] = useState<FloatEntry[]>([]);
   const [draft, setDraft] = useState('');
+  const [images, setImages] = useState<FloatImage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [permissionWaiting, setPermissionWaiting] = useState(false);
@@ -164,6 +193,12 @@ export default function PiFloatApp() {
         setPermissionWaiting(false);
       },
       onPermission: () => setPermissionWaiting(true),
+      // 后端超时后已按「拒绝」处理：这里要把「等确认」的提示撤掉，
+      // 否则提示会一直挂到本轮结束。活儿在主界面确认不了时，浮窗只能说明原因。
+      onPermissionExpired: ({ tool }) => {
+        setPermissionWaiting(false);
+        setError(`Pi 的「${tool}」权限请求已超时，已自动拒绝；请到主界面重新发起。`);
+      },
     });
   }, []);
 
@@ -171,20 +206,32 @@ export default function PiFloatApp() {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight });
   }, [entries]);
 
-  const send = useCallback(async () => {
-    const text = draft.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? draft).trim()
+      || (images.length > 0 ? '请查看这张截图。' : '');
     if (!text || busy) return;
+    const outboundImages: PiImageInput[] = images.map((image) => ({
+      type: 'image',
+      data: image.data,
+      mimeType: image.mimeType,
+    }));
     setError(null);
     failureRef.current = '';
     setBusy(true);
     setThinkingChars(0);
     setEntries((prev) => [
       ...prev,
-      { id: seqRef.current, role: 'user', text, steps: [] },
+      {
+        id: seqRef.current,
+        role: 'user',
+        text: images.length > 0 ? `${text}（截图 ×${images.length}）` : text,
+        steps: [],
+      },
       { id: seqRef.current + 1, role: 'assistant', text: '', steps: [] },
     ]);
     seqRef.current += 2;
     setDraft('');
+    setImages([]);
     try {
       const current = await piAgentGetStatus().catch(() => null);
       if (current?.running && current.session_id !== FLOAT_SESSION) {
@@ -205,7 +252,7 @@ export default function PiFloatApp() {
           // 路由失败按无技能发送
         }
       }
-      const runId = await piAgentRun(text, skillContext);
+      const runId = await piAgentRun(text, skillContext, outboundImages);
       if (!runId) throw new Error('Pi 没有返回 run id。');
       runIdRef.current = runId;
     } catch (reason) {
@@ -213,7 +260,7 @@ export default function PiFloatApp() {
       setBusy(false);
       appendToLast({ text: `（发送失败：${reason instanceof Error ? reason.message : String(reason)}）` });
     }
-  }, [appendToLast, busy, draft]);
+  }, [appendToLast, busy, draft, images]);
 
   const cancel = useCallback(async () => {
     try {
@@ -227,6 +274,40 @@ export default function PiFloatApp() {
     setBusy(false);
   }, []);
 
+  const addImages = useCallback(async (files: Blob[]) => {
+    const parsed = (await Promise.all(files.map((file) => readFloatImage(file)))).filter(
+      (image): image is FloatImage => Boolean(image),
+    );
+    if (parsed.length === 0) return;
+    setImages((prev) => [...prev, ...parsed].slice(0, 3));
+    setError(null);
+  }, []);
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length > 0) {
+      event.preventDefault();
+      void addImages(files);
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith('image/'));
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addImages(files);
+  };
+
+  const translateShot = () => {
+    if (images.length === 0 || busy) return;
+    void send(
+      '请识别截图中的文字并翻译：原文是外文就翻译成中文，原文是中文就翻译成英文。先列原文要点，再给译文；保留编号、专有名词和数字。',
+    );
+  };
+
   if (!isDesktopRuntime()) {
     return (
       <div className="flex h-screen items-center justify-center px-6 text-center text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
@@ -238,7 +319,11 @@ export default function PiFloatApp() {
   const running = status?.running ?? false;
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--app-bg)] text-[var(--text-primary)]">
+    <div
+      className="flex h-screen flex-col bg-[var(--app-bg)] text-[var(--text-primary)]"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={handleDrop}
+    >
       <header className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
         <span
           className={`h-2 w-2 flex-shrink-0 rounded-full ${
@@ -312,6 +397,27 @@ export default function PiFloatApp() {
         </p>
       ) : null}
 
+      {images.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 border-t border-[var(--border)] px-2 py-1.5">
+          {images.map((image) => (
+            <div key={image.id} className="relative h-12 w-12 overflow-hidden rounded border border-[var(--border)]">
+              <img src={image.dataUrl} alt={image.name} className="h-full w-full object-cover" />
+              <button
+                type="button"
+                onClick={() => setImages((prev) => prev.filter((item) => item.id !== image.id))}
+                title="移除截图"
+                className="absolute right-0 top-0 grid h-4 w-4 place-items-center rounded-bl bg-black/55 text-white"
+              >
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          ))}
+          <span className="self-end pb-0.5 text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+            Ctrl+V 可继续粘贴截图
+          </span>
+        </div>
+      ) : null}
+
       {permissionWaiting ? (
         <p className="flex items-center gap-1.5 border-t border-[var(--border)] px-3 py-1.5 text-[length:var(--font-micro)] leading-relaxed text-[var(--state-warning)]">
           <ShieldAlert className="h-3.5 w-3.5 flex-shrink-0" />
@@ -323,6 +429,7 @@ export default function PiFloatApp() {
         <textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
+          onPaste={handlePaste}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
@@ -330,9 +437,20 @@ export default function PiFloatApp() {
             }
           }}
           rows={2}
-          placeholder={running ? '发消息给当前 Pi 会话…' : '输入任务（Enter 发送）'}
+          placeholder={running ? '发消息给当前 Pi 会话…（可粘贴截图）' : '输入任务，或粘贴截图（Enter 发送）'}
           className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[length:var(--font-caption)] outline-none focus:border-[var(--accent)]"
         />
+        {images.length > 0 && !busy ? (
+          <button
+            type="button"
+            onClick={translateShot}
+            title="识别截图文字并翻译（需要支持视觉的模型）"
+            className="flex h-8 items-center gap-1 rounded-lg border border-[var(--border)] px-2 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
+          >
+            <Languages className="h-3.5 w-3.5" />
+            翻译
+          </button>
+        ) : null}
         {busy ? (
           <button
             type="button"
@@ -346,7 +464,7 @@ export default function PiFloatApp() {
           <button
             type="button"
             onClick={() => void send()}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() && images.length === 0}
             title="发送"
             className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
           >

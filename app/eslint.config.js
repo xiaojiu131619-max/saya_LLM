@@ -6,7 +6,8 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'output', 'src-tauri/target', 'src-tauri/target-*', 'src-tauri/gen']),
+  // resources：技能库模板、画布与引擎等随包资源（第三方/生成物），不参与 lint。
+  globalIgnores(['dist', 'output', 'resources', 'src-tauri/target', 'src-tauri/target-*', 'src-tauri/gen']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

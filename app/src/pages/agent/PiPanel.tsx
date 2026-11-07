@@ -4,9 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Download,
   FolderOpen,
-  History,
   Loader2,
   Play,
   RefreshCw,
@@ -23,22 +21,14 @@ import {
   piAgentClearLogs,
   piAgentDiscover,
   piAgentGetLogs,
-  piAgentInstall,
-  piAgentInstallOnline,
-  piAgentNpmVersions,
-  piAgentRollback,
-  piAgentSetPermissionMode,
-  piAgentSkillsIndex,
   piAgentStop,
-  piAgentVersionInfo,
-  type PiNpmVersionsResult,
-  type PiVersionInfo,
-  type PiPermissionMode,
 } from '@/lib/ipc/pi';
 import { usePiRuntime } from '@/features/pi/PiRuntimeContext';
+import { resolveAutoPiEndpoint, type PiAutoEndpoint } from '@/lib/piEndpoint';
 import {
   hydratePiConfig,
   loadPiConfig,
+  PI_AUTO_SESSION_ID,
   savePiConfig,
   type PiConfig,
 } from '@/lib/piConfig';
@@ -53,11 +43,11 @@ import {
  * 对话在 Chat 的 Pi 工作区；这里不维护会话与聊天，避免两个界面争抢同一个子进程。
  */
 
-const PERMISSION_OPTIONS: { value: PiPermissionMode; label: string; hint: string }[] = [
-  { value: 'plan', label: '只读', hint: '读/列目录放行；写、改、命令一律拒绝' },
-  { value: 'auto', label: '守门', hint: '新建文件放行；覆盖/修改/命令逐条询问' },
-  { value: 'full', label: '放行', hint: '工作区内文件操作放行；命令仍以当前用户权限执行，只挡危险命令' },
-];
+const PERMISSION_LABELS: Record<string, string> = {
+  plan: '只读',
+  auto: '守门',
+  full: '放行',
+};
 
 const inputClass =
   'w-full rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2.5 py-1.5 text-[length:var(--font-caption)] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)]';
@@ -122,13 +112,10 @@ export default function PiPanel() {
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [skillCount, setSkillCount] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [versionInfo, setVersionInfo] = useState<PiVersionInfo | null>(null);
-  const [npmVersions, setNpmVersions] = useState<PiNpmVersionsResult | null>(null);
-  const [registryId, setRegistryId] = useState<string>('official');
+  const [detected, setDetected] = useState<PiAutoEndpoint | null>(null);
   const initializedRef = useRef(false);
 
   const running = status?.running ?? false;
@@ -149,14 +136,12 @@ export default function PiPanel() {
     if (!desktop || initializedRef.current) return;
     initializedRef.current = true;
     void (async () => {
-      const [discover, currentLogs, hydrated, versions] = await Promise.all([
+      const [discover, currentLogs, hydrated] = await Promise.all([
         piAgentDiscover().catch(() => null),
         piAgentGetLogs().catch(() => []),
         hydratePiConfig(loadPiConfig()),
-        piAgentVersionInfo().catch(() => null),
       ]);
       setLogs(currentLogs ?? []);
-      setVersionInfo(versions);
       const next: PiConfig = {
         ...hydrated,
         nodePath: hydrated.nodePath || discover?.node_path || 'node',
@@ -167,12 +152,13 @@ export default function PiPanel() {
         skillsDir: hydrated.skillsDir || discover?.skills_dir || '',
         model: hydrated.model || activeModel?.name || '',
         baseUrl:
-          hydrated.baseUrl === 'http://127.0.0.1:8080/v1'
+          !hydrated.autoEndpoint && hydrated.baseUrl === 'http://127.0.0.1:8080/v1'
             ? `http://127.0.0.1:${enginePort}/v1`
             : hydrated.baseUrl,
       };
       setConfig(next);
       savePiConfig(next);
+      setDetected(await resolveAutoPiEndpoint().catch(() => null));
     })();
   }, [activeModel?.name, desktop, enginePort]);
 
@@ -182,85 +168,6 @@ export default function PiPanel() {
       savePiConfig(next);
       return next;
     });
-  };
-
-  const refreshVersionInfo = useCallback(async () => {
-    try {
-      setVersionInfo(await piAgentVersionInfo());
-    } catch {
-      // 版本信息读取失败静默；安装动作会给出明确错误
-    }
-  }, []);
-
-  const handleCheckVersions = async () => {
-    setBusy('versions');
-    setError(null);
-    setMessage(null);
-    try {
-      const registry = versionInfo?.registries.find((option) => option.id === registryId);
-      const result = await piAgentNpmVersions(registry?.url);
-      setNpmVersions(result);
-      setMessage(
-        result
-          ? `最新版本 v${result.latest}；已安装 ${result.installedVersion ?? '无'}。`
-          : null,
-      );
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleInstallOnline = async (version: string) => {
-    setBusy('install-online');
-    setError(null);
-    setMessage(null);
-    try {
-      const registry = versionInfo?.registries.find((option) => option.id === registryId);
-      const result = await piAgentInstallOnline(version, registry?.url, config.nodePath);
-      if (!result) return;
-      const discover = await piAgentDiscover().catch(() => null);
-      if (discover) {
-        update({
-          cliPath: discover.cli_path || config.cliPath,
-          agentDir: discover.agent_dir || config.agentDir,
-          workDir: discover.work_dir || config.workDir,
-          sessionDir: discover.session_dir || config.sessionDir,
-          skillsDir: discover.skills_dir || config.skillsDir,
-        });
-      }
-      await piRuntime.reloadConfig();
-      await refreshVersionInfo();
-      setNpmVersions(null);
-      setMessage(
-        `Pi ${result.version} 已在线安装（${(result.bytes / 1024 / 1024).toFixed(1)} MB）；上一版本可回滚。`,
-      );
-      await refreshLogs();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      await refreshLogs();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleRollback = async () => {
-    setBusy('rollback');
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await piAgentRollback();
-      if (!result) return;
-      const discover = await piAgentDiscover().catch(() => null);
-      if (discover?.cli_path) update({ cliPath: discover.cli_path });
-      await refreshVersionInfo();
-      setMessage(`已回滚到 Pi ${result.version}。`);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
   };
 
   const handleDiscover = async () => {
@@ -285,34 +192,6 @@ export default function PiPanel() {
     }
   };
 
-  const handleInstall = async () => {
-    setBusy('install');
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await piAgentInstall(config.cliPath.trim() || undefined);
-      if (!result) return;
-      const discover = await piAgentDiscover().catch(() => null);
-      if (discover) {
-        update({
-          cliPath: discover.cli_path || config.cliPath,
-          agentDir: discover.agent_dir || config.agentDir,
-          workDir: discover.work_dir || config.workDir,
-          sessionDir: discover.session_dir || config.sessionDir,
-          skillsDir: discover.skills_dir || config.skillsDir,
-        });
-      }
-      await piRuntime.reloadConfig();
-      setMessage(
-        `Pi ${result.version} 已安装到应用数据目录（${(result.bytes / 1024 / 1024).toFixed(1)} MB）。`,
-      );
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const handleStart = async () => {
     setBusy('start');
     setError(null);
@@ -324,7 +203,9 @@ export default function PiPanel() {
       return;
     }
     try {
-      await piRuntime.startSession(`settings-${Date.now()}`);
+      // 固定会话 id：每次点「启动」都新建会话，会在 <工作区根> 下堆出一堆
+      // settings-<时间戳> 目录，并让 Pi 被反复重启。
+      await piRuntime.startSession(PI_AUTO_SESSION_ID);
       await piRuntime.refreshStatus();
       setMessage('Pi 已启动。Chat 发送时会切换到对应会话。');
       await refreshLogs();
@@ -350,17 +231,6 @@ export default function PiPanel() {
     }
   };
 
-  const handlePermissionMode = async (mode: PiPermissionMode) => {
-    update({ permissionMode: mode });
-    if (!running) return;
-    try {
-      await piAgentSetPermissionMode(mode);
-      await piRuntime.refreshStatus();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
-  };
-
   /** 把宿主当前服务的 API Key 填进 Pi：开放局域网时服务会开启鉴权，Key 不一致就是 401。 */
   const handleUseServerKey = async () => {
     setBusy('server-key');
@@ -374,23 +244,6 @@ export default function PiPanel() {
       }
       update({ apiKey: key });
       setMessage('已填入本机服务的 API Key；停止并重新启动 Pi 后生效。');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleIndexSkills = async () => {    if (!config.skillsDir.trim()) {
-      setError('请先填写技能库目录。');
-      return;
-    }
-    setBusy('skills');
-    setError(null);
-    try {
-      const list = await piAgentSkillsIndex(config.skillsDir);
-      setSkillCount(list.length);
-      setMessage(`已索引 ${list.length} 个技能（只加载元数据，正文按任务注入）。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -417,20 +270,13 @@ export default function PiPanel() {
     );
   }
 
-  const currentPermissionMode: PiPermissionMode =
-    status?.permission_mode === 'plan' ||
-    status?.permission_mode === 'auto' ||
-    status?.permission_mode === 'full'
-      ? status.permission_mode
-      : config.permissionMode;
-
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto">
       <div className="mx-auto w-full max-w-6xl px-6 pb-2 pt-3">
         <PageHeader
           icon={Bot}
           title="Pi 智能体"
-          description="常用项只有模型端点与权限；路径与安装维护收在「高级设置」。对话在 Chat 的 Pi 工作区。"
+          description="模型端点默认自动对接正在运行的引擎；运行日志与路径收在「高级设置」。对话在 Chat 的 Pi 工作区。"
         />
       </div>
 
@@ -458,7 +304,7 @@ export default function PiPanel() {
                 <span className="truncate">模型 {status?.model || config.model || '—'}</span>
                 <span className="truncate">会话 {status?.session_id || '—'}</span>
                 <span className="truncate">
-                  权限 {PERMISSION_OPTIONS.find((option) => option.value === currentPermissionMode)?.label ?? '—'}
+                  权限 {PERMISSION_LABELS[status?.permission_mode ?? config.permissionMode] ?? '—'}
                 </span>
               </div>
               <p className="mt-1.5 truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]" title={status?.work_dir}>
@@ -503,91 +349,103 @@ export default function PiPanel() {
           </div>
         </section>
 
-        {/* 模型端点：最常改的两项 + Key */}
+        {/* 模型端点：默认自动对接正在运行的引擎，不需要用户填地址/模型 ID */}
         <Section
           icon={Bot}
           title="模型端点"
-          description="Pi 通过 OpenAI 兼容接口访问模型；这里要和实际在跑的服务一致。"
+          description="默认自动对接正在运行的引擎：NiNfer 优先，Strata 次之，llama 兜底；切换引擎后下一次发送自动跟上。"
         >
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Field label="模型 ID" hint="留空时发送前自动读 /v1/models 取第一个">
-              <input
-                className={inputClass}
-                value={config.model}
-                onChange={(event) => update({ model: event.target.value })}
-                placeholder={activeModel?.name ?? ''}
-              />
-            </Field>
-            <Field label="引擎地址" hint="OpenAI 兼容端点，一般以 /v1 结尾">
-              <input
-                className={inputClass}
-                value={config.baseUrl}
-                onChange={(event) => update({ baseUrl: event.target.value })}
-              />
-            </Field>
-          </div>
-          <div className="mt-2 flex items-end gap-2">
-            <div className="min-w-0 flex-1">
-              <Field label="API Key" hint="本机服务开启鉴权时必须与服务一致；没开鉴权保持 local">
-                <input
-                  className={inputClass}
-                  value={config.apiKey}
-                  onChange={(event) => update({ apiKey: event.target.value })}
-                />
-              </Field>
+          <div className="flex items-start justify-between gap-3 rounded-lg border border-[var(--border-subtle)] px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">自动对接</p>
+              <p className="mt-0.5 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
+                检测到运行中的引擎后自动填基址、模型与 Key；本机回环的鉴权 Key 也由宿主直接读取。
+              </p>
             </div>
-            <button
-              className={buttonClass}
-              onClick={() => void handleUseServerKey()}
-              disabled={busy !== null}
-              title="读取宿主当前服务的 API Key 并填入"
-            >
-              {busy === 'server-key' ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <ShieldCheck className="h-3.5 w-3.5" />
-              )}
-              使用本机服务密钥
-            </button>
+            <ToggleSwitch
+              checked={config.autoEndpoint}
+              onChange={(checked) => update({ autoEndpoint: checked })}
+              label="自动对接模型端点"
+            />
           </div>
-          {endpointProbablyDown ? (
-            <p className="mt-3 rounded-lg border border-[var(--state-warning)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--state-warning)]">
-              主模型还没启动：Pi 现在发送会连不上 {config.baseUrl}。先回模型页加载模型，或把引擎地址改成实际在跑的服务。
-            </p>
-          ) : null}
+
+          {config.autoEndpoint ? (
+            <div className="mt-3 rounded-lg border border-[var(--border-subtle)] px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
+                <span>
+                  当前引擎
+                  <span className="ml-1 font-medium text-[var(--text-primary)]">
+                    {detected?.label ?? '未检测到'}
+                  </span>
+                </span>
+                <span className="truncate">模型 {detected?.model ?? status?.model ?? '启动前自动读取 /v1/models'}</span>
+                <button
+                  type="button"
+                  className="text-[var(--accent)] hover:underline"
+                  onClick={() => void resolveAutoPiEndpoint().then(setDetected).catch(() => setDetected(null))}
+                >
+                  重新检测
+                </button>
+              </div>
+              <p className="mt-1.5 truncate font-mono text-[length:var(--font-micro)] text-[var(--text-tertiary)]" title={detected?.baseUrl}>
+                {detected?.baseUrl ?? '先加载模型，或启动 NiNfer / Strata'}
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <Field label="模型 ID" hint="留空时发送前自动读 /v1/models 取第一个">
+                  <input
+                    className={inputClass}
+                    value={config.model}
+                    onChange={(event) => update({ model: event.target.value })}
+                    placeholder={activeModel?.name ?? ''}
+                  />
+                </Field>
+                <Field label="引擎地址" hint="OpenAI 兼容端点，一般以 /v1 结尾">
+                  <input
+                    className={inputClass}
+                    value={config.baseUrl}
+                    onChange={(event) => update({ baseUrl: event.target.value })}
+                  />
+                </Field>
+              </div>
+              <div className="mt-2 flex items-end gap-2">
+                <div className="min-w-0 flex-1">
+                  <Field label="API Key" hint="本机服务开启鉴权时必须与服务一致；没开鉴权保持 local">
+                    <input
+                      className={inputClass}
+                      value={config.apiKey}
+                      onChange={(event) => update({ apiKey: event.target.value })}
+                    />
+                  </Field>
+                </div>
+                <button
+                  className={buttonClass}
+                  onClick={() => void handleUseServerKey()}
+                  disabled={busy !== null}
+                  title="读取宿主当前服务的 API Key 并填入"
+                >
+                  {busy === 'server-key' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                  )}
+                  使用本机服务密钥
+                </button>
+              </div>
+              {endpointProbablyDown ? (
+                <p className="mt-3 rounded-lg border border-[var(--state-warning)] px-2.5 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--state-warning)]">
+                  主模型还没启动：Pi 现在发送会连不上 {config.baseUrl}。先回模型页加载模型，或把引擎地址改成实际在跑的服务。
+                </p>
+              ) : null}
+            </>
+          )}
           {running ? (
             <p className="mt-3 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-              端点、模型或 API Key 改动后，下一次发送会自动用新配置重启 Pi。
+              引擎或模型变化后，下一次发送会自动用新端点重启 Pi。
             </p>
           ) : null}
-        </Section>
-
-        {/* 权限：三档按钮即可 */}
-        <Section
-          icon={ShieldCheck}
-          title="权限"
-          description="文件与命令统一按档判定；命令执行仍不是 OS 级沙箱。"
-        >
-          <div className="grid grid-cols-3 gap-1.5">
-            {PERMISSION_OPTIONS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                title={option.hint}
-                onClick={() => void handlePermissionMode(option.value)}
-                className={`rounded-lg border px-2 py-1.5 text-[length:var(--font-eyebrow)] font-medium transition-colors ${
-                  currentPermissionMode === option.value
-                    ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--text-on-accent)]'
-                    : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-            {PERMISSION_OPTIONS.find((option) => option.value === currentPermissionMode)?.hint ?? ''}
-          </p>
         </Section>
 
         {/* 高级设置：一次性维护项全部收进来 */}
@@ -603,7 +461,7 @@ export default function PiPanel() {
               <span className="min-w-0">
                 <span className="block text-[length:var(--font-body)] font-medium text-[var(--text-primary)]">高级设置</span>
                 <span className="block text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-                  Node / CLI 路径、目录、在线安装与回滚、技能库
+                  Node / CLI 路径、目录与重新探测
                 </span>
               </span>
             </span>
@@ -621,14 +479,9 @@ export default function PiPanel() {
                   <RefreshCw className="h-3.5 w-3.5" />
                   重新探测
                 </button>
-                <button className={buttonClass} onClick={() => void handleInstall()} disabled={busy !== null}>
-                  {busy === 'install' ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <FolderOpen className="h-3.5 w-3.5" />
-                  )}
-                  安装到应用目录
-                </button>
+                <span className="inline-flex items-center text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+                  安装与升级在「设置中心 → 核心更新」里统一处理。
+                </span>
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2">
@@ -654,7 +507,7 @@ export default function PiPanel() {
                     onChange={(event) => update({ agentDir: event.target.value })}
                   />
                 </Field>
-                <Field label="工作区根目录" hint="每个 Chat 会话使用其下的独立子目录">
+                <Field label="工作区根目录" hint="Chat 选中工作区时直接使用该文件夹；未选时按会话派生">
                   <input
                     className={inputClass}
                     value={config.workDir}
@@ -670,136 +523,6 @@ export default function PiPanel() {
                 </Field>
               </div>
 
-              <div className="rounded-lg border border-[var(--border)] p-3">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
-                  <span className="font-medium text-[var(--text-primary)]">在线安装 / 升级</span>
-                  <span>
-                    已安装 {versionInfo?.installedVersion ?? '无'}
-                    {versionInfo?.lock ? `（来源 ${versionInfo.lock.source}）` : ''}
-                  </span>
-                  {npmVersions ? <span>最新 {npmVersions.latest}</span> : null}
-                </div>
-                <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                  <select
-                    className="rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-primary)] outline-none"
-                    value={registryId}
-                    onChange={(event) => setRegistryId(event.target.value)}
-                    title="npm registry 下载源"
-                  >
-                    {(versionInfo?.registries ?? [{ id: 'official', label: '官方 npm', url: '' }]).map(
-                      (option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ),
-                    )}
-                  </select>
-                  <button
-                    className={buttonClass}
-                    onClick={() => void handleCheckVersions()}
-                    disabled={busy !== null}
-                  >
-                    {busy === 'versions' ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-3.5 w-3.5" />
-                    )}
-                    检查版本
-                  </button>
-                  <button
-                    className={primaryButtonClass}
-                    onClick={() => void handleInstallOnline(npmVersions?.latest ?? '')}
-                    disabled={busy !== null || !npmVersions?.latest}
-                    title={
-                      npmVersions?.latest
-                        ? `安装 v${npmVersions.latest}`
-                        : '先「检查版本」再安装'
-                    }
-                  >
-                    {busy === 'install-online' ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
-                    )}
-                    安装 / 升级最新
-                  </button>
-                  <button
-                    className={buttonClass}
-                    onClick={() => void handleRollback()}
-                    disabled={busy !== null || !versionInfo?.rollbackAvailable}
-                    title={
-                      versionInfo?.lock?.previousVersion
-                        ? `回滚到 v${versionInfo.lock.previousVersion}`
-                        : '回滚到升级前的版本'
-                    }
-                  >
-                    {busy === 'rollback' ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <History className="h-3.5 w-3.5" />
-                    )}
-                    回滚
-                  </button>
-                </div>
-                {npmVersions && npmVersions.versions.length > 1 ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-1">
-                    <span className="text-[length:var(--font-micro)] text-[var(--text-tertiary)]">其他版本：</span>
-                    {npmVersions.versions.slice(0, 8).map((info) => (
-                      <button
-                        key={info.version}
-                        className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
-                        onClick={() => void handleInstallOnline(info.version)}
-                        disabled={busy !== null}
-                        title={`安装 v${info.version}`}
-                      >
-                        v{info.version}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-                <p className="mt-2 text-[length:var(--font-micro)] leading-relaxed text-[var(--text-tertiary)]">
-                  安装位置：`%APPDATA%\AgentLLM\pi\node_modules`；版本锁 `pi-version.json`。
-                </p>
-              </div>
-
-              <div className="rounded-lg border border-[var(--border)] p-3">
-                <div className="grid grid-cols-[1fr_auto] items-end gap-2">
-                  <Field
-                    label="技能库目录"
-                    hint={
-                      skillCount !== null
-                        ? `已索引 ${skillCount} 个技能`
-                        : '只加载元数据，正文按任务注入'
-                    }
-                  >
-                    <input
-                      className={inputClass}
-                      value={config.skillsDir}
-                      onChange={(event) => update({ skillsDir: event.target.value })}
-                      placeholder="…\data\skills"
-                    />
-                  </Field>
-                  <button className={buttonClass} onClick={() => void handleIndexSkills()} disabled={busy !== null}>
-                    {busy === 'skills' ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-3.5 w-3.5" />
-                    )}
-                    索引技能
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => update({ skillRoutingEnabled: !config.skillRoutingEnabled })}
-                  className={`mt-2 w-full rounded-lg border px-2.5 py-1.5 text-[length:var(--font-caption)] font-medium transition-colors ${
-                    config.skillRoutingEnabled
-                      ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--text-on-accent)]'
-                      : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'
-                  }`}
-                >
-                  技能路由：{config.skillRoutingEnabled ? '已开启' : '已关闭'}
-                </button>
-              </div>
             </div>
           ) : null}
         </section>
