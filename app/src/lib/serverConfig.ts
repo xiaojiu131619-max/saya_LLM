@@ -57,6 +57,22 @@ export function buildServerConfig(
   const hasMultimodalProjector = Boolean(
     model.mmprojPath && (model.supportsVision || model.supportsAudio)
   );
+  const nCpuFfn = model.modelType === 'dense'
+    ? Math.max(0, Math.round(Number(config.nCpuFfn ?? 0)))
+    : 0;
+  const moeCacheMib = model.modelType === 'moe'
+    ? Math.max(0, Math.round(Number(config.moeCacheMib ?? 0)))
+    : 0;
+  const lazyMode = config.lazyMode === 'on' || config.lazyMode === 'off' ? config.lazyMode : null;
+  const kvUnifiedPerSlot = config.kvUnifiedPerSlotEnabled
+    ? Math.max(0, Math.round(Number(config.kvUnifiedPerSlot ?? 0)))
+    : 0;
+  const cacheRamMb = config.cacheRamEnabled
+    ? Math.max(-1, Math.round(Number(config.cacheRamMb ?? 8192)))
+    : null;
+  const specDraftNubatch = speculativeMode !== 'off'
+    ? Math.max(0, Math.round(Number(config.specDraftNubatch ?? 0)))
+    : 0;
 
   return {
     executable_path: executablePath || 'resources/llama-server.exe',
@@ -92,6 +108,14 @@ export function buildServerConfig(
     spec_draft_n_max: specDraftNMax,
     spec_type: specType,
     ncmoe: model.modelType === 'moe' ? moeCpuLayers : 0,
+    n_cpu_ffn: nCpuFfn,
+    moe_cache_mib: moeCacheMib,
+    lazy_mode: lazyMode,
+    swa_full: config.swaFull ?? false,
+    kv_unified_per_slot: kvUnifiedPerSlot,
+    cache_ram_mb: cacheRamMb,
+    mmproj_offload: hasMultimodalProjector ? (config.mmprojOffload ?? true) : true,
+    spec_draft_n_ubatch: specDraftNubatch,
     tools: enabledTools.length > 0 ? enabledTools.join(',') : null,
     reasoning_budget: reasoningBudget,
     embedding: false,

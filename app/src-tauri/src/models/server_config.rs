@@ -58,6 +58,30 @@ pub struct ServerConfig {
     #[serde(default)]
     pub spec_type: Option<String>,
     pub ncmoe: u32,
+    /// 稠密模型：前 N 层 FFN 留在 CPU（--n-cpu-ffn）。
+    #[serde(default)]
+    pub n_cpu_ffn: u32,
+    /// MoE：CPU 侧专家在 GPU 上的缓存 MiB（--moe-cache-mib，0 = 关闭）。
+    #[serde(default)]
+    pub moe_cache_mib: u32,
+    /// 大张量按需读取（--lazy-mode，None = 内核默认 auto）。
+    #[serde(default)]
+    pub lazy_mode: Option<String>,
+    /// 滑动窗口注意力使用完整 SWA 缓存（--swa-full）。
+    #[serde(default)]
+    pub swa_full: bool,
+    /// 统一 KV 下每路上下文上限（--kv-unified-per-slot，0 = 不限制）。
+    #[serde(default)]
+    pub kv_unified_per_slot: u32,
+    /// 提示词缓存上限 MiB（--cache-ram；0 = 关闭，-1 = 不限制）。
+    #[serde(default)]
+    pub cache_ram_mb: Option<i32>,
+    /// 多模态投影是否随 GPU 卸载（默认 true，false 时传 --no-mmproj-offload）。
+    #[serde(default = "default_true")]
+    pub mmproj_offload: bool,
+    /// 草稿上下文物理批大小（--spec-draft-n-ubatch，0 = 跟随 ubatch）。
+    #[serde(default)]
+    pub spec_draft_n_ubatch: u32,
     pub tools: Option<String>,
     pub reasoning_budget: u32,
     /// 专用向量/重排模型：传 `--embeddings`（限定服务只提供向量用途）。
@@ -93,6 +117,10 @@ fn default_host() -> String {
 
 fn default_negative_one() -> i32 {
     -1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ServerConfig {
@@ -131,6 +159,14 @@ impl Default for ServerConfig {
             spec_draft_n_max: None,
             spec_type: None,
             ncmoe: 0,
+            n_cpu_ffn: 0,
+            moe_cache_mib: 0,
+            lazy_mode: None,
+            swa_full: false,
+            kv_unified_per_slot: 0,
+            cache_ram_mb: None,
+            mmproj_offload: true,
+            spec_draft_n_ubatch: 0,
             tools: None,
             reasoning_budget: 0,
             embedding: false,

@@ -42,14 +42,29 @@ const AUTO_TUNE_RELEVANT_KEYS: Array<keyof ModelLoadConfig> = [
   'ropeFreqBaseEnabled', 'ropeFreqBase', 'ropeFreqScaleEnabled', 'ropeFreqScale',
   'seedEnabled', 'seed', 'speculativeDecoding', 'specDraftNMaxEnabled', 'specDraftNMax',
   'chatTemplate', 'moeCpuLayers', 'reasoningBudget',
+  'nCpuFfn', 'moeCacheMib', 'lazyMode', 'swaFull',
+  'kvUnifiedPerSlotEnabled', 'kvUnifiedPerSlot',
+  'cacheRamEnabled', 'cacheRamMb', 'specDraftNubatch', 'mmprojOffload',
 ];
 
 export function sameLoadConfig(left: ModelLoadConfig, right: ModelLoadConfig): boolean {
   return AUTO_TUNE_RELEVANT_KEYS.every((key) => left[key] === right[key]);
 }
 export function tuneRecordPatch(record: TuneRecord): Partial<ModelLoadConfig> {
+  const speculative: ModelLoadConfig['speculativeDecoding'] = record.speculative === 'mtp' || record.speculative === 'dspark' || record.speculative === 'dflash'
+    ? record.speculative
+    : 'off';
   return {
     gpuLayers: record.ngl, ctxLength: record.ctx, moeCpuLayers: record.ncmoe,
+    nCpuFfn: record.n_cpu_ffn ?? 0,
+    moeCacheMib: record.moe_cache_mib ?? 0,
+    speculativeDecoding: speculative,
+    specDraftNMaxEnabled: speculative !== 'off' && record.spec_draft_n_max != null,
+    specDraftNMax: record.spec_draft_n_max ?? 4,
+    specDraftNubatch: record.spec_draft_n_ubatch ?? 0,
+    batchSize: record.batch_size && record.batch_size > 0 ? record.batch_size : 512,
+    physicalBatchSize: record.ubatch_size && record.ubatch_size > 0 ? record.ubatch_size : 512,
+    threads: record.threads ?? -1,
     cacheTypeK: record.cache_type_k, cacheTypeV: record.cache_type_v,
     cacheTypeKEnabled: record.cache_type_k_enabled, cacheTypeVEnabled: record.cache_type_v_enabled,
   };

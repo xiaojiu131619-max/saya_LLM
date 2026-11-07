@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { Boxes, Layers } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { checkDesktopEngine, getDesktopServerLogs, getDesktopVramSnapshot, getServerApiKey, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
+import { getBackendTuningAdvice, type BackendTuningAdvice } from '@/lib/ipc/hardware';
 import { buildServerConfig } from '@/lib/serverConfig';
 import { autoTuneManager, ensureAutoTuneRuntime, assertNoAutoTune, subscribeAutoTuneRecords } from '@/lib/autoTuneRuntime';
 import { autoTuneBusy } from '@/lib/autoTuneTask';
@@ -47,6 +48,16 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     idleAutoUnload: false,
     idleAutoUnloadMinutes: 15,
     moeCpuLayers: 0,
+    nCpuFfn: 0,
+    moeCacheMib: 0,
+    lazyMode: 'auto',
+    swaFull: false,
+    kvUnifiedPerSlotEnabled: false,
+    kvUnifiedPerSlot: 8192,
+    cacheRamEnabled: false,
+    cacheRamMb: 8192,
+    specDraftNubatch: 0,
+    mmprojOffload: true,
     reasoningBudget: recommendedReasoningBudget(model.tags.includes('Reasoning')),
   };
 }
@@ -72,11 +83,18 @@ export default function ModelLoadPage() {
   const modelId = model?.id;
   const [runRecords, setRunRecords] = useState<ModelRunRecord[]>([]);
   const [kernelVersion, setKernelVersion] = useState<string | null>(null);
+  const [engineBackend, setEngineBackend] = useState<string | null>(null);
+  // AMD / Vulkan 调优建议：只在 AMD 卡 + Vulkan 内核时给出实质条目。
+  const [tuningAdvice, setTuningAdvice] = useState<BackendTuningAdvice | null>(null);
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     let cancelled = false;
     void checkDesktopEngine().then((info) => {
       if (!cancelled) setKernelVersion(info?.llama_server_version ?? null);
+    }).catch(() => undefined);
+    void getBackendTuningAdvice().then((advice) => {
+      if (!cancelled) setTuningAdvice(advice);
+      if (!cancelled) setEngineBackend(advice?.backend ?? null);
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
@@ -234,6 +252,14 @@ export default function ModelLoadPage() {
           ctx: launchConfig.ctxLength,
           kv: launchConfig.cacheTypeKEnabled ? launchConfig.cacheTypeK : 'f16',
           ncmoe: launchConfig.moeCpuLayers > 0 ? launchConfig.moeCpuLayers : null,
+          ncffn: launchConfig.nCpuFfn > 0 ? launchConfig.nCpuFfn : null,
+          moe_cache_mib: launchConfig.moeCacheMib > 0 ? launchConfig.moeCacheMib : null,
+          spec_draft_n_max: launchConfig.speculativeDecoding !== 'off' && launchConfig.specDraftNMaxEnabled
+            ? launchConfig.specDraftNMax : null,
+          spec_draft_n_ubatch: launchConfig.speculativeDecoding !== 'off' ? launchConfig.specDraftNubatch : null,
+          batch_size: launchConfig.batchSize,
+          ubatch_size: launchConfig.physicalBatchSize,
+          threads: launchConfig.threads,
           flash_attn: launchConfig.fastAttention,
           speculative: launchConfig.speculativeDecoding,
           vram_gb: assessment.quality === 'stable' ? assessment.actualGb : null,
@@ -326,6 +352,10 @@ export default function ModelLoadPage() {
           block_count: Math.max(0, model.blockCount ?? 0),
           max_ctx: model.ctxLength || RECOMMENDED_CTX_LENGTH,
           is_moe: model.modelType === 'moe', sort_mode: 'ts',
+          supports_mtp: Boolean(model.supportsMtp),
+          mtp_draft_path: model.mtpDraftPath ?? null,
+          dspark_draft_path: model.dsparkDraftPath ?? null,
+          dflash_draft_path: model.dflashDraftPath ?? null,
         },
         modelName: model.name, modelPath: model.filePath ?? '', modelSignature: modelVramSignature(model), loadConfig: { ...model.loadConfig },
       });
@@ -344,8 +374,29 @@ export default function ModelLoadPage() {
     model,
     config,
     calibration && calibration.samples > 0 ? calibration : undefined,
-    { kernelVersion, effectiveParallel: calibration?.effectiveParallel },
+    { kernelVersion, effectiveParallel: calibration?.effectiveParallel, backend: engineBackend },
   );
+
+  // 一键应用 AMD / Vulkan 建议：只改批处理与 KV，其余参数保持用户设置。
+  const applyTuningAdvice = () => {
+    if (!model || !tuningAdvice) return;
+    dispatch({
+      type: 'UPDATE_MODEL_CONFIG',
+      payload: {
+        modelId: model.id,
+        config: {
+          physicalBatchSize: tuningAdvice.recommendedUbatch,
+          batchSize: Math.max(tuningAdvice.recommendedBatch, tuningAdvice.recommendedUbatch),
+          ...(tuningAdvice.recommendedKvQuant ? {
+            cacheTypeKEnabled: true,
+            cacheTypeK: tuningAdvice.recommendedKvQuant,
+            cacheTypeVEnabled: true,
+            cacheTypeV: tuningAdvice.recommendedKvQuant,
+          } : {}),
+        },
+      },
+    });
+  };
 
   // 向量 / 重排模型不走对话加载链路（--embeddings 与对话参数语义冲突）：
   // 单独引导到「向量服务」页，用独立端口与独立进程启动，可与对话/VLM 并行。
@@ -426,6 +477,8 @@ export default function ModelLoadPage() {
       onChangeColor={handleChangeColor}
       onClearLogo={handleClearLogo}
       onCloseLogo={() => setLogoLibraryOpen(false)}
+      tuningAdvice={tuningAdvice}
+      onApplyTuningAdvice={applyTuningAdvice}
     />
   );
 }

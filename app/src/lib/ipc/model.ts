@@ -58,6 +58,7 @@ export interface DesktopModelInfo {
   tokenizer_eos_id?: number | null;
   tokenizer_pad_id?: number | null;
   mmproj_path: string | null;
+  mmproj_size_gb?: number;
   mmproj_supports_vision?: boolean;
   mmproj_supports_audio?: boolean;
   mmproj_projector_type?: string | null;
@@ -65,8 +66,11 @@ export interface DesktopModelInfo {
   mmproj_audio_projector_type?: string | null;
   video_support?: VideoSupportLevel;
   mtp_draft_path: string | null;
+  mtp_draft_size_gb?: number;
   dspark_draft_path: string | null;
+  dspark_draft_size_gb?: number;
   dflash_draft_path: string | null;
+  dflash_draft_size_gb?: number;
   is_dynamic_quant?: boolean;
   supports_reasoning: boolean;
   gguf_tags: string[];
@@ -118,6 +122,22 @@ export interface ServerConfig {
   spec_draft_n_max: number | null;
   spec_type: string | null;
   ncmoe: number;
+  /** 稠密模型：前 N 层 FFN 留在 CPU（--n-cpu-ffn）。 */
+  n_cpu_ffn?: number;
+  /** MoE：CPU 侧专家在 GPU 上的缓存（--moe-cache-mib，MiB）。 */
+  moe_cache_mib?: number;
+  /** 大张量按需读取（--lazy-mode，null = 内核默认 auto）。 */
+  lazy_mode?: string | null;
+  /** 滑动窗口注意力使用完整 SWA 缓存（--swa-full）。 */
+  swa_full?: boolean;
+  /** 统一 KV 下每路上下文上限（--kv-unified-per-slot，0 = 不限制）。 */
+  kv_unified_per_slot?: number;
+  /** 提示词缓存上限（--cache-ram，MiB；0 = 关闭，-1 = 不限制）。 */
+  cache_ram_mb?: number | null;
+  /** 多模态投影 GPU 卸载（false 时传 --no-mmproj-offload）。 */
+  mmproj_offload?: boolean;
+  /** 草稿上下文物理批大小（--spec-draft-n-ubatch，0 = 跟随 ubatch）。 */
+  spec_draft_n_ubatch?: number;
   tools: string | null;
   reasoning_budget: number;
   /** 向量/重排专用：传 --embeddings 限定服务只提供向量用途。 */
@@ -143,6 +163,11 @@ export interface AutoTuneConfig {
   max_ctx: number;
   is_moe: boolean;
   sort_mode: AutoTuneSortMode;
+  supports_mtp?: boolean;
+  mtp_draft_path?: string | null;
+  dspark_draft_path?: string | null;
+  dflash_draft_path?: string | null;
+  recommended_threads?: number | null;
 }
 
 export interface TuneRecord {
@@ -155,6 +180,14 @@ export interface TuneRecord {
   cache_type_v: string;
   cache_type_k_enabled: boolean;
   cache_type_v_enabled: boolean;
+  n_cpu_ffn?: number;
+  moe_cache_mib?: number;
+  speculative?: string;
+  spec_draft_n_max?: number | null;
+  spec_draft_n_ubatch?: number;
+  batch_size?: number;
+  ubatch_size?: number;
+  threads?: number;
   samples?: number;
   ts_stddev?: number;
   ttft_stddev_ms?: number;
@@ -251,6 +284,12 @@ export interface ModelVramMeasurement {
     cache_type_k: string;
     cache_type_v: string;
     moe_cpu_layers: number;
+    n_cpu_ffn?: number;
+    moe_cache_mib?: number;
+    swa_full?: boolean;
+    mmproj_offload?: boolean;
+    kv_unified_per_slot?: number;
+    spec_draft_n_ubatch?: number;
     speculative: string;
     no_warmup?: boolean;
     draft_tokens?: number | null;
@@ -280,6 +319,13 @@ export interface ModelRunRecord {
   ctx?: number | null;
   kv?: string | null;
   ncmoe?: number | null;
+  ncffn?: number | null;
+  moe_cache_mib?: number | null;
+  spec_draft_n_max?: number | null;
+  spec_draft_n_ubatch?: number | null;
+  batch_size?: number | null;
+  ubatch_size?: number | null;
+  threads?: number | null;
   flash_attn?: boolean | null;
   speculative?: string | null;
   tokens_per_sec?: number | null;

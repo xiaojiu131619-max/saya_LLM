@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::services::gpu_monitor::GpuMonitor;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPreset {
     pub ngl: u32,
@@ -52,6 +56,18 @@ pub struct ModelVramConfig {
     pub cache_type_k: String,
     pub cache_type_v: String,
     pub moe_cpu_layers: u32,
+    #[serde(default)]
+    pub n_cpu_ffn: u32,
+    #[serde(default)]
+    pub moe_cache_mib: u32,
+    #[serde(default)]
+    pub swa_full: bool,
+    #[serde(default = "default_true")]
+    pub mmproj_offload: bool,
+    #[serde(default)]
+    pub kv_unified_per_slot: u32,
+    #[serde(default)]
+    pub spec_draft_n_ubatch: u32,
     pub speculative: String,
     #[serde(default)]
     pub no_warmup: bool,
@@ -104,6 +120,22 @@ pub struct ModelRunRecord {
     /// MoE CPU 卸载层数（--n-cpu-moe）。
     #[serde(default)]
     pub ncmoe: Option<u32>,
+    /// 稠密 FFN CPU 卸载层数（--n-cpu-ffn）。
+    #[serde(default)]
+    pub ncffn: Option<u32>,
+    /// MoE 专家 GPU 缓存（--moe-cache-mib）。
+    #[serde(default)]
+    pub moe_cache_mib: Option<u32>,
+    #[serde(default)]
+    pub spec_draft_n_max: Option<u32>,
+    #[serde(default)]
+    pub spec_draft_n_ubatch: Option<u32>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    pub ubatch_size: Option<u32>,
+    #[serde(default)]
+    pub threads: Option<i32>,
     pub flash_attn: Option<bool>,
     pub speculative: Option<String>,
     pub tokens_per_sec: Option<f64>,

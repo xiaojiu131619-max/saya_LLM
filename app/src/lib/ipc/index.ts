@@ -5,6 +5,7 @@
  * `lib/desktop` 会再导出本模块，保持原有导入路径与名字不变。
  */
 export * from './config';
+export * from './hardware';
 export * from './model';
 export * from './server';
 export * from './system';

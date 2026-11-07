@@ -80,6 +80,24 @@ export interface ModelLoadConfig {
   idleAutoUnload: boolean;
   idleAutoUnloadMinutes: number;
   moeCpuLayers: number;
+  /** 稠密模型：前 N 层 FFN 权重留在 CPU（--n-cpu-ffn，0 = 关闭）。 */
+  nCpuFfn: number;
+  /** MoE：CPU 侧专家在 GPU 上的缓存大小（--moe-cache-mib，0 = 关闭）。 */
+  moeCacheMib: number;
+  /** 大张量按需读取（--lazy-mode，auto = 内核默认，仅 >4 GiB 张量按需读）。 */
+  lazyMode: 'auto' | 'on' | 'off';
+  /** 滑动窗口注意力改用完整大小 SWA 缓存（--swa-full）。 */
+  swaFull: boolean;
+  /** 统一 KV 下限制每路上下文（--kv-unified-per-slot）。 */
+  kvUnifiedPerSlotEnabled: boolean;
+  kvUnifiedPerSlot: number;
+  /** 提示词缓存内存上限（--cache-ram，MiB；0 = 关闭，-1 = 不限制）。 */
+  cacheRamEnabled: boolean;
+  cacheRamMb: number;
+  /** 推测解码草稿上下文的物理批大小（--spec-draft-n-ubatch，0 = 跟随 ubatch）。 */
+  specDraftNubatch: number;
+  /** 多模态投影是否随 GPU 卸载（--mmproj-offload / --no-mmproj-offload）。 */
+  mmprojOffload: boolean;
   reasoningBudget: number;
 }
 
@@ -287,16 +305,20 @@ export interface ModelInfo {
   tokenizerEosId?: number;
   tokenizerPadId?: number;
   mmprojPath?: string;
+  mmprojSizeGb?: number;
   mmprojSupportsVision?: boolean;
   mmprojSupportsAudio?: boolean;
   mmprojProjectorType?: string;
   mmprojVisionProjectorType?: string;
   mmprojAudioProjectorType?: string;
   mtpDraftPath?: string;
+  mtpDraftSizeGb?: number;
   /// DSpark 推测解码侧车路径（扫描时按 dspark- 前缀或 dspark/ 子目录发现）。
   dsparkDraftPath?: string;
+  dsparkDraftSizeGb?: number;
   /// DFlash 推测解码侧车路径。
   dflashDraftPath?: string;
+  dflashDraftSizeGb?: number;
   /// 文件名带 UD- 量化标记（unsloth Dynamic GGUF）。
   isDynamicQuant?: boolean;
   ggufMetadata?: Array<{ key: string; value: string }>;

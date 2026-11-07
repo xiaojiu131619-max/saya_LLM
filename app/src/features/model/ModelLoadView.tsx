@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion } from 'framer-motion';
-import { Play, RotateCcw, Box, Layers, Calendar, FileText, Hash, Cpu, Database, Gauge, History, Info, Square, ChevronRight, Settings2, Wand2, LoaderCircle } from 'lucide-react';
+import { Play, RotateCcw, Box, Layers, Calendar, FileText, Hash, Cpu, Database, Gauge, History, Info, Square, ChevronRight, Settings2, Wand2, LoaderCircle, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
 import type { ModelRunRecord } from '@/lib/desktop';
+import type { BackendTuningAdvice } from '@/lib/ipc/hardware';
 import type { VramCalibration } from '@/lib/vramCalibration';
 import type { VramPrediction } from '@/lib/vramEstimate';
 import { RECOMMENDED_CTX_LENGTH, maxGpuLayers } from '@/lib/modelDefaults';
@@ -48,6 +50,10 @@ interface ModelLoadViewProps {
   onChangeColor: (color: string) => void;
   onClearLogo: () => void;
   onCloseLogo: () => void;
+  /** AMD / Vulkan 调优建议；非 AMD 机器或数据未就绪时为 null。 */
+  tuningAdvice?: BackendTuningAdvice | null;
+  /** 一键应用调优建议（批处理 + KV 量化）。 */
+  onApplyTuningAdvice: () => void;
 }
 
 /** 预设主题色：一行常用色 + 系统强调色，点击即取；也能用取色器自由选。 */
@@ -122,10 +128,58 @@ function formatTag(tag: string) {
   return labels[tag] ?? tag;
 }
 
+/**
+ * 每个加载参数的中文用途详解。
+ *
+ * 界面上只放简短描述，完整的取舍、适用场景和风险放在悬停提示里，
+ * 避免在参数行里堆长文，同时保证参数含义不依赖用户去读 llama.cpp 文档。
+ * 新增参数时在这里补一条；未命中的标签仍保留原来的信息图标。
+ */
+const PARAM_TOOLTIPS: Record<string, string> = {
+  '上下文长度': '模型一次能记住的词元（token）总数，决定长文档、长对话和代码分析的上限。调大后键值缓存（KV）会线性增长、加载更慢；显存不足时可能直接加载失败。日常对话 32K 通常够用，长文档再按需提高。',
+  'GPU 卸载': '把模型的前 N 层（内核把输出层也算一层）放到显卡上计算。值越高生成越快、显存占用越大；拉满一般是模型层数 + 1。显存不够时优先降它，或配合下面的混合专家（MoE）/ 前馈网络（FFN）处理器卸载。',
+  '将 KV 缓存卸载到 GPU 内存': '把对话历史对应的键值缓存（KV）也放到显存。开启后每生成一个词元不必反复从内存搬运，速度更快；关闭可省显存，但长上下文会明显变慢。',
+  '快速注意力': '启用快速注意力（Flash Attention）。支持 NVIDIA CUDA / Vulkan 的显卡上能显著降低注意力计算的显存和耗时；如果遇到花屏、答非所问或驱动兼容问题，再尝试关闭对比。',
+  '物理批处理大小（ubatch）': '一次真正送进计算图的词元数，影响预填充阶段的显存峰值。调小更省显存但提示词处理更慢；调大速度更快但容易显存不足，通常 256–512 比较稳。',
+  'K 缓存量化类型': '压缩注意力键缓存（K）的精度来省显存。q8_0 基本无损、最推荐；q5/q4 更省但可能影响长上下文质量。只在显存紧张时开启，键缓存和值缓存可以分别设置。',
+  'V 缓存量化类型': '压缩注意力值缓存（V）的精度来省显存。q8_0 通常安全；更激进的量化可能让长文生成质量下降。显存够就保持 f16。',
+  '强制 MoE 权重留在 CPU 的层数': '混合专家（MoE）模型每层有很多专家，把前 N 层的专家权重留在处理器内存、不占显存。能显著降低显存占用，但被留在处理器的专家计算更慢；0 表示全部按显卡卸载处理。',
+  'MoE 专家 GPU 缓存': '给留在处理器内存的混合专家（MoE）权重在显存里开一块缓存，重复命中的专家不必每次都走内存。0 关闭；1–4 GB 往往能明显提速，但会直接占用显存。',
+  '稠密 FFN 留在 CPU 的层数': '仅稠密模型：把前 N 层的前馈网络（FFN）权重留在处理器内存，降低显存占用。值越大越省显存、生成越慢；0 表示不做额外处理器卸载。显存预测暂未精确计入这部分。',
+  '空闲时自动卸载': '应用层计时器：一段时间没有输入或输出就自动停止模型、释放显存，适合多模型轮换或把显卡让给游戏 / 绘图。有新的消息或生成活动会重新计时。',
+  '记住该模型的加载设置': '开启后，本模型的这些参数会保存到本地，下次打开或快速启动时沿用；关闭则每次回到默认值，适合临时试参。',
+  'CPU 线程池大小': '生成阶段使用的处理器线程数。-1 交给内核按核心数自动决定；手动设置时通常取物理核心数，设太高会和系统或其他进程抢处理器，反而变慢。',
+  '最大并发预测数（parallel）': '同时服务多少个请求槽位。单人多半保持自动或 1；多人 / 接口并发时调大，但每个槽位都要占键值缓存和解码资源，显存会明显增加。',
+  '统一 KV 缓存': '所有并发槽共享一块键值缓存（KV）池，长请求可以借用空闲槽的容量，减少显存浪费；关闭后每个槽固定分配，隔离性更好但更容易浪费。',
+  '保持模型在内存中': '用内存锁定（mlock）把模型锁在物理内存，避免被系统换出到页面文件。内存充足时能减少卡顿；内存紧张时开启可能拖慢整个系统。',
+  '跳过启动预热': '启动时不做空跑预热，模型加载更快；代价是第一条真实请求要承担初始化和显存分配的开销，可能明显更慢。超大模型排障时可临时开启。',
+  '尝试 mmap()': '用内存映射（mmap）读取模型文件，通常加载更快、内存占用更低；遇到页面文件频繁读取、机械盘或网络盘卡顿时可关闭。新内核会把它翻译成加载模式参数。',
+  '大张量按需读取': '对逐层词嵌入等超大张量按需从磁盘读取。内核默认只对超过 4 GB 的张量启用；开启后更省内存但首次使用更慢；关闭则全部常驻。需要开启内存映射。',
+  'SWA 完整缓存': '滑动窗口注意力（SWA）模型默认只为窗口范围分配键值缓存。开启后按完整上下文分配，长文更稳、更少遗忘，但显存占用会明显增加。',
+  '每路上下文上限': '统一键值缓存模式下限制单个并发槽最多用多少上下文，防止一个长请求占满整块共享池。关闭表示由内核按上下文长度和并发数自行分配。',
+  '提示词缓存上限': '提示词缓存占用的系统内存上限，单位 MiB。缓存重复前缀能加快多轮对话；0 关闭，-1 不限制，默认 8192。开太大可能挤占其他程序内存。',
+  '评估批处理大小': '逻辑批处理上限，影响一次能并行处理多少词元。调大能加快长提示词预填充，但会增加计算显存；一般 512–2048，且不要超过上下文长度。',
+  'RoPE 频率基': '覆盖模型自带的旋转位置编码（RoPE）基频。只在模型说明明确要求或做超长上下文扩展时填写；乱改会让模型输出退化。关闭时从 GGUF 读取。',
+  'RoPE 频率比例': '按 1/N 扩展旋转位置编码（RoPE）上下文。用于模型训练时使用了特定缩放、或你需要把上下文拉到训练长度之外；没有明确依据时保持自动。',
+  '专家数量': '从 GGUF 元数据读取的混合专家数量，只用于判断模型结构和估算显存，不是启动参数，无法在这里修改。',
+  '推测解码': '用一个更小的草稿模型或内置多词元预测（MTP）层先猜多个词元，再由主模型验证，命中时生成更快。需要模型自带 MTP 或匹配的 DSpark / DFlash 侧车；不匹配或显存不足时会变慢甚至启动失败。',
+  '草稿深度': '每一步最多让草稿模型猜多少个词元。调大命中时收益更高，但被主模型拒绝时会浪费更多计算；1–16 之间按模型和任务试，关闭则用内核默认。',
+  '草稿上下文批大小': '草稿模型一次处理的物理批大小。调小能省草稿上下文显存，但草稿生成更慢；0 表示跟随主模型的物理批大小。',
+  '多模态投影 GPU 卸载': '把视觉 / 音频多模态投影模型放到显卡。开启编码图片、视频更快；关闭后投影留在处理器内存，能省显存但多模态输入会明显变慢。',
+  '聊天模板': '覆盖 GGUF 内置的 Jinja 对话模板。只有模型模板缺失、格式不对或你要自定义系统提示词结构时才填；填错会导致角色错乱或工具调用失效。',
+  '种子': '固定随机数种子，让相同提示词和参数下的输出更可复现。关闭时每次随机；注意显卡、并发和采样参数变化仍可能带来差异。',
+  'NextN / MTP 元数据': 'GGUF 声明了 NextN / 多词元预测（MTP）层，但当前内核没有对应架构图或缺少可执行张量，因此不能启用内置多词元预测。换支持该架构的内核或改用独立草稿模型。',
+};
+
 export default function ModelLoadView(props: ModelLoadViewProps) {
   const { model, activeTab, autoTuneRunning, autoTuneLog, autoTuneApplied, runRecords, onClearLog, onChangeConfig: updateConfig } = props;
   const config = model.loadConfig;
   const layerCount = Math.max(0, model.blockCount ?? 0);
+  const hasMultimodalProjector = Boolean(model.mmprojPath && (model.supportsVision || model.supportsAudio));
+  const kvPerSlotDefault = Math.max(
+    512,
+    Math.floor(config.ctxLength / Math.max(1, config.parallel > 0 ? config.parallel : 1)),
+  );
   // 内核把输出层也算一层（总层数 = block_count + 1），滑块上限必须用后者，
   // 否则「拉满」也差一层没上 GPU，生成速度成倍下降。
   const gpuLayerMax = maxGpuLayers(model.blockCount);
@@ -155,6 +209,26 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
       <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-6">
         <div className="model-load-page mx-auto">
           <ModelLoadCompactHeader {...props} />
+          {props.tuningAdvice && props.tuningAdvice.notes.length > 0 && activeTab === 'params' && (
+            <div className="accent-soft mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-[var(--radius-field)] px-4 py-3">
+              <Sparkles className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+              <span className="min-w-0 flex-1 text-[length:var(--font-caption)] leading-[var(--leading-ui)] text-[var(--text-secondary)]">
+                {props.tuningAdvice.notes.join(' ')}
+              </span>
+              <span className="mono-font flex-shrink-0 text-[length:var(--font-micro)] text-[var(--text-tertiary)]">
+                建议 -ub {props.tuningAdvice.recommendedUbatch} · -b {props.tuningAdvice.recommendedBatch}
+                {props.tuningAdvice.recommendedKvQuant ? ` · KV ${props.tuningAdvice.recommendedKvQuant}` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={props.onApplyTuningAdvice}
+                className="flex flex-shrink-0 items-center gap-1 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[length:var(--font-caption)] font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
+              >
+                <Wand2 className="h-3.5 w-3.5" />
+                应用建议
+              </button>
+            </div>
+          )}
           {props.logoLibraryOpen && (
             <LogoLibraryDialog
               selected={model.customLogo}
@@ -193,13 +267,13 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                   />
                   <ToggleParamRow
                     label="将 KV 缓存卸载到 GPU 内存"
-                    description="--kv-offload / --no-kv-offload"
+                    description="关闭后键值缓存留在内存，省显存但生成变慢（--kv-offload / --no-kv-offload）"
                     checked={config.kvCache}
                     onChange={(v) => updateConfig('kvCache', v)}
                   />
                   <ToggleParamRow
                     label="快速注意力"
-                    description="--flash-attn"
+                    description="降低注意力显存与耗时；兼容问题时可关闭（--flash-attn）"
                     checked={config.fastAttention}
                     onChange={(v) => updateConfig('fastAttention', v)}
                   />
@@ -208,7 +282,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                 <ParamSection title="缓存与运行行为" icon={Database}>
                   <NumberParamRow
                     label="物理批处理大小（ubatch）"
-                    description="--ubatch-size / -ub"
+                    description="一次送进计算图的词元数；调小省显存（--ubatch-size）"
                     value={config.physicalBatchSize}
                     onChange={(v) => updateConfig('physicalBatchSize', v)}
                     min={1}
@@ -217,7 +291,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                   />
                   <CacheTypeParamRow
                     label="K 缓存量化类型"
-                    description="-ctk / --cache-type-k"
+                    description="压缩键缓存精度省显存；q8_0 基本无损（--cache-type-k）"
                     badge="实验"
                     enabled={config.cacheTypeKEnabled}
                     value={config.cacheTypeK}
@@ -230,7 +304,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                   />
                   <CacheTypeParamRow
                     label="V 缓存量化类型"
-                    description="-ctv / --cache-type-v"
+                    description="压缩值缓存精度省显存；q8_0 通常安全（--cache-type-v）"
                     badge="实验"
                     enabled={config.cacheTypeVEnabled}
                     value={config.cacheTypeV}
@@ -241,13 +315,37 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                     }}
                     onChange={(v) => updateConfig('cacheTypeV', v)}
                   />
-                  {model.modelType === 'moe' && (
+                  {model.modelType === 'moe' ? (
+                    <>
+                      <SliderParamRow
+                        label="强制 MoE 权重留在 CPU 的层数"
+                        description="前 N 层专家留在内存，降低显存占用（--n-cpu-moe）"
+                        badge="实验"
+                        value={config.moeCpuLayers}
+                        onChange={(v) => updateConfig('moeCpuLayers', v)}
+                        min={0}
+                        max={layerCount}
+                        step={1}
+                      />
+                      <OptionalNumberParamRow
+                        label="MoE 专家 GPU 缓存"
+                        description="把内存中的专家按需缓存在显存，0 关闭（--moe-cache-mib）"
+                        badge="实验"
+                        enabled={config.moeCacheMib > 0}
+                        value={config.moeCacheMib > 0 ? config.moeCacheMib : 2048}
+                        onToggle={(v) => updateConfig('moeCacheMib', v ? 2048 : 0)}
+                        onChange={(v) => updateConfig('moeCacheMib', Math.max(0, Math.round(v)))}
+                        step={256}
+                        autoLabel="关闭"
+                      />
+                    </>
+                  ) : (
                     <SliderParamRow
-                      label="强制 MoE 权重留在 CPU 的层数"
-                      description="-ncmoe / --n-cpu-moe"
+                      label="稠密 FFN 留在 CPU 的层数"
+                      description="前 N 层前馈网络留在内存；0 关闭（--n-cpu-ffn）"
                       badge="实验"
-                      value={config.moeCpuLayers}
-                      onChange={(v) => updateConfig('moeCpuLayers', v)}
+                      value={config.nCpuFfn}
+                      onChange={(v) => updateConfig('nCpuFfn', v)}
                       min={0}
                       max={layerCount}
                       step={1}
@@ -286,7 +384,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       <div className="model-load-param-column">
                       <NumberParamRow
                         label="CPU 线程池大小"
-                        description="--threads；自动时不传该参数"
+                        description="处理器线程数；自动时由内核决定（--threads）"
                         value={config.threads}
                         onChange={(v) => updateConfig('threads', v)}
                         min={-1}
@@ -296,7 +394,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                       <NumberParamRow
                         label="最大并发预测数（parallel）"
-                        description="--parallel / -np；自动时不传该参数"
+                        description="同时服务的请求槽位；自动时由内核决定（--parallel）"
                         badge="实验"
                         value={config.parallel}
                         onChange={(v) => updateConfig('parallel', v)}
@@ -307,35 +405,84 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                       <ToggleParamRow
                         label="统一 KV 缓存"
-                        description="--kv-unified"
+                        description="所有并发槽共享键值缓存，减少浪费（--kv-unified）"
                         badge="实验"
                         checked={config.kvUnified}
                         onChange={(v) => updateConfig('kvUnified', v)}
                       />
                       <ToggleParamRow
                         label="保持模型在内存中"
-                        description="--mlock"
+                        description="锁定模型在物理内存，避免换出（--mlock）"
                         checked={config.mlock}
                         onChange={(v) => updateConfig('mlock', v)}
                       />
                       <ToggleParamRow
                         label="跳过启动预热"
-                        description="--no-warmup；超大模型首次验证时可显著缩短等待时间"
+                        description="跳过启动预热；首次验证更快（--no-warmup）"
                         badge="实验"
                         checked={config.noWarmup}
                         onChange={(v) => updateConfig('noWarmup', v)}
                       />
                       <ToggleParamRow
                         label="尝试 mmap()"
-                        description="--mmap / --no-mmap"
+                        description="用内存映射读取模型文件（--mmap / --no-mmap）"
                         checked={config.mmap}
                         onChange={(v) => updateConfig('mmap', v)}
+                      />
+                      <SelectParamRow
+                        label="大张量按需读取"
+                        description="超大张量按需从磁盘读取；需内存映射（--lazy-mode）"
+                        badge="实验"
+                        value={config.lazyMode}
+                        options={[
+                          { value: 'auto', label: '内核默认' },
+                          { value: 'on', label: '开启' },
+                          { value: 'off', label: '关闭' },
+                        ]}
+                        onChange={(v) => updateConfig('lazyMode', v as ModelLoadConfig['lazyMode'])}
+                      />
+                      <ToggleParamRow
+                        label="SWA 完整缓存"
+                        description="滑动窗口注意力使用完整缓存，更稳但更占显存（--swa-full）"
+                        badge="实验"
+                        checked={config.swaFull}
+                        onChange={(v) => updateConfig('swaFull', v)}
+                      />
+                      {config.kvUnified && (
+                        <OptionalNumberParamRow
+                          label="每路上下文上限"
+                          description="限制每路并发槽的上下文；关闭时由内核分配（--kv-unified-per-slot）"
+                          badge="实验"
+                          enabled={config.kvUnifiedPerSlotEnabled}
+                          value={config.kvUnifiedPerSlot > 0 ? config.kvUnifiedPerSlot : kvPerSlotDefault}
+                          onToggle={(v) => {
+                            updateConfig('kvUnifiedPerSlotEnabled', v);
+                            if (v && config.kvUnifiedPerSlot <= 0) updateConfig('kvUnifiedPerSlot', kvPerSlotDefault);
+                          }}
+                          onChange={(v) => updateConfig('kvUnifiedPerSlot', Math.max(0, Math.round(v)))}
+                          step={512}
+                          autoLabel="内核默认"
+                        />
+                      )}
+                      <OptionalNumberParamRow
+                        label="提示词缓存上限"
+                        description="提示词缓存内存上限，单位 MiB；0 关闭，-1 不限（--cache-ram）"
+                        badge="实验"
+                        enabled={config.cacheRamEnabled}
+                        value={config.cacheRamMb}
+                        onToggle={(v) => {
+                          updateConfig('cacheRamEnabled', v);
+                          if (v && !(config.cacheRamMb > 0)) updateConfig('cacheRamMb', 8192);
+                        }}
+                        onChange={(v) => updateConfig('cacheRamMb', Math.max(-1, Math.round(v)))}
+                        step={256}
+                        autoLabel="内核默认"
                       />
                     </div>
                     <div className="model-load-param-column">
                       <SliderParamRow
                         label="评估批处理大小"
-                        description="--batch-size / -b"
+                        description="逻辑批处理上限；调大更快但更占显存（--batch-size）"
                         value={config.batchSize}
                         onChange={(v) => updateConfig('batchSize', v)}
                         min={1}
@@ -344,7 +491,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                       <OptionalNumberParamRow
                         label="RoPE 频率基"
-                        description="--rope-freq-base；关闭时从 GGUF 读取"
+                        description="覆盖旋转位置编码基频；关闭时读 GGUF（--rope-freq-base）"
                         enabled={config.ropeFreqBaseEnabled}
                         value={config.ropeFreqBase}
                         onToggle={(enabled) => updateConfig('ropeFreqBaseEnabled', enabled)}
@@ -354,7 +501,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                       <OptionalNumberParamRow
                         label="RoPE 频率比例"
-                        description="--rope-freq-scale；关闭时从 GGUF 读取"
+                        description="扩展旋转位置编码上下文；关闭时读 GGUF（--rope-freq-scale）"
                         enabled={config.ropeFreqScaleEnabled}
                         value={config.ropeFreqScale}
                         onToggle={(enabled) => updateConfig('ropeFreqScaleEnabled', enabled)}
@@ -364,7 +511,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       />
                       <ReadOnlyParamRow
                         label="专家数量"
-                        description="从 GGUF expert_count 读取"
+                        description="从 GGUF 元数据读取，仅用于估算"
                         value={model.modelType === 'moe' ? formatNumber(model.expertCount) : '稠密模型'}
                       />
                       {model.supportsMtp || model.dsparkDraftPath || model.dflashDraftPath ? (
@@ -377,7 +524,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                           {config.speculativeDecoding !== 'off' ? (
                             <OptionalNumberParamRow
                               label="草稿深度"
-                              description="--spec-draft-n-max（1–16）；关闭时使用 llama-server 内核默认"
+                              description="每次草稿词元数，范围 1–16；关闭用内核默认（--spec-draft-n-max）"
                               enabled={config.specDraftNMaxEnabled}
                               value={config.specDraftNMax}
                               onToggle={(v) => updateConfig('specDraftNMaxEnabled', v)}
@@ -390,20 +537,40 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                       ) : (model.nextnPredictLayers ?? 0) > 0 ? (
                         <ReadOnlyParamRow
                           label="NextN / MTP 元数据"
-                          description="GGUF 含 NextN 声明，但当前 llama.cpp 没有该架构的 MTP graph，或缺少可执行的 MTP tensor。"
+                          description="GGUF 含 NextN 声明，但当前内核暂不支持"
                           value="当前不可用"
                         />
                       ) : null}
+                      {config.speculativeDecoding !== 'off' && (
+                        <NumberParamRow
+                          label="草稿上下文批大小"
+                          description="草稿物理批大小；0 跟随主模型（--spec-draft-n-ubatch）"
+                          badge="实验"
+                          value={config.specDraftNubatch}
+                          onChange={(v) => updateConfig('specDraftNubatch', v)}
+                          min={0}
+                          max={8192}
+                          step={64}
+                        />
+                      )}
+                      {hasMultimodalProjector && (
+                        <ToggleParamRow
+                          label="多模态投影 GPU 卸载"
+                          description="关闭后投影留在系统内存，省显存但编码变慢（--no-mmproj-offload）"
+                          checked={config.mmprojOffload}
+                          onChange={(v) => updateConfig('mmprojOffload', v)}
+                        />
+                      )}
                       <TextParamRow
                         label="聊天模板"
-                        description="留空时使用 GGUF 元数据（metadata）中的模板"
+                        description="留空时使用 GGUF 元数据里的对话模板"
                         value={config.chatTemplate}
                         onChange={(v) => updateConfig('chatTemplate', v)}
                         placeholder="自动"
                       />
                       <OptionalNumberParamRow
                         label="种子"
-                        description="--seed；关闭时使用随机种子"
+                        description="固定随机种子以便复现；关闭时随机（--seed）"
                         enabled={config.seedEnabled}
                         value={config.seed}
                         onToggle={(enabled) => {
@@ -504,7 +671,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
 function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit, onChangeLogo, isLoading, loadMessage, loadError, loadPercent, statusMessage, autoTuneRunning, autoTuneStopping, autoTuneApplying, autoTuneBlocked, onLoad, onStop, onAutoTune, onStopAutoTune, onReset }: ModelLoadViewProps) {
   const calibrated = (calibration?.samples ?? 0) > 0;
   const calibrationTitle = calibrated
-    ? `按 ${calibration?.samples} 次同模型、同设备和同参数实测分项校准；${calibration?.confidence === 'measured' ? '样本较稳定' : '样本有限'}${calibration?.rejected ? `；排除 ${calibration.rejected} 条不匹配或异常记录` : ''}`
+    ? `按 ${calibration?.samples} 次同模型、同设备、同参数实测分项校准${calibration?.exactGb != null ? `；同参数启动实测总量 ${calibration.exactGb.toFixed(2)} GB` : ''}；${calibration?.confidence === 'measured' ? '样本较稳定' : '样本有限'}${calibration?.rejected ? `；排除 ${calibration.rejected} 条不匹配或异常记录` : ''}`
     : calibration?.legacy ? `${calibration.legacy} 条旧记录缺少完整参数或采样来源，保留展示但不参与校准` : '尚无可用于校准的同参数实测记录';
   const estimateNotes: Record<string, string> = {
     tensor_memory_layout: '权重暂按文件体积近似，重新扫描后可读取张量分布',
@@ -515,8 +682,9 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
     parallel_auto: '并发数由内核自动决定，相关状态开销暂按单路估算',
     recurrent_state: '缺少循环状态尺寸，尚未计入该部分开销',
     recurrent_rollback: '循环状态的草稿回退缓存尚未计入',
-    projector_memory: '投影模型开销尚未计入',
-    draft_memory: '草稿模型开销尚未计入',
+    dense_ffn_offload: '稠密 FFN 卸载按层权重比例近似计入，精确值以启动记录为准',
+    draft_memory: '草稿模型 / MTP 开销按文件大小与近似 KV 计入，精确值以启动记录为准',
+    projector_memory: '投影模型文件大小未知，尚未计入',
     swa_capacity: 'SWA 缓存容量暂按完整上下文保守估算',
     sliding_window_pattern: '缺少逐层滑动窗口分布',
     kv_heads_by_layer: '缺少逐层 KV 头分布，部分卸载按平均值近似',
@@ -606,7 +774,7 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
           })}
         </div>
         <div className="model-load-compact-actions">
-          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="使用完整加载基线，实测搜索 ngl / ctx / ncmoe / 独立 K/V；整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
+          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="固定当前 ctx，先找显存边界，再比较推测解码、MoE 缓存、FFN 卸载、KV、批处理与线程；整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
           <button type="button" onClick={onReset} disabled={isLoading || autoTuneRunning} className={`${buttonClass} text-[var(--text-secondary)]`}><RotateCcw className="h-3.5 w-3.5" />重置</button>
           <button type="button" onClick={isLoading ? onStop : onLoad} disabled={autoTuneRunning} className={`inline-flex h-8 min-w-24 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors disabled:opacity-50 ${isLoading ? 'border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)]' : 'bg-[var(--accent)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]'}`}>{isLoading ? <Square className="h-3 w-3 fill-current" /> : <Play className="h-3.5 w-3.5" />}{isLoading ? '停止加载' : model.status === 'loaded' ? '重新加载' : '加载模型'}</button>
         </div>
@@ -661,11 +829,107 @@ function ToggleSwitch({ checked, onChange, disabled, size = 'md', ariaLabel }: {
 }
 
 function ParamLabel({ label, description, badge }: { label: string; description?: string; badge?: string }) {
+  const tooltip = PARAM_TOOLTIPS[label];
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const tooltipId = useId();
+  const hoverTimerRef = useRef<number | null>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number; placement: 'top' | 'bottom'; ready: boolean }>({
+    top: 0, left: 0, placement: 'bottom', ready: false,
+  });
+
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current != null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+  const openNow = () => {
+    clearHoverTimer();
+    setOpen(true);
+  };
+  // 悬停整行标签时留一点延迟，避免鼠标扫过参数区时连续弹窗。
+  const scheduleOpen = () => {
+    if (!tooltip) return;
+    clearHoverTimer();
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      setOpen(true);
+    }, 220);
+  };
+  const close = () => {
+    clearHoverTimer();
+    setOpen(false);
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = triggerRef.current;
+    const tip = tooltipRef.current;
+    if (!trigger || !tip) return;
+    const rect = trigger.getBoundingClientRect();
+    const margin = 12;
+    const width = tip.offsetWidth;
+    const height = tip.offsetHeight;
+    const left = Math.max(margin, Math.min(window.innerWidth - width - margin, rect.left + rect.width / 2 - width / 2));
+    const below = rect.bottom + 8;
+    const above = rect.top - 8;
+    const canShowBelow = below + height <= window.innerHeight - margin;
+    const canShowAbove = above - height >= margin;
+    const placement: 'top' | 'bottom' = canShowBelow || !canShowAbove ? 'bottom' : 'top';
+    const top = placement === 'bottom'
+      ? Math.min(below, Math.max(margin, window.innerHeight - height - margin))
+      : Math.max(margin, above);
+    setPosition({ top, left, placement, ready: true });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeTooltip = () => {
+      if (hoverTimerRef.current != null) {
+        window.clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = null;
+      }
+      setOpen(false);
+    };
+    const onResize = () => closeTooltip();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeTooltip();
+    };
+    window.addEventListener('scroll', closeTooltip, true);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('scroll', closeTooltip, true);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => () => {
+    if (hoverTimerRef.current != null) window.clearTimeout(hoverTimerRef.current);
+  }, []);
+
   return (
-    <div className="min-w-0">
+    <div className="min-w-0" onMouseEnter={scheduleOpen} onMouseLeave={close}>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-[var(--text-primary)] dark:text-[var(--text-primary)]">{label}</span>
-        <Info className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
+        {tooltip ? (
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={`查看「${label}」的用途说明`}
+            aria-describedby={open ? tooltipId : undefined}
+            onFocus={openNow}
+            onBlur={close}
+            className="relative flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--accent)] focus-visible:bg-[var(--surface-muted)] focus-visible:text-[var(--accent)] dark:text-[var(--text-secondary)] dark:hover:bg-white/[0.06]"
+          >
+            <Info className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        ) : (
+          <Info className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-secondary)] dark:text-[var(--text-secondary)]" />
+        )}
         {badge && (
           <span className="flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-medium uppercase tracking-normal text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-[var(--text-secondary)]">
             {badge}
@@ -673,6 +937,23 @@ function ParamLabel({ label, description, badge }: { label: string; description?
         )}
       </div>
       {description && <div className="mt-0.5 text-xs text-[var(--text-secondary)] dark:text-[var(--text-secondary)]">{description}</div>}
+      {open && tooltip && createPortal(
+        <div
+          ref={tooltipRef}
+          id={tooltipId}
+          role="tooltip"
+          className={`pointer-events-none fixed z-[120] w-[min(360px,calc(100vw-24px))] rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-[length:var(--font-caption)] leading-relaxed text-[var(--text-secondary)] shadow-[var(--shadow-flyout)] transition-opacity duration-100 ${position.ready ? 'opacity-100' : 'opacity-0'}`}
+          style={{
+            top: position.top,
+            left: position.left,
+            transform: position.placement === 'top' ? 'translateY(-100%)' : undefined,
+          }}
+        >
+          <div className="mb-1 font-semibold text-[var(--text-primary)]">{label}</div>
+          {tooltip}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -775,9 +1056,21 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
             </div>
           )}
           {records.slice(0, 8).map((record) => {
-            const deviation = record.vram_gb != null && record.vram_predicted_gb
-              ? ((record.vram_gb - record.vram_predicted_gb) / record.vram_predicted_gb * 100)
+            const measurement = record.vram_measurement;
+            const derivedActual = measurement?.baseline_gb != null && measurement.loaded_gb != null
+              && Number.isFinite(measurement.baseline_gb) && Number.isFinite(measurement.loaded_gb)
+              && measurement.loaded_gb >= measurement.baseline_gb
+              ? measurement.loaded_gb - measurement.baseline_gb
               : null;
+            const actualGb = record.vram_gb ?? derivedActual;
+            const deviation = actualGb != null && record.vram_predicted_gb
+              ? ((actualGb - record.vram_predicted_gb) / record.vram_predicted_gb * 100)
+              : null;
+            const qualityLabel = measurement
+              ? measurement.quality === 'unverified' && derivedActual != null
+                ? '旧记录·总量可用'
+                : ({ stable: '稳定采样', unverified: '未核实', adapted: '有效参数变化', contaminated: '采样异常' } as const)[measurement.quality]
+              : '旧记录';
             return (
               <div
                 key={`${record.timestamp}-${record.kind}`}
@@ -789,17 +1082,20 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
                 <span className="mono-font text-[var(--text-primary)]">
                   ngl={record.ngl ?? '--'} ctx={record.ctx?.toLocaleString() ?? '--'} {record.vram_measurement ? `K/V=${record.vram_measurement.config.cache_type_k}/${record.vram_measurement.config.cache_type_v}` : `kv=${record.kv ?? 'f16'}`}
                   {record.ncmoe != null ? ` ncmoe=${record.ncmoe}` : ''}
+                  {record.ncffn != null ? ` ncffn=${record.ncffn}` : ''}
+                  {record.moe_cache_mib != null ? ` moe缓存=${record.moe_cache_mib}MiB` : ''}
+                  {record.speculative && record.speculative !== 'off' ? ` 推测=${record.speculative}` : ''}
                 </span>
                 {record.tokens_per_sec != null && (
                   <span className="mono-font text-[var(--text-secondary)]">{record.tokens_per_sec.toFixed(1)} tok/s</span>
                 )}
-                {record.vram_gb != null && (
+                {actualGb != null && (
                   <span className="mono-font text-[var(--text-secondary)]">
-                    显存 {record.vram_gb.toFixed(1)} GB
+                    显存 {actualGb.toFixed(1)} GB
                     {deviation != null && Number.isFinite(deviation) ? `（预测偏差 ${deviation > 0 ? '+' : ''}${deviation.toFixed(0)}%）` : ''}
                   </span>
                 )}
-                {record.kind === 'launch' && <span className="text-[var(--text-tertiary)]" title={record.vram_measurement?.kernel_version ?? '旧记录缺少采样来源，不参与校准'}>{record.vram_measurement ? ({ stable: '稳定采样', unverified: '未核实', adapted: '有效参数变化', contaminated: '采样异常' } as const)[record.vram_measurement.quality] : '旧记录'}</span>}
+                {record.kind === 'launch' && <span className="text-[var(--text-tertiary)]" title={record.vram_measurement?.kernel_version ?? '旧记录缺少采样来源，不参与校准'}>{qualityLabel}</span>}
                 {record.note && (
                   <span
                     className="break-words text-[var(--state-warning)] dark:text-[var(--state-warning)]"
@@ -1124,25 +1420,52 @@ function IdleAutoUnloadParamRow({ checked, minutes, onToggle, onMinutesChange }:
   );
 }
 
+function SelectParamRow({ label, description, badge, value, options, onChange }: {
+  label: string;
+  description?: string;
+  badge?: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className={`${rowBorderClass()} model-load-param-row`}>
+      <ParamLabel label={label} description={description} badge={badge} />
+      <div className="model-load-param-control justify-end">
+        <select
+          value={value}
+          aria-label={label}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-9 min-w-0 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2 text-sm text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] dark:border-white/[0.08] dark:bg-[var(--app-bg)] dark:text-[var(--text-primary)]"
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function SpecDecodeParamRow({ model, value, onChange }: {
   model: ModelInfo;
   value: ModelLoadConfig['speculativeDecoding'];
   onChange: (v: ModelLoadConfig['speculativeDecoding']) => void;
 }) {
   const mtpDescription = model.mtpDraftPath
-    ? `使用兼容的独立 MTP head：${fileNameFromPath(model.mtpDraftPath)}`
-    : `使用主 GGUF 内置的 ${model.nextnPredictLayers ?? 1} 个 NextN 层，不传 -md`;
+    ? `使用兼容的独立多词元预测头：${fileNameFromPath(model.mtpDraftPath)}`
+    : `使用主模型内置的 ${model.nextnPredictLayers ?? 1} 个预测层，不额外挂草稿文件`;
   const description = value === 'mtp' ? mtpDescription
     : value === 'dspark' && model.dsparkDraftPath
-      ? `使用 DSpark 侧车：${fileNameFromPath(model.dsparkDraftPath)}`
+      ? `使用 DSpark 草稿侧车：${fileNameFromPath(model.dsparkDraftPath)}`
       : value === 'dflash' && model.dflashDraftPath
-        ? `使用 DFlash 侧车：${fileNameFromPath(model.dflashDraftPath)}`
-        : '关闭推测解码（默认，行为与 llama-server 内核一致）。';
+        ? `使用 DFlash 草稿侧车：${fileNameFromPath(model.dflashDraftPath)}`
+        : '关闭推测解码（默认，行为与内核一致）。';
   const options: Array<{ value: ModelLoadConfig['speculativeDecoding']; label: string; disabled?: boolean }> = [
     { value: 'off', label: '关闭' },
-    { value: 'mtp', label: 'MTP', disabled: !model.supportsMtp },
-    { value: 'dspark', label: 'DSpark', disabled: !model.dsparkDraftPath },
-    { value: 'dflash', label: 'DFlash', disabled: !model.dflashDraftPath },
+    { value: 'mtp', label: '内置多词元预测（MTP）', disabled: !model.supportsMtp },
+    { value: 'dspark', label: 'DSpark 草稿侧车', disabled: !model.dsparkDraftPath },
+    { value: 'dflash', label: 'DFlash 草稿侧车', disabled: !model.dflashDraftPath },
   ];
 
   return (
@@ -1213,12 +1536,12 @@ function NumberParamRow({ label, description, badge, value, onChange, min, max, 
   );
 }
 
-function OptionalNumberParamRow({ label, description, enabled, value, onToggle, onChange, step, autoLabel }: {
-  label: string; description?: string; enabled: boolean; value: number; onToggle: (v: boolean) => void; onChange: (v: number) => void; step: number; autoLabel: string;
+function OptionalNumberParamRow({ label, description, badge, enabled, value, onToggle, onChange, step, autoLabel }: {
+  label: string; description?: string; badge?: string; enabled: boolean; value: number; onToggle: (v: boolean) => void; onChange: (v: number) => void; step: number; autoLabel: string;
 }) {
   return (
     <div className={`${rowBorderClass()} model-load-param-row`}>
-      <ParamLabel label={label} description={description} />
+      <ParamLabel label={label} description={description} badge={badge} />
       <div className="model-load-param-control">
         <ToggleSwitch size="sm" checked={enabled} onChange={onToggle} ariaLabel={label} />
         {enabled ? (
@@ -1300,7 +1623,7 @@ function CacheTypeParamRow({ label, description, badge, enabled, value, onToggle
 function CheckboxParamRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <div className={`${rowBorderClass()} model-load-param-row model-load-param-row--toggle text-sm text-[var(--text-primary)]`}>
-      <span className="min-w-0 break-words font-medium">{label}</span>
+      <ParamLabel label={label} />
       <div className="model-load-param-control justify-end">
         <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={label} />
       </div>

@@ -39,6 +39,16 @@ const DEMO_LOAD_CONFIG: ModelLoadConfig = {
   idleAutoUnload: false,
   idleAutoUnloadMinutes: 15,
   moeCpuLayers: 0,
+  nCpuFfn: 0,
+  moeCacheMib: 0,
+  lazyMode: 'auto',
+  swaFull: false,
+  kvUnifiedPerSlotEnabled: false,
+  kvUnifiedPerSlot: 8192,
+  cacheRamEnabled: false,
+  cacheRamMb: 8192,
+  specDraftNubatch: 0,
+  mmprojOffload: true,
   reasoningBudget: 0,
 };
 

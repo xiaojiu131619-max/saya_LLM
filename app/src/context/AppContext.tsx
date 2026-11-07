@@ -596,6 +596,19 @@ function normalizeLoadConfig(config: ModelLoadConfig | (Partial<ModelLoadConfig>
     idleAutoUnload: config.idleAutoUnload ?? false,
     idleAutoUnloadMinutes: Math.round(finiteNumber(config.idleAutoUnloadMinutes ?? 15, 15, 1)),
     moeCpuLayers: finiteNumber(config.moeCpuLayers ?? 0, 0, 0),
+    nCpuFfn: Math.round(finiteNumber(config.nCpuFfn ?? 0, 0, 0)),
+    moeCacheMib: Math.round(finiteNumber(config.moeCacheMib ?? 0, 0, 0)),
+    lazyMode: (() => {
+      const mode = config.lazyMode as ModelLoadConfig['lazyMode'];
+      return mode === 'on' || mode === 'off' ? mode : 'auto';
+    })(),
+    swaFull: config.swaFull ?? false,
+    kvUnifiedPerSlotEnabled: config.kvUnifiedPerSlotEnabled ?? false,
+    kvUnifiedPerSlot: Math.round(finiteNumber(config.kvUnifiedPerSlot ?? 8192, 8192, 0)),
+    cacheRamEnabled: config.cacheRamEnabled ?? false,
+    cacheRamMb: Math.round(finiteNumber(config.cacheRamMb ?? 8192, 8192, -1)),
+    specDraftNubatch: Math.round(finiteNumber(config.specDraftNubatch ?? 0, 0, 0)),
+    mmprojOffload: config.mmprojOffload ?? true,
     reasoningBudget: Math.round(finiteNumber(config.reasoningBudget ?? 0, 0, 0)),
   };
 }
