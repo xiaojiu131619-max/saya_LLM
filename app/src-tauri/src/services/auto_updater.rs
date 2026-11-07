@@ -133,10 +133,30 @@ fn parse_kernel_version(name: &str) -> String {
     }
 }
 
+/// 半成品安装目录后缀：安装中先落在 `<名称>.partial`，验证通过后才 rename 转正。
+/// 崩溃 / 断电残留的 `.partial` 永远不会被当作当前核心。
+const PARTIAL_KERNEL_SUFFIX: &str = ".partial";
+
+fn is_partial_kernel_dir(name: &str) -> bool {
+    name.ends_with(PARTIAL_KERNEL_SUFFIX)
+}
+
+/// 崩溃残留的半成品目录不参与生效选择，但会占磁盘；安装前统一清掉。
+fn cleanup_partial_kernels() {
+    if let Ok(entries) = fs::read_dir(kernels_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_partial_kernel_dir(&name) && entry.path().is_dir() {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
 /// 当前生效的核心目录：显式选中的目录优先；否则取安装时间最新的一个。
 pub fn active_kernel_dir() -> Option<PathBuf> {
     if let Some(selected) = selected_kernel() {
-        if kernel_dir_timestamp(&selected).is_some() {
+        if kernel_dir_timestamp(&selected).is_some() && !is_partial_kernel_dir(&selected) {
             let candidate = kernels_dir().join(&selected);
             if candidate.is_dir() {
                 return Some(candidate);
@@ -150,6 +170,9 @@ pub fn active_kernel_dir() -> Option<PathBuf> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
+            if is_partial_kernel_dir(&name) {
+                continue;
+            }
             if let Some(ts) = kernel_dir_timestamp(&name) {
                 if best.as_ref().map_or(true, |(best_ts, _)| ts > *best_ts) {
                     best = Some((ts, entry.path()));
@@ -178,6 +201,9 @@ pub fn list_installed_kernels() -> Vec<InstalledKernel> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
+            if is_partial_kernel_dir(&name) {
+                continue;
+            }
             if let Some(ts) = kernel_dir_timestamp(&name) {
                 // 目录名里的时间是本地时间，展示时格式化为可读样式。
                 let installed_at = chrono::NaiveDateTime::parse_from_str(&ts, "%Y%m%d_%H%M%S")
@@ -1657,25 +1683,31 @@ pub fn download_and_install(
     on_progress("正在整理本机核心目录...".to_string());
     migrate_legacy_runtime(&resources);
 
-    // 每次更新都新建独立目录：kernels/<版本>_<安装时间>/，
-    // 装好并验证后才切换生效；失败只影响新目录，旧核心毫发无损。
+    // 每次更新都新建独立目录：先落到 kernels/<版本>_<安装时间>.partial，
+    // 校验通过后再 rename 转正；进程被杀也不会留下一个可被当成「当前核心」的
+    // 半拷贝目录（active_kernel_dir 明确忽略 .partial）。
     on_progress("正在安装新核心...".to_string());
-    let install_dir = kernels_dir().join(format!(
+    let install_name = format!(
         "{}_{}",
         safe_version_name(version),
         chrono::Local::now().format("%Y%m%d_%H%M%S")
-    ));
+    );
+    let partial_dir = kernels_dir().join(format!("{install_name}{PARTIAL_KERNEL_SUFFIX}"));
+    let install_dir = kernels_dir().join(&install_name);
     let install_result = (|| -> Result<(), String> {
-        fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
-        copy_runtime_files(&staging_dir, &install_dir)?;
-        validate_llama_server(&install_dir.join(exe_name()))?;
+        cleanup_partial_kernels();
+        fs::create_dir_all(&partial_dir).map_err(|error| error.to_string())?;
+        copy_runtime_files(&staging_dir, &partial_dir)?;
+        validate_llama_server(&partial_dir.join(exe_name()))?;
+        fs::rename(&partial_dir, &install_dir)
+            .map_err(|error| format!("切换到正式核心目录失败：{error}"))?;
         Ok(())
     })();
 
     if let Err(error) = install_result {
         eprintln!("[updater] install failed: {}", error);
-        // 安装失败直接丢弃新目录；旧核心未被触碰，无需回滚。
-        let _ = fs::remove_dir_all(&install_dir);
+        // 安装失败直接丢弃半成品目录；旧核心未被触碰，无需回滚。
+        let _ = fs::remove_dir_all(&partial_dir);
         return Err(format!("安装失败，原核心保持不变：{}", error));
     }
 
@@ -1709,6 +1741,21 @@ mod tests {
     use super::*;
 
     const REAL_ASSET_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b6459/llama-b6459-bin-win-cuda-12.4-x64.zip";
+
+    #[test]
+    /// 半成品目录带 `.partial` 后缀：安装未完成 / 进程被杀时残留的目录
+    /// 永远不能被 active_kernel_dir 当成当前核心（时间戳解析也要拒绝它）。
+    #[test]
+    fn partial_kernel_dirs_are_never_active() {
+        assert!(is_partial_kernel_dir("b6459_20261107_201500.partial"));
+        assert!(!is_partial_kernel_dir("b6459_20261107_201500"));
+        // 即使名字里时间戳合法，.partial 后缀也必须让时间戳解析失败。
+        assert_eq!(kernel_dir_timestamp("b6459_20261107_201500.partial"), None);
+        assert_eq!(
+            kernel_dir_timestamp("b6459_20261107_201500"),
+            Some("20261107_201500".to_string())
+        );
+    }
 
     #[test]
     fn accepts_official_github_release_hosts() {
