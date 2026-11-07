@@ -42,6 +42,7 @@ import {
 } from '@/lib/serviceUsage';
 import ServiceUsageCard from './ServiceUsageCard';
 import ExternalApiSection from './ExternalApiSection';
+import PerformancePanel from './PerformancePanel';
 
 function statusText(result: PingResult | null, serverRunning: boolean) {
   if (!serverRunning) return '服务未运行';
@@ -97,19 +98,10 @@ function DetailRow({ label, value, mono = false, action }: {
 }
 
 /**
- * API 服务页。
- *
- * 信息结构按「一个事实只出现一次」重排：
- * 1. 状态卡：现在能不能用、跑的是什么模型、端口 / 范围 / 槽位 / 协议；
- * 2. 用量卡（与对话同一端点，口径一致）；
- * 3. 连接信息：外部客户端接入所需的全部字段 + 鉴权管理入口；
- * 4. 高级设置：监听范围、端口、API Key 与调用示例（默认折叠）。
- *
- * 曾经的状态文案在页头、大卡标题、请求卡、页脚各出现一次，端口与模型名也重复出现，
- * 这些重复项已合并；检测时间、刷新频率、设备 KV 池等运行细节改由各自的
- * 专页（NiNfer / 日志）承载。
+ * 「API 服务」面板：状态卡 + 用量卡 + 连接信息 + 高级设置。
+ * 从原单页整体迁移而来，实时性能已拆到 PerformancePanel（默认标签）。
  */
-export default function ApiStatusPage() {
+function ApiServicePanel() {
   const { state, dispatch } = useApp();
   const [result, setResult] = useState<PingResult | null>(null);
   const [checking, setChecking] = useState(false);
@@ -305,6 +297,268 @@ export default function ApiStatusPage() {
     : '管理监听与 Key';
 
   return (
+    <>
+      {/* 另一个后端在跑时给出提示与一键切换，避免「引擎已启动但本页还是主模型」的困惑。 */}
+      {!engineMode && (fast27bEngine.running || strataEngine.running) && (
+        <div className="accent-soft mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[var(--radius-field)] px-4 py-3">
+          <Zap className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+          <span className="min-w-0 flex-1 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+            {[
+              fast27bEngine.running ? `NiNfer 引擎正在运行（端口 ${fast27bEngine.port}）` : null,
+              strataEngine.running ? `Strata 引擎正在运行（端口 ${strataEngine.port}）` : null,
+            ].filter(Boolean).join('；')}，本页当前描述的是主模型服务。
+          </span>
+          {fast27bEngine.running && (
+            <button
+              type="button"
+              onClick={openFast27bPage}
+              className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+            >
+              前往 NiNfer 页
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {strataEngine.running && (
+            <button
+              type="button"
+              onClick={openStrataPage}
+              className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+            >
+              前往 Strata 页
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ---- 状态卡：状态 + 模型 + 四项关键参数，一屏说清 ---- */}
+      <section className="panel mt-4 p-5 sm:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                <span className={`absolute -inset-1 rounded-full opacity-20 ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
+                <span className={`absolute inset-0 rounded-full ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
+              </span>
+              <h2 className="heading-plain text-[length:var(--font-display)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
+              <span className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
+                {engineMode ? engine.label : '主模型'}
+              </span>
+              {engineMode ? (
+                <StatusPill ok={engine.apiReachable} text={isStrataMode ? '/health' : '/v1/models'} />
+              ) : (
+                <>
+                  <StatusPill ok={Boolean(result?.healthOk)} text="/health" />
+                  <StatusPill ok={Boolean(result?.modelsOk)} text="/v1/models" />
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => void runCheck()}
+                disabled={checking}
+                className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-60"
+              >
+                {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                立即检测
+              </button>
+            </div>
+
+            <div className="mono-font mt-3 truncate text-[length:var(--font-title)] font-semibold text-[var(--text-primary)]">{serviceModelName}</div>
+            <div className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">{serviceModelNote}</div>
+          </div>
+
+          <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void copyBaseUrl()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3 text-[length:var(--font-body)] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
+            >
+              <Copy className="h-3.5 w-3.5" />
+              {copiedBaseUrl ? '已复制' : '复制 Base URL'}
+            </button>
+            <button
+              type="button"
+              onClick={manageTarget}
+              className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-body)] font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              {manageLabel}
+            </button>
+          </div>
+        </div>
+
+        <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-4">
+          <Fact label="端口" value={String(servicePort)} mono />
+          <Fact label="访问范围" value={exposureLabel} />
+          <Fact
+            label={slotLabel}
+            value={slotValue}
+            hint={slotHint}
+          />
+          <Fact label="兼容协议" value={serviceStandards} />
+        </dl>
+
+        {engineMode && !isStrataMode && fast27bEngine.degraded && (
+          <div className="mt-4 rounded-[var(--radius-field)] border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3.5 py-3">
+            <div className="text-[length:var(--font-caption)] font-semibold text-[var(--state-danger)]">
+              引擎已失效{fast27bEngine.faultAt ? `（${fast27bEngine.faultAt}）` : ''}
+              {fast27bEngine.faultKindText ? ` · ${fast27bEngine.faultKindText}` : ''}
+            </div>
+            {fast27bEngine.degradedReason && (
+              <div className="mt-1 break-words text-[length:var(--font-caption)] leading-[var(--leading-ui)] text-[var(--text-primary)]">
+                {fast27bEngine.degradedReason}
+              </div>
+            )}
+            {fast27bEngine.rawFaultLine && (
+              <div className="mono-font mt-1.5 break-words text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
+                {fast27bEngine.rawFaultLine}
+              </div>
+            )}
+            {fast27bEngine.requiresRestart && (
+              <button
+                type="button"
+                onClick={openFast27bPage}
+                className="mt-2.5 inline-flex items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--state-danger)] transition-opacity hover:opacity-75"
+              >
+                到 NiNfer 页重启引擎
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+        {/* Strata 特有：接口在线但权重仍在加载（十几分钟），不是失效。 */}
+        {engineMode && isStrataMode && engine.running && !engine.serviceable && (
+          <div className="mt-4 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+            <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+            接口已在线，权重仍在加载：/health 与网页都能打开，对话要等加载完成。
+          </div>
+        )}
+
+        {!engineMode && result?.error && (
+          <div className="mt-4 break-words text-[length:var(--font-caption)] text-[var(--state-danger)]">{result.error}</div>
+        )}
+        {!engineMode && !serviceRunning && (
+          <div className="mt-4 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+            <WifiOff className="h-3.5 w-3.5 flex-shrink-0" />
+            服务未运行：先到模型页加载模型，服务会随模型启动。
+          </div>
+        )}
+      </section>
+
+      {/* ---- 用量：与对话同一端点，口径一致 ---- */}
+      <div className="mt-3.5">
+        <ServiceUsageCard stats={usageStats} note={usageNote} />
+      </div>
+
+      {/* ---- 连接信息：外部客户端需要的一切都在这一张卡里 ---- */}
+      <section className="panel mt-3.5 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-[length:var(--font-body)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">连接信息</h2>
+            <p className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+              外部客户端填 Base URL 即可调用；鉴权开启时另需 Bearer Token。
+            </p>
+          </div>
+          <span className={`inline-flex flex-shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[length:var(--font-eyebrow)] font-bold ${
+            serviceAuthRequired
+              ? 'bg-[var(--state-success-bg)] text-[var(--state-success)]'
+              : 'border border-[var(--border)] bg-[var(--surface-muted)] text-[var(--text-secondary)]'
+          }`}>
+            <KeyRound className="h-3.5 w-3.5" />
+            {serviceAuthRequired ? 'API Key 已启用' : '无需鉴权'}
+          </span>
+        </div>
+
+        <div className="accent-soft mt-3.5 flex items-center justify-between gap-3 rounded-[var(--radius-field)] px-3.5 py-3">
+          <code className="mono-font min-w-0 truncate text-[length:var(--font-body)] text-[var(--accent)]" title={serviceBaseUrl}>{serviceBaseUrl}</code>
+          <button
+            type="button"
+            onClick={() => void copyBaseUrl()}
+            className="flex flex-shrink-0 items-center gap-1.5 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+            title="复制 Base URL"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            {copiedBaseUrl ? '已复制' : '复制'}
+          </button>
+        </div>
+
+        <div className="mt-3 grid gap-x-8 sm:grid-cols-2">
+          <DetailRow label="聊天接口" value="/v1/chat/completions" mono />
+          <DetailRow label="当前模型" value={serviceModelName} mono />
+          <DetailRow label="兼容协议" value={serviceStandards} />
+          <DetailRow
+            label="访问范围"
+            value={exposureLabel}
+            action={(
+              <button
+                type="button"
+                onClick={manageTarget}
+                className="flex-shrink-0 text-[length:var(--font-eyebrow)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+              >
+                修改
+              </button>
+            )}
+          />
+        </div>
+      </section>
+
+      {/* 引擎模式的配置都在各自专页：这里不再重复参数表，只保留一句指引。 */}
+      {engineMode ? (
+        <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
+          <Globe2 className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
+          引擎的端口、局域网访问与 API Key 都在 {engine.label} 页配置。
+          <button
+            type="button"
+            onClick={openEnginePage}
+            className="inline-flex items-center gap-1 font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
+          >
+            前往 {engine.label} 页
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : (
+        <details ref={advancedRef} className="panel group mt-3.5 overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-[var(--surface-muted)] [&::-webkit-details-marker]:hidden">
+            <span className="flex min-w-0 items-center gap-2.5">
+              <Globe2 className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+              <strong className="text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">高级设置</strong>
+              <span className="truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                监听范围、端口、API Key 与调用示例
+              </span>
+            </span>
+            <ChevronDown className="h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)] transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="border-t border-[var(--border-subtle)] px-5 py-4">
+            <ExternalApiSection embedded />
+          </div>
+        </details>
+      )}
+    </>
+  );
+}
+
+/**
+ * API 服务页：实时性能面板（默认）与 API 服务面板通过胶囊切换。
+ *
+ * 「API 服务」面板的信息结构按「一个事实只出现一次」重排：
+ * 1. 状态卡：现在能不能用、跑的是什么模型、端口 / 范围 / 槽位 / 协议；
+ * 2. 用量卡（与对话同一端点，口径一致）；
+ * 3. 连接信息：外部客户端接入所需的全部字段 + 鉴权管理入口；
+ * 4. 高级设置：监听范围、端口、API Key 与调用示例（默认折叠）。
+ *
+ * 实时性能独立成首个标签，采样与历史曲线见 PerformancePanel。
+ */
+export default function ApiStatusPage() {
+  const { state } = useApp();
+  const [tab, setTab] = useState<'performance' | 'service'>('performance');
+  const engineStatuses = useEngineStatuses();
+  const strataStatus = useStrataStatus();
+  const fast27bEngine = fast27bServiceView(engineStatuses.fast27b);
+  const strataEngine = strataServiceView(strataStatus);
+  const engineMode = state.chatEngine !== 'main';
+  const engine = state.chatEngine === 'strata' ? strataEngine : fast27bEngine;
+
+  return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto w-full max-w-[1040px]">
@@ -313,251 +567,48 @@ export default function ApiStatusPage() {
             eyebrow={`服务控制台 / API · ${engineMode ? engine.label : '主模型'}`}
             title="API 服务"
             description={engineMode
-              ? (isStrataMode
+              ? (state.chatEngine === 'strata'
                 ? `Strata 网关自带的 OpenAI 兼容端点（端口 ${engine.port}）；切换对话后端即可在主模型与引擎之间切换。`
                 : `NiNfer 引擎自带的 OpenAI 兼容端点（端口 ${engine.port}，固定单并发）；切换对话后端即可在主模型与引擎之间切换。`)
               : '本地 OpenAI / Anthropic 兼容接口。外部客户端用下方 Base URL 即可接入；参数修改后需重新加载模型生效。'}
             actions={(
-              <>
-                <StatusPill ok={serviceHealthy} text={serviceTitle} />
-                <button
-                  type="button"
-                  onClick={() => void runCheck()}
-                  disabled={checking}
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[length:var(--font-body)] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-60"
-                >
-                  {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                  立即检测
-                </button>
-              </>
+              <div
+                className="flex items-center gap-1 rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--surface-muted)] p-0.5"
+                role="tablist"
+                aria-label="API 服务视图"
+              >
+                {([
+                  { id: 'performance', label: '性能面板' },
+                  { id: 'service', label: 'API 服务' },
+                ] as const).map(({ id, label }) => {
+                  const active = tab === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setTab(id)}
+                      className={`h-8 rounded-[var(--radius-pill)] px-3.5 text-[length:var(--font-caption)] font-semibold transition-colors ${
+                        active
+                          ? 'bg-[var(--surface)] text-[var(--accent)] shadow-[var(--shadow-card)]'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             )}
           />
 
-          {/* 另一个后端在跑时给出提示与一键切换，避免「引擎已启动但本页还是主模型」的困惑。 */}
-          {!engineMode && (fast27bEngine.running || strataEngine.running) && (
-            <div className="accent-soft mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[var(--radius-field)] px-4 py-3">
-              <Zap className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
-              <span className="min-w-0 flex-1 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                {[
-                  fast27bEngine.running ? `NiNfer 引擎正在运行（端口 ${fast27bEngine.port}）` : null,
-                  strataEngine.running ? `Strata 引擎正在运行（端口 ${strataEngine.port}）` : null,
-                ].filter(Boolean).join('；')}，本页当前描述的是主模型服务。
-              </span>
-              {fast27bEngine.running && (
-                <button
-                  type="button"
-                  onClick={openFast27bPage}
-                  className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-                >
-                  前往 NiNfer 页
-                  <ArrowUpRight className="h-3.5 w-3.5" />
-                </button>
-              )}
-              {strataEngine.running && (
-                <button
-                  type="button"
-                  onClick={openStrataPage}
-                  className="flex flex-shrink-0 items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-                >
-                  前往 Strata 页
-                  <ArrowUpRight className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* ---- 状态卡：状态 + 模型 + 四项关键参数，一屏说清 ---- */}
-          <section className="panel mt-4 p-5 sm:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
-                    <span className={`absolute -inset-1 rounded-full opacity-20 ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
-                    <span className={`absolute inset-0 rounded-full ${serviceHealthy ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
-                  </span>
-                  <h2 className="heading-brand text-[length:var(--font-page-title)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">{serviceTitle}</h2>
-                  <span className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
-                    {engineMode ? engine.label : '主模型'}
-                  </span>
-                  {engineMode ? (
-                    <StatusPill ok={engine.apiReachable} text={isStrataMode ? '/health' : '/v1/models'} />
-                  ) : (
-                    <>
-                      <StatusPill ok={Boolean(result?.healthOk)} text="/health" />
-                      <StatusPill ok={Boolean(result?.modelsOk)} text="/v1/models" />
-                    </>
-                  )}
-                </div>
-
-                <div className="mono-font mt-3 truncate text-[length:var(--font-title)] font-semibold text-[var(--text-primary)]">{serviceModelName}</div>
-                <div className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">{serviceModelNote}</div>
-              </div>
-
-              <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void copyBaseUrl()}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3 text-[length:var(--font-body)] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  {copiedBaseUrl ? '已复制' : '复制 Base URL'}
-                </button>
-                <button
-                  type="button"
-                  onClick={manageTarget}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-field)] bg-[var(--accent)] px-3 text-[length:var(--font-body)] font-semibold text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)]"
-                >
-                  <KeyRound className="h-3.5 w-3.5" />
-                  {manageLabel}
-                </button>
-              </div>
-            </div>
-
-            <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-4">
-              <Fact label="端口" value={String(servicePort)} mono />
-              <Fact label="访问范围" value={exposureLabel} />
-              <Fact
-                label={slotLabel}
-                value={slotValue}
-                hint={slotHint}
-              />
-              <Fact label="兼容协议" value={serviceStandards} />
-            </dl>
-
-            {engineMode && !isStrataMode && fast27bEngine.degraded && (
-              <div className="mt-4 rounded-[var(--radius-field)] border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] px-3.5 py-3">
-                <div className="text-[length:var(--font-caption)] font-semibold text-[var(--state-danger)]">
-                  引擎已失效{fast27bEngine.faultAt ? `（${fast27bEngine.faultAt}）` : ''}
-                  {fast27bEngine.faultKindText ? ` · ${fast27bEngine.faultKindText}` : ''}
-                </div>
-                {fast27bEngine.degradedReason && (
-                  <div className="mt-1 break-words text-[length:var(--font-caption)] leading-[var(--leading-ui)] text-[var(--text-primary)]">
-                    {fast27bEngine.degradedReason}
-                  </div>
-                )}
-                {fast27bEngine.rawFaultLine && (
-                  <div className="mono-font mt-1.5 break-words text-[length:var(--font-eyebrow)] leading-4 text-[var(--text-tertiary)]">
-                    {fast27bEngine.rawFaultLine}
-                  </div>
-                )}
-                {fast27bEngine.requiresRestart && (
-                  <button
-                    type="button"
-                    onClick={openFast27bPage}
-                    className="mt-2.5 inline-flex items-center gap-1 text-[length:var(--font-caption)] font-bold text-[var(--state-danger)] transition-opacity hover:opacity-75"
-                  >
-                    到 NiNfer 页重启引擎
-                    <ArrowUpRight className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-            )}
-            {/* Strata 特有：接口在线但权重仍在加载（十几分钟），不是失效。 */}
-            {engineMode && isStrataMode && engine.running && !engine.serviceable && (
-              <div className="mt-4 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
-                接口已在线，权重仍在加载：/health 与网页都能打开，对话要等加载完成。
-              </div>
-            )}
-
-            {!engineMode && result?.error && (
-              <div className="mt-4 break-words text-[length:var(--font-caption)] text-[var(--state-danger)]">{result.error}</div>
-            )}
-            {!engineMode && !serviceRunning && (
-              <div className="mt-4 flex items-center gap-2 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                <WifiOff className="h-3.5 w-3.5 flex-shrink-0" />
-                服务未运行：先到模型页加载模型，服务会随模型启动。
-              </div>
-            )}
-          </section>
-
-          {/* ---- 用量：与对话同一端点，口径一致 ---- */}
-          <div className="mt-3.5">
-            <ServiceUsageCard stats={usageStats} note={usageNote} />
-          </div>
-
-          {/* ---- 连接信息：外部客户端需要的一切都在这一张卡里 ---- */}
-          <section className="panel mt-3.5 p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0">
-                <h2 className="text-[length:var(--font-body)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">连接信息</h2>
-                <p className="mt-0.5 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                  外部客户端填 Base URL 即可调用；鉴权开启时另需 Bearer Token。
-                </p>
-              </div>
-              <span className={`inline-flex flex-shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[length:var(--font-eyebrow)] font-bold ${
-                serviceAuthRequired
-                  ? 'bg-[var(--state-success-bg)] text-[var(--state-success)]'
-                  : 'border border-[var(--border)] bg-[var(--surface-muted)] text-[var(--text-secondary)]'
-              }`}>
-                <KeyRound className="h-3.5 w-3.5" />
-                {serviceAuthRequired ? 'API Key 已启用' : '无需鉴权'}
-              </span>
-            </div>
-
-            <div className="accent-soft mt-3.5 flex items-center justify-between gap-3 rounded-[var(--radius-field)] px-3.5 py-3">
-              <code className="mono-font min-w-0 truncate text-[length:var(--font-body)] text-[var(--accent)]" title={serviceBaseUrl}>{serviceBaseUrl}</code>
-              <button
-                type="button"
-                onClick={() => void copyBaseUrl()}
-                className="flex flex-shrink-0 items-center gap-1.5 text-[length:var(--font-caption)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-                title="复制 Base URL"
-              >
-                <Copy className="h-3.5 w-3.5" />
-                {copiedBaseUrl ? '已复制' : '复制'}
-              </button>
-            </div>
-
-            <div className="mt-3 grid gap-x-8 sm:grid-cols-2">
-              <DetailRow label="聊天接口" value="/v1/chat/completions" mono />
-              <DetailRow label="当前模型" value={serviceModelName} mono />
-              <DetailRow label="兼容协议" value={serviceStandards} />
-              <DetailRow
-                label="访问范围"
-                value={exposureLabel}
-                action={(
-                  <button
-                    type="button"
-                    onClick={manageTarget}
-                    className="flex-shrink-0 text-[length:var(--font-eyebrow)] font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-                  >
-                    修改
-                  </button>
-                )}
-              />
-            </div>
-          </section>
-
-          {/* 引擎模式的配置都在各自专页：这里不再重复参数表，只保留一句指引。 */}
-          {engineMode ? (
-            <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-              <Globe2 className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
-              引擎的端口、局域网访问与 API Key 都在 {engine.label} 页配置。
-              <button
-                type="button"
-                onClick={openEnginePage}
-                className="inline-flex items-center gap-1 font-bold text-[var(--accent)] transition-opacity hover:opacity-75"
-              >
-                前往 {engine.label} 页
-                <ArrowUpRight className="h-3.5 w-3.5" />
-              </button>
+          {tab === 'performance' ? (
+            <div className="mt-4">
+              <PerformancePanel />
             </div>
           ) : (
-            <details ref={advancedRef} className="panel group mt-3.5 overflow-hidden">
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-[var(--surface-muted)] [&::-webkit-details-marker]:hidden">
-                <span className="flex min-w-0 items-center gap-2.5">
-                  <Globe2 className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
-                  <strong className="text-[length:var(--font-body)] font-semibold text-[var(--text-primary)]">高级设置</strong>
-                  <span className="truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
-                    监听范围、端口、API Key 与调用示例
-                  </span>
-                </span>
-                <ChevronDown className="h-4 w-4 flex-shrink-0 text-[var(--text-tertiary)] transition-transform group-open:rotate-180" />
-              </summary>
-              <div className="border-t border-[var(--border-subtle)] px-5 py-4">
-                <ExternalApiSection embedded />
-              </div>
-            </details>
+            <ApiServicePanel />
           )}
         </div>
       </div>
