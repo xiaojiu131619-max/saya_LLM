@@ -424,6 +424,11 @@ pub(crate) fn detect_host_gpu_backend() -> (String, Option<String>) {
 /// hip_capable = 本机 AMD 独显在 ROCm 官方支持列表内（RX 6000/7000/9000、
 /// Pro W6000/W7000、Instinct）；hip_gpu 有值表示本机存在 AMD 卡（可区分
 /// 「不支持」与「未验证」两种提示），没有 AMD 卡时为 (false, None)。
+/// 供命令层复用的 HIP 上下文探测（AMD 卡是否在 ROCm 支持列表内）。
+pub fn detect_hip_context_public() -> (bool, Option<String>) {
+    detect_hip_context()
+}
+
 fn detect_hip_context() -> (bool, Option<String>) {
     match crate::services::gpu_monitor::detect_hip_capability() {
         Some((name, support)) => (

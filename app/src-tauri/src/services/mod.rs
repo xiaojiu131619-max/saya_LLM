@@ -5,6 +5,7 @@ pub mod benchmark;
 pub mod canvas_agent;
 pub mod canvas_host;
 pub mod canvas_manager;
+pub mod device_probe;
 pub mod embedding_manager;
 pub mod fast27b_manager;
 pub mod fast27b_metrics;

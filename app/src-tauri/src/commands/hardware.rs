@@ -1,7 +1,18 @@
 use tauri::State;
 
 use crate::models::app_state::AppState;
+use crate::models::device_profile::DeviceProfile;
 use crate::models::hardware_info::HardwareInfo;
+
+#[tauri::command]
+pub fn get_device_profile(state: State<'_, AppState>) -> Result<DeviceProfile, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    let mut guard = state.gpu_monitor.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        *guard = crate::services::gpu_monitor::GpuMonitor::new().ok();
+    }
+    Ok(crate::services::device_probe::probe(&config, &mut guard))
+}
 
 #[tauri::command]
 pub fn get_hardware_info(state: State<'_, AppState>) -> Result<HardwareInfo, String> {

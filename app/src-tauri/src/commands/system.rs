@@ -8,7 +8,99 @@ use std::os::windows::process::CommandExt;
 use crate::models::app_state::AppState;
 use crate::models::hardware_info::SystemStatus;
 use crate::services::auto_updater;
+use crate::services::gpu_profile;
 use crate::services::process_manager;
+
+/// 后端调优建议：前端加载页与自动调参在 AMD / Vulkan 机器上消费。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendTuningAdvice {
+    /// 内核后端（CUDA / Vulkan / HIP/ROCm / CPU）。
+    pub backend: String,
+    /// 显卡厂商（NVIDIA / AMD / Intel / 未知）。
+    pub vendor: String,
+    /// AMD 架构分档（RDNA2/3/4；非 AMD 为 null）。
+    pub amd_arch: Option<String>,
+    /// 本机 AMD 独显是否在 ROCm/HIP 官方支持列表内（无 AMD 卡为 false）。
+    pub hip_capable: bool,
+    /// 建议的物理批处理大小（-ub）。
+    pub recommended_ubatch: u32,
+    /// 建议的逻辑批处理大小（-b）。
+    pub recommended_batch: u32,
+    /// 建议的 KV 量化类型；null = 保持 f16。
+    pub recommended_kv_quant: Option<String>,
+    /// 中文建议说明（逐条，直接展示给用户）。
+    pub notes: Vec<String>,
+}
+
+/// 按本机显卡与当前内核给出 AMD / Vulkan 调优建议。
+///
+/// 只读探测，不修改任何配置；NVIDIA 机器返回 CUDA 口径的建议（无特殊项）。
+#[tauri::command]
+pub fn get_backend_tuning_advice(state: State<'_, AppState>) -> BackendTuningAdvice {
+    let profile = gpu_profile::current();
+    let exe = {
+        let config = state.config.lock().map(|config| config.clone()).unwrap_or_default();
+        config
+            .kernel_override_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| process_manager::resolve_exe_path(&config.llama_server_path))
+    };
+    let backend = process_manager::detect_kernel_backend(&exe).label().to_string();
+    let (hip_capable, _hip_gpu) = auto_updater::detect_hip_context_public();
+    let is_amd = profile.vendor == "amd";
+    let vulkan_kernel = process_manager::is_vulkan_kernel(&exe);
+    let vram_total = state
+        .gpu_monitor
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.as_mut().and_then(|monitor| monitor.get_vram_total().ok()))
+        .unwrap_or(0.0);
+
+    let advice = if vulkan_kernel {
+        process_manager::vulkan_tuning_advice(vram_total)
+    } else {
+        process_manager::vulkan_tuning_advice(0.0)
+    };
+
+    let mut notes: Vec<String> = Vec::new();
+    if is_amd && vulkan_kernel {
+        notes.push(format!(
+            "检测到 AMD 显卡（{}），当前使用 Vulkan 内核。建议物理批处理 {}、逻辑批处理 {}，可降低计算缓冲的显存占用。",
+            profile.name.as_deref().unwrap_or("AMD GPU"),
+            advice.ubatch,
+            advice.batch,
+        ));
+        if let Some(kv) = advice.kv_quant {
+            notes.push(format!(
+                "显存小于 12GB 时建议把 K/V 缓存量化到 {kv}：Vulkan 上解码 kernel 成熟，能省一半以上 KV 显存，速度损失很小。"
+            ));
+        }
+        if hip_capable {
+            notes.push("本机卡在 ROCm/HIP 官方支持列表内：可在「核心更新」下载 ROCm 内核实测，部分模型上快于 Vulkan；Vulkan 仍是默认推荐。".to_string());
+        } else {
+            notes.push("本机卡不在 ROCm/HIP 支持列表内（核显或较老架构），请使用 Vulkan 内核，不要下载 ROCm 包。".to_string());
+        }
+        notes.push("加载后若速度不理想，可在「模型加载 → 自动调参」让应用实测搜索 ubatch / KV / ngl 组合。".to_string());
+    } else if is_amd && !vulkan_kernel {
+        notes.push(format!(
+            "检测到 AMD 显卡，但当前内核后端是 {backend}。请到「核心更新」下载 Vulkan 包（或本机支持时的 ROCm 包），CUDA 内核在 AMD 卡上无法使用 GPU。"
+        ));
+    }
+
+    BackendTuningAdvice {
+        backend,
+        vendor: profile.vendor_label,
+        amd_arch: profile.amd_arch.map(|arch| arch.label().to_string()),
+        hip_capable,
+        recommended_ubatch: advice.ubatch,
+        recommended_batch: advice.batch,
+        recommended_kv_quant: advice.kv_quant.map(str::to_string),
+        notes,
+    }
+}
 
 fn resolve_allowed_dirs(model_dirs: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();

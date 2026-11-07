@@ -28,6 +28,72 @@ export interface DesktopVideoRuntimeInfo {
   ffprobe_path: string | null;
 }
 
+export interface DeviceGpuInfo {
+  index: number;
+  name: string;
+  vendor: string;
+  totalVramGb: number;
+  usedVramGb: number;
+  utilization: number;
+  temperature: number;
+  driverVersion: string | null;
+  source: string;
+  selected: boolean;
+}
+
+export interface DeviceKernelInfo {
+  exePath: string;
+  exists: boolean;
+  version: string | null;
+  runtimeBackend: string | null;
+  hostBackend: string | null;
+  runtimeDevices: string[];
+  cudaVersion: string | null;
+  smArchitecture: string | null;
+  cudaGraphsEnabled: boolean;
+  features: string[];
+}
+
+export interface DeviceModelDirInfo {
+  path: string;
+  exists: boolean;
+  freeGb: number | null;
+  totalGb: number | null;
+}
+
+export interface DeviceRecommendations {
+  vramBudgetGb: number;
+  vramHeadroomGb: number;
+  recommendedThreads: number;
+  recommendedCtx: number;
+  notes: string[];
+}
+
+export interface DeviceProfile {
+  hostname: string;
+  osName: string;
+  osVersion: string;
+  arch: string;
+  cpuBrand: string;
+  physicalCores: number;
+  logicalCores: number;
+  memoryTotalGb: number;
+  memoryAvailableGb: number;
+  gpus: DeviceGpuInfo[];
+  selectedGpu: number;
+  gpuVendor: string;
+  gpuBackend: string;
+  cudaVersion: string | null;
+  amdArch: string | null;
+  kernel: DeviceKernelInfo;
+  modelDirs: DeviceModelDirInfo[];
+  recommendations: DeviceRecommendations;
+}
+
+export async function getDeviceProfile(): Promise<DeviceProfile> {
+  return invoke<DeviceProfile>('get_device_profile');
+}
+
 export interface VideoRuntimeInfo {
   ffmpeg_available: boolean;
   ffprobe_available: boolean;

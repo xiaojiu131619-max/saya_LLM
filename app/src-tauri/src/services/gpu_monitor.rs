@@ -78,6 +78,14 @@ impl GpuMonitor {
         }
     }
 
+    pub fn selected_index(&self) -> u32 {
+        match &self.inner {
+            GpuMonitorInner::Nvml(inner) => inner.device_index,
+            #[cfg(windows)]
+            GpuMonitorInner::Windows(inner) => inner.device_index,
+        }
+    }
+
     pub fn refresh(&mut self) -> Result<HardwareInfo> {
         match &mut self.inner {
             GpuMonitorInner::Nvml(inner) => inner.refresh(),

@@ -1234,6 +1234,14 @@ fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    // 新版 llama.cpp 把模型/KV/计算缓冲的明细放在 info 级（3）之上；
+    // 显存记录依赖 load_tensors / llama_kv_cache / sched_reserve 行，必须显式开到 4。
+    // 只影响日志体积，不改变实际分配与推理参数。
+    if kernel_supports_feature(exe.as_ref(), "--log-verbosity") {
+        cmd.arg("--log-verbosity").arg("4");
+    } else {
+        add_log("[server] 当前内核不支持 --log-verbosity，本次启动记录将缺少缓冲分项。");
+    }
     cmd.arg("--flash-attn")
         .arg(if config.flash_attn { "on" } else { "off" });
     if !config.kv_offload {
@@ -1666,6 +1674,10 @@ fn compatible_cpu_config(config: &ServerConfig) -> ServerConfig {
     fallback.kv_offload = false;
     fallback.mlock = false;
     fallback.ncmoe = 0;
+    fallback.n_cpu_ffn = 0;
+    fallback.moe_cache_mib = 0;
+    fallback.kv_unified_per_slot = 0;
+    fallback.spec_draft_n_ubatch = 0;
     fallback
 }
 
@@ -1732,6 +1744,71 @@ fn runtime_supports_mtp_architecture(exe: &str, architecture: &str) -> bool {
     ];
     any_file_contains(&architecture_candidates, markers)
         && any_file_contains(&driver_candidates, &[b"draft-mtp"])
+}
+
+/// 批量探测内核是否声明了某组命令行参数。
+///
+/// 新内核把 common 参数定义放在 `llama-common.dll`，单体/旧布局才回退到
+/// `llama.dll` 与 exe 本体；一次读取同时匹配多个参数，避免每个新参数都重读
+/// 几 MB 的公共库。探测不到的参数不应传给内核——老内核会以未知参数直接退出。
+fn kernel_arg_support(exe: &str, flags: &[&str]) -> Vec<bool> {
+    let exe_path = Path::new(exe);
+    let candidates = [
+        exe_path.with_file_name("llama-common.dll"),
+        exe_path.with_file_name("libllama-common.so"),
+        exe_path.with_file_name("libllama-common.dylib"),
+        exe_path.with_file_name("llama-server-impl.dll"),
+        exe_path.with_file_name("llama.dll"),
+        exe_path.with_file_name("libllama.so"),
+        exe_path.with_file_name("libllama.dylib"),
+        exe_path.to_path_buf(),
+    ];
+    let mut supported = vec![false; flags.len()];
+    for candidate in candidates {
+        let Ok(bytes) = std::fs::read(candidate) else {
+            continue;
+        };
+        let mut missing = false;
+        for (index, flag) in flags.iter().enumerate() {
+            if !supported[index] && bytes_contain(&bytes, flag.as_bytes()) {
+                supported[index] = true;
+            }
+            if !supported[index] {
+                missing = true;
+            }
+        }
+        if !missing {
+            break;
+        }
+    }
+    supported
+}
+
+/// 供设备详情页展示当前内核支持的新参数能力。
+pub fn kernel_supports_feature(exe: &str, flag: &str) -> bool {
+    kernel_arg_support(exe, &[flag])
+        .first()
+        .copied()
+        .unwrap_or(false)
+}
+
+/// 追加新内核专属参数；探测不到时只记日志，避免用户看到晦涩的参数解析失败。
+fn append_new_kernel_arg(    cmd: &mut Command,
+    supported: bool,
+    flag: &str,
+    value: Option<String>,
+) {
+    if !supported {
+        add_log(&format!(
+            "[server] 当前内核不支持 {}，已忽略该设置。",
+            flag
+        ));
+        return;
+    }
+    cmd.arg(flag);
+    if let Some(value) = value {
+        cmd.arg(value);
+    }
 }
 
 /// 是否为采用 `-lm/--load-mode` 的新内核（b10883 起 llama.cpp 移除了独立的
@@ -2250,6 +2327,39 @@ fn resolve_offload_device(exe: &str, requested: Option<&str>) -> Option<String> 
     pick_offload_device(&list_runtime_devices(exe), requested)
 }
 
+/// AMD / Vulkan 路线的启动优化。
+///
+/// Vulkan 后端与 CUDA 的开销结构不同，同一套默认参数在 AMD 卡上常常「能跑但不快」：
+/// - 计算缓冲随 ubatch 线性增长，Vulkan 的分配更昂贵，512 的物理批处理在 8GB 级
+///   显卡上会多吃几百 MB 且预填充收益有限；
+/// - `--flash-attn` 在近期内核已稳定且显著降低 KV 占用，保持开启；
+/// - 大量化 KV（q8_0）在 Vulkan 上解码 kernel 成熟，是省显存的第一杠杆。
+///
+/// 这里只产出「建议值 + 中文理由」，由加载页与自动调参消费；不改用户显式保存的参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VulkanTuningAdvice {
+    /// 建议的物理批处理大小（-ub）。
+    pub ubatch: u32,
+    /// 建议的逻辑批处理大小（-b）。
+    pub batch: u32,
+    /// 建议开启的 K/V 缓存量化类型；None = 保持 f16。
+    pub kv_quant: Option<&'static str>,
+}
+
+pub fn vulkan_tuning_advice(vram_total_gb: f64) -> VulkanTuningAdvice {
+    // 8GB 及以下：计算缓冲吃紧，ubatch 减半最直接；16GB+ 保持内核默认。
+    if vram_total_gb > 0.0 && vram_total_gb < 12.0 {
+        VulkanTuningAdvice { ubatch: 256, batch: 512, kv_quant: Some("q8_0") }
+    } else {
+        VulkanTuningAdvice { ubatch: 512, batch: 512, kv_quant: None }
+    }
+}
+
+/// 当前内核是否为 Vulkan 后端（AMD / Intel 通用路线）。
+pub fn is_vulkan_kernel(exe: &str) -> bool {
+    detect_kernel_backend(exe) == KernelBackend::Vulkan
+}
+
 fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
     validate_mtp_config(exe, config)?;
     validate_drafter_config(exe, config)?;
@@ -2257,6 +2367,18 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     validate_backend_support(exe, config)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
+    // 新内核参数按二进制声明探测：老内核/自编译内核遇到未知旗标会直接退出，
+    // 探测不到时忽略设置并写日志，不把用户卡在参数解析阶段。
+    let new_kernel_args = kernel_arg_support(
+        exe,
+        &[
+            "--moe-cache-mib",
+            "--n-cpu-ffn",
+            "--lazy-mode",
+            "--kv-unified-per-slot",
+            "--spec-draft-n-ubatch",
+        ],
+    );
     let selected_device = if config.no_cuda {
         Some("none".to_string())
     } else {
@@ -2319,6 +2441,14 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    // 新版 llama.cpp 把模型/KV/计算缓冲的明细放在 info 级（3）之上；
+    // 显存记录依赖 load_tensors / llama_kv_cache / sched_reserve 行，必须显式开到 4。
+    // 只影响日志体积，不改变实际分配与推理参数。
+    if kernel_supports_feature(exe.as_ref(), "--log-verbosity") {
+        cmd.arg("--log-verbosity").arg("4");
+    } else {
+        add_log("[server] 当前内核不支持 --log-verbosity，本次启动记录将缺少缓冲分项。");
+    }
     cmd.arg("--flash-attn")
         .arg(if config.flash_attn { "on" } else { "off" });
     if !config.kv_offload {
@@ -2330,6 +2460,37 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         "--no-kv-unified"
     });
     apply_mmap_mlock_args(&mut cmd, exe, config);
+    if config.swa_full {
+        cmd.arg("--swa-full");
+    }
+    if config.kv_unified_per_slot > 0 {
+        append_new_kernel_arg(
+            &mut cmd,
+            new_kernel_args[3],
+            "--kv-unified-per-slot",
+            Some(config.kv_unified_per_slot.to_string()),
+        );
+    }
+    if let Some(cache_ram_mb) = config.cache_ram_mb {
+        cmd.arg("--cache-ram").arg(cache_ram_mb.to_string());
+    }
+    if let Some(mode) = config
+        .lazy_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| *mode == "on" || *mode == "off")
+    {
+        if config.mmap {
+            append_new_kernel_arg(
+                &mut cmd,
+                new_kernel_args[2],
+                "--lazy-mode",
+                Some(mode.to_string()),
+            );
+        } else {
+            add_log("[server] --lazy-mode 需要 mmap，当前已关闭 mmap，设置未生效。");
+        }
+    }
     if config.no_warmup {
         cmd.arg("--no-warmup");
     }
@@ -2344,6 +2505,22 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     }
     if config.ncmoe > 0 {
         cmd.arg("-ncmoe").arg(config.ncmoe.to_string());
+    }
+    if config.n_cpu_ffn > 0 {
+        append_new_kernel_arg(
+            &mut cmd,
+            new_kernel_args[1],
+            "--n-cpu-ffn",
+            Some(config.n_cpu_ffn.to_string()),
+        );
+    }
+    if config.moe_cache_mib > 0 {
+        append_new_kernel_arg(
+            &mut cmd,
+            new_kernel_args[0],
+            "--moe-cache-mib",
+            Some(config.moe_cache_mib.to_string()),
+        );
     }
     append_server_tools(
         &mut cmd,
@@ -2394,7 +2571,11 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
         .filter(|path| !path.is_empty())
     {
         cmd.arg("--mmproj").arg(mmproj_path);
-        cmd.arg("--mmproj-offload");
+        cmd.arg(if config.mmproj_offload {
+            "--mmproj-offload"
+        } else {
+            "--no-mmproj-offload"
+        });
     }
     // 推测解码侧车：同一时刻只挂一个草稿模型，优先级 MTP > DSpark > DFlash。
     let mtp_draft_path = config
@@ -2454,6 +2635,14 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     // 草稿深度（--spec-draft-n-max）只在用户显式设置时传递，保持内核默认行为。
     if let Some(n_max) = config.spec_draft_n_max.filter(|value| *value > 0) {
         cmd.arg("--spec-draft-n-max").arg(n_max.to_string());
+    }
+    if config.spec_draft_n_ubatch > 0 {
+        append_new_kernel_arg(
+            &mut cmd,
+            new_kernel_args[4],
+            "--spec-draft-n-ubatch",
+            Some(config.spec_draft_n_ubatch.to_string()),
+        );
     }
 
     let command_line = build_redacted_command_line(exe, &cmd);
@@ -3502,6 +3691,26 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_tuning_advice_scales_with_vram() {
+        // 8GB 级卡：降 ubatch 省计算缓冲，建议量化 KV。
+        let small = super::vulkan_tuning_advice(8.0);
+        assert_eq!(small.ubatch, 256);
+        assert_eq!(small.batch, 512);
+        assert_eq!(small.kv_quant, Some("q8_0"));
+        // 12GB 及以上：保持内核默认，不强行改参数。
+        let mid = super::vulkan_tuning_advice(12.0);
+        assert_eq!(mid.ubatch, 512);
+        assert_eq!(mid.kv_quant, None);
+        let big = super::vulkan_tuning_advice(24.0);
+        assert_eq!(big.ubatch, 512);
+        assert_eq!(big.kv_quant, None);
+        // 读不到显存时不给激进建议。
+        let unknown = super::vulkan_tuning_advice(0.0);
+        assert_eq!(unknown.ubatch, 512);
+        assert_eq!(unknown.kv_quant, None);
+    }
+
+    #[test]
     fn pick_offload_device_replaces_cuda_on_vulkan_runtime() {
         assert_eq!(
             super::pick_offload_device(&["Vulkan0".to_string()], Some("CUDA0")).as_deref(),
@@ -3893,6 +4102,39 @@ mod tests {
         assert_eq!(load_mode_value(true, true), "mmap+mlock");
         assert_eq!(load_mode_value(false, true), "mlock");
         assert_eq!(load_mode_value(false, false), "none");
+    }
+
+    #[test]
+    fn new_kernel_args_are_gated_by_binary_markers() {
+        let id = TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-llm-new-args-runtime-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).expect("create synthetic runtime");
+        let exe = dir.join("llama-server.exe");
+        std::fs::write(&exe, b"server").expect("write server");
+        let flags = ["--moe-cache-mib", "--n-cpu-ffn", "--lazy-mode"];
+
+        // 老内核没有标记：一个都不能放行。
+        assert_eq!(
+            kernel_arg_support(exe.to_str().expect("runtime path"), &flags),
+            vec![false, false, false]
+        );
+
+        // 标记只在 llama-common.dll 里也要能探测到。
+        std::fs::write(
+            dir.join("llama-common.dll"),
+            b"--moe-cache-mib N --n-cpu-ffn N --lazy-mode MODE",
+        )
+        .expect("write common library");
+        assert_eq!(
+            kernel_arg_support(exe.to_str().expect("runtime path"), &flags),
+            vec![true, true, true]
+        );
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
