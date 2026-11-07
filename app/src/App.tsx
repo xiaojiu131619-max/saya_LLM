@@ -2,6 +2,7 @@
 import { MotionConfig } from 'framer-motion';
 import { AppProvider, useApp } from '@/context/AppContext';
 import { PiRuntimeProvider } from '@/features/pi/PiRuntimeContext';
+import StorageWarningBanner from '@/components/StorageWarningBanner';
 import WorkspaceShell from '@/features/workspace/WorkspaceShell';
 import LlamaNativePreviewPage from '@/pages/LlamaNativePreviewPage';
 
@@ -71,6 +72,7 @@ export default function App() {
     <AppProvider>
       <AppErrorBoundary>
         <AppContent />
+        <StorageWarningBanner />
       </AppErrorBoundary>
     </AppProvider>
   );

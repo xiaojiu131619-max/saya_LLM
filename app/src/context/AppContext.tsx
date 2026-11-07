@@ -196,6 +196,9 @@ const initialSystemStats: SystemStats = {
 
 const STORAGE_KEY = 'agent-llm-local-state-v1';
 
+/** 持久化失败（如 localStorage 配额写满）时广播的全局事件；StorageWarningBanner 监听。 */
+export const STORAGE_WARNING_EVENT = 'agent-llm:storage-warning';
+
 /** 聊天侧边栏宽度的默认值与上下限（拖拽分隔条时同样按这套值收口）。 */
 export const SIDEBAR_DEFAULT_WIDTH = 288;
 export const SIDEBAR_MIN_WIDTH = 200;
@@ -1797,7 +1800,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       } catch {
-        // Local persistence is best-effort; the app still runs without it.
+        // 配额写满不能静默吞掉：聊天历史是本地 AI 客户端的核心资产。先做一次
+        // 无损降级——丢掉可再生的用量统计再试；仍失败就广播全局警告条，
+        // 明确告诉用户这次没有存进去，而不是让数据无声消失。
+        try {
+          const degraded: StoredAppState = { ...next, usageByModel: {}, recentModelUsage: {} };
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(degraded));
+          window.dispatchEvent(new CustomEvent<string>(STORAGE_WARNING_EVENT, {
+            detail: '本地存储已写满，本次已跳过用量统计的保存。请清理或导出旧会话，否则新的聊天记录可能无法保存。',
+          }));
+        } catch {
+          window.dispatchEvent(new CustomEvent<string>(STORAGE_WARNING_EVENT, {
+            detail: '本地存储已写满，本次聊天记录与设置未能保存。请导出重要会话，并清理旧会话后重试。',
+          }));
+        }
       }
     };
   });
