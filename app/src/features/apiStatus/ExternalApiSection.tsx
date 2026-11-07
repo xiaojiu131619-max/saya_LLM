@@ -88,6 +88,30 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
   const handleApiEnabledChange = (enabled: boolean) => {
     // 监听地址不再单独配置：开启对外自动监听 0.0.0.0（局域网可访问），关闭则回落 127.0.0.1（仅本机）。
     const host = enabled ? '0.0.0.0' : '127.0.0.1';
+    if (enabled && !state.apiConfig.hasApiKey) {
+      // 开放局域网前强制配好鉴权：开启即监听 0.0.0.0，没有 Key 等于对全网裸奔。
+      // 这里先自动生成一把 Key 再放行开关；生成失败则保持关闭，绝不无鉴权对外开放。
+      if (!isDesktopRuntime()) {
+        setMessage('请在 Tauri 桌面版中开启对外 API（需要先在系统凭据管理器生成 API Key）。');
+        return;
+      }
+      const generatedKey = generateApiKey();
+      void createExternalApiKey(generatedKey)
+        .then(() => {
+          setNewApiKey(generatedKey);
+          dispatch(
+            state.serverRunning
+              ? { type: 'SET_API_CONFIG', payload: { enabled: true, host, hasApiKey: true, pendingApiKey: generatedKey } }
+              : { type: 'SET_API_CONFIG', payload: { enabled: true, host, hasApiKey: true, apiKey: generatedKey, pendingApiKey: undefined } },
+          );
+          setMessage('已开启对外 API，并自动生成了 API Key（见下方，请妥善保存）。外部客户端必须携带该 Key 鉴权；重新加载模型后生效。');
+          void persistRuntimeSettings(state.serverPort, { ...state.apiConfig, enabled: true, host, hasApiKey: true });
+        })
+        .catch((error) => {
+          setMessage(`自动生成 API Key 失败：${String(error)}。已保持对外 API 关闭；请重试，或先手动生成 Key 再开启。`);
+        });
+      return;
+    }
     updateApiConfig({ enabled, host }, true);
   };
 
@@ -123,6 +147,11 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
   };
 
   const handleDeleteApiKey = () => {
+    if (state.apiConfig.enabled) {
+      // 对外 API 开着时撤销 Key = 下次加载模型起局域网无鉴权裸奔，这里直接拦下。
+      setMessage('对外 API 开启期间不能撤销 Key（否则局域网访问将不再鉴权）。请先关闭对外 API，或用「重新申请」更换 Key。');
+      return;
+    }
     if (!isDesktopRuntime()) {
       setMessage('请在 Tauri 桌面版中撤销 API Key。');
       return;
@@ -201,7 +230,7 @@ export default function ExternalApiSection({ embedded = false }: { embedded?: bo
               <div className="divide-y divide-[var(--border-subtle)]">
               <ApiSettingRow
                 label="释放 OpenAI / Anthropic 兼容 API"
-                description={state.apiConfig.enabled ? `开启后局域网设备可访问，下一次加载模型时监听 0.0.0.0:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
+                description={state.apiConfig.enabled ? `开启后局域网设备可访问（未设置 Key 会自动生成），下一次加载模型时监听 0.0.0.0:${state.serverPort}` : '关闭时仅本机 127.0.0.1 可访问'}
               >
                 <ToggleSwitch
                   checked={state.apiConfig.enabled}
