@@ -123,7 +123,11 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<PiAgentStatus | null>(null);
   const [config, setConfig] = useState<PiConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pendingPermission, setPendingPermission] = useState<PiPermissionRequest | null>(null);
+  // 权限请求必须排队而不是单槽覆盖：canvas_run 等工具在独立线程等待确认时，
+  // 工具桥事件循环仍会继续处理下一个调用并再次弹出确认。单槽会让先到的请求
+  // 被顶掉、120 秒后静默拒绝，用户也可能批准错对象。
+  const [permissionQueue, setPermissionQueue] = useState<PiPermissionRequest[]>([]);
+  const pendingPermission = permissionQueue[0] ?? null;
   const [startingSessionId, setStartingSessionId] = useState<string | null>(null);
   const runRef = useRef<PiRunState | null>(null);
   const eventBufferRef = useRef<PiAgentEventPayload[]>([]);
@@ -613,23 +617,30 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
       onReady: (next) => setStatus(next),
       onStopped: () => {
         setStatus((prev) => (prev ? { ...prev, running: false, pid: null } : prev));
+        // 停止后所有挂起确认一并失效（后端 drain 也会补发过期事件，这里兜底清空）。
+        setPermissionQueue([]);
         void finalizeRun('aborted');
       },
       onExit: () => {
         setStatus((prev) => (prev ? { ...prev, running: false, pid: null } : prev));
+        setPermissionQueue([]);
         void finalizeRun('aborted');
       },
       onError: ({ message }) => {
         setError(message ?? 'Pi 运行出错');
+        setPermissionQueue([]);
         const run = runRef.current;
         if (run) pushStep(run, `Pi 错误：${message ?? '未知错误'}`, 'err', 'error');
         void finalizeRun('aborted');
       },
-      onPermission: (request) => setPendingPermission(request),
+      onPermission: (request) =>
+        setPermissionQueue((prev) =>
+          prev.some((item) => item.id === request.id) ? prev : [...prev, request],
+        ),
       // 后端等到超时就会按「拒绝」处理并回一条失效事件：弹窗要自己关掉，
       // 否则用户点「允许」只会得到一句「权限回传失败」。
       onPermissionExpired: ({ id, tool }) => {
-        setPendingPermission((prev) => (prev && prev.id === id ? null : prev));
+        setPermissionQueue((prev) => prev.filter((item) => item.id !== id));
         setError(`Pi 的「${tool}」权限请求已超时，已自动拒绝。`);
       },
     });
@@ -794,9 +805,10 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
 
   const answerPermission = useCallback(
     async (allow: boolean) => {
-      const request = pendingPermission;
-      setPendingPermission(null);
+      // 只回答队首；答完出队，下一条自动成为弹窗内容。
+      const request = permissionQueue[0] ?? null;
       if (!request) return;
+      setPermissionQueue((prev) => prev.filter((item) => item.id !== request.id));
       try {
         await piAgentPermissionAnswer(request.id, allow);
         const run = runRef.current;
@@ -812,7 +824,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         setError(`权限回传失败：${String(reason instanceof Error ? reason.message : reason)}`);
       }
     },
-    [pendingPermission, pushStep],
+    [permissionQueue, pushStep],
   );
 
   const value = useMemo<PiRuntimeValue>(
@@ -863,7 +875,16 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
             ''
           )
         }
-        bullets={pendingPermission ? [`当前权限档：${pendingPermission.mode}`] : undefined}
+        bullets={
+          pendingPermission
+            ? [
+                `当前权限档：${pendingPermission.mode}`,
+                ...(permissionQueue.length > 1
+                  ? [`排队中还有 ${permissionQueue.length - 1} 个请求`]
+                  : []),
+              ]
+            : undefined
+        }
         confirmLabel="允许"
         cancelLabel="拒绝"
         tone="warning"
