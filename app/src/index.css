@@ -5,20 +5,11 @@
 /* =============================================================
    随包字体（OFL-1.1）
    - 得意黑 Smiley Sans Oblique：页面主标题 / 展示标题
-   - 破晓像素 PoxiaoPixel：12px 固定短标签（状态、徽章）
    桌面端离线可用，禁止改成 CDN 引用（见 docs/guides/UI_DESIGN_GUIDE.md D-58）。
    ============================================================= */
 @font-face {
   font-family: "Smiley Sans Oblique";
   src: url("./assets/fonts/smiley-sans-oblique.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Poxiao Pixel";
-  src: url("./assets/fonts/poxiao-pixel-12px.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -40,8 +31,6 @@
       ui-monospace, "SFMono-Regular", "Consolas", monospace;
     /* 展示字体：只给页面主标题与展示标题；动态文本缺字时回退 Segoe UI。 */
     --font-brand: "Smiley Sans Oblique", var(--font-sans);
-    /* 像素字体：只给 12px 及整数倍的固定短标签。 */
-    --font-pixel: "Poxiao Pixel", var(--font-mono);
 
     --radius-sm: 4px;
     --radius-md: 4px;
@@ -66,8 +55,8 @@
     --font-subtitle: calc(1rem * var(--ui-font-scale, 1));
     --font-title: calc(1.125rem * var(--ui-font-scale, 1));
     --font-display: calc(1.375rem * var(--ui-font-scale, 1));
-    /* 页面大标题：比区块标题明显高一档，对应参考站 28px 左右的编辑式标题。 */
-    --font-page-title: calc(1.75rem * var(--ui-font-scale, 1));
+    /* 页面大标题：32px，比区块标题明显高一档；窄窗仍由容器自适应换行。 */
+    --font-page-title: calc(2rem * var(--ui-font-scale, 1));
     --font-hero: calc(2.5rem * var(--ui-font-scale, 1));
 
     /* 行高：界面 1.5；中文长段落 1.78（原先 leading-8 = 2.0 偏松）；代码 1.6。 */
@@ -422,9 +411,7 @@
   }
 
   /* 页面主标题：PageHeader 的 h1 消费这个类。
-     此前该类全仓库未定义，导致 11 个页面的主标题无任何规则、
-     实际继承 body 的 14px/400——比同页 15px/600 的区块标题更小更轻。
-     层级口径：页面主标题 (--font-title 18px/600) > 区块标题 (15px/600) > 正文 (14px)。
+     层级口径：页面主标题 (--font-page-title 32px/600) > 区块标题 (16px/600) > 正文 (14px)。
      字体走展示字体；缺字自动回退 Segoe UI（D-59）。 */
   .page-title {
     font-family: var(--font-brand);
@@ -436,29 +423,29 @@
     color: var(--text-primary);
   }
 
-  /* 大标题统一走展示字体（得意黑），英文自动大写；小标题走像素字体，正文回原字体。 */
+  /* 大标题统一走展示字体（得意黑），英文自动大写；正文与小标题回正文字体。 */
   .heading-brand {
     font-family: var(--font-brand);
     text-transform: uppercase;
     letter-spacing: var(--tracking-tight);
   }
 
+  /* 标题不再使用点阵字体；h2/h3 继承正文，避免像素字缺字与模糊。 */
   h2,
   h3 {
-    font-family: var(--font-pixel);
-    letter-spacing: 0;
+    font-family: var(--font-sans);
+    letter-spacing: normal;
   }
 
-  /* 模型名属于内容，不是小标题：保持原字体，避免像素字缺字与长名称模糊。 */
+  /* 模型名属于内容，不是小标题：保持原字体，避免展示字体缺字与长名称模糊。 */
   .model-tile h3,
   .heading-plain {
     font-family: var(--font-sans);
     letter-spacing: normal;
   }
 
-  /* 需要单独指定字体时用这两个类，不要再写 font-family 字面量。 */
+  /* 需要单独指定字体时用这个类，不要再写 font-family 字面量。 */
   .font-brand { font-family: var(--font-brand); }
-  .font-pixel { font-family: var(--font-pixel); letter-spacing: 0; }
 
   .panel {
     border: 1px solid var(--border-subtle);

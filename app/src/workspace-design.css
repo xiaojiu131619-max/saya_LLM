@@ -6,8 +6,8 @@
 .model-library-header { padding-block: 20px; background: var(--app-bg); border-bottom-color: var(--border-subtle); }
 /* 原为 var(--font-page)：该令牌全仓库无定义，整条 font-size 声明作废，
    标题回落到继承的 14px（JSX 里写的 text-xl/font-bold 也被这条覆盖吃掉）。
-   改用已定义的 --font-title，与 .page-title 保持同一档。 */
-.model-library-header h1 { font-size: var(--font-title); font-weight: 600; letter-spacing: var(--tracking-tight); }
+   改用 --font-page-title，与 .page-title 保持同一档 32px。 */
+.model-library-header h1 { font-size: var(--font-page-title); font-weight: 600; letter-spacing: var(--tracking-tight); }
 .model-library-header .workspace-page-icon { margin-right: 4px; }
 .model-library-header p { margin-top: 6px; }
 .model-library-count { padding-left: 24px; border-left: 1px solid var(--border-subtle); }
@@ -23,9 +23,8 @@
 .model-tile--loaded { border-color: var(--state-success-border); }
 .model-tile--selected, .model-tile--selected:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
 .model-tile-specs { background: color-mix(in srgb, var(--surface-muted) 55%, var(--surface)); }
-/* 状态标签是固定的短文案（已加载/加载中/待机…），走破晓像素 12px；
-   letter-spacing 归零，像素字距被拉伸会失去点阵锐度。 */
-.model-tile-status { color: var(--text-secondary); font-family: var(--font-pixel); letter-spacing: 0; }
+/* 状态标签是固定的短文案（已加载/加载中/待机…），走正文字体，避免点阵字缺字。 */
+.model-tile-status { color: var(--text-secondary); font-family: var(--font-sans); font-weight: 600; letter-spacing: 0; }
 .model-tile-status--loaded { color: var(--state-success); }
 .model-tile-status--loading { color: var(--state-warning); }
 .model-tile-status--error { color: var(--state-danger); }

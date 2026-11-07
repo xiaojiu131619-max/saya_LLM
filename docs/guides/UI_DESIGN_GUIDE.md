@@ -8,7 +8,7 @@
 > - 整体风格：<https://www.stylekit.top/zh/styles/fluent-design>
 > - 模型卡片：<https://www.stylekit.top/zh/styles/quantized-line-field>
 > - 数据/仪表盘页：<https://www.stylekit.top/zh/styles/dashboard-layout>
-> - 字体：Smiley Sans（<https://github.com/atelier-anchor/smiley-sans>）、破晓像素（<https://fontpixel.com/zh/fonts/poxiao-pixel/>）
+> - 字体：Smiley Sans（<https://github.com/atelier-anchor/smiley-sans>）
 > - 图标：<https://lobehub.com/zh/icons>
 > - 动效：<https://motion.dev/>
 
@@ -66,12 +66,12 @@ Fluent UI 官方仓库是**主要依据**：数值以 `packages/tokens/src/globa
 | --- | --- | --- | --- |
 | 圆角 | 2 / 4 / 6 / 8 / 12 / 16 / 24 … | `--radius-sm/md`=4、`--radius-lg`=8、`--radius-field`=10、`--radius-panel`=14、`--radius-bubble`=16 | 4/8/16 与 Fluent 的 Medium/XLarge/3XLarge 对齐；10/14 是项目自定档，保留，不再新增 |
 | 间距 | 0 / 2 / 4 / 6 / 8 / 10 / 12 / 16 / 20 / 24 / 32 | 同左，全部采用（含 2、6、10 三个 nudge 档） | 采用完整 Fluent 刻度 |
-| 字号 | 10 / 12 / 14 / 16 / 20 / 24 / 28 / 32 / 40 / 68 | `--font-*` = 10/11/12/14/15/16/18/22/40 | 保留项目刻度；18 与 22 是项目细分档，属有意偏离 |
+| 字号 | 10 / 12 / 14 / 16 / 20 / 24 / 28 / 32 / 40 / 68 | `--font-*` = 10/11/12/14/15/16/18/22/32/40 | 保留项目刻度；18、22、32 是项目细分档，属有意偏离 |
 | 描边 | 1 / 2 / 3 / 4 | 只用 1（常规）与 2（选中/焦点） | 3、4 禁用 |
 | 时长 | 50 / 100 / 150 / 200 / 250 / 300 / 400 / 500 | 见 D-16 | 只用到 300 |
 | 曲线 | `curveEasyEase`、`curveDecelerateMin`、`curveAccelerateMax` 等 9 条 | 见 D-17 | 采用 3 条 |
 
-**D-54** 字号保留项目现有刻度（18/22），不迁到 Fluent 的 20/24/28；迁移会造成全站字号跳动，收益不足。
+**D-54** 字号保留项目现有刻度（18/22/32），不迁到 Fluent 的 20/24/28；迁移会造成全站字号跳动，收益不足。
 **D-55** 描边只用 1px；选中与焦点用 2px。禁止 Fluent 的 `strokeWidthThicker(3)` / `Thickest(4)`。
 **D-56** Fluent 的 `display`（68px）仅允许出现在启动页/空态大标题，全站常规页面一律不用。
 
@@ -101,22 +101,22 @@ Fluent UI 官方仓库是**主要依据**：数值以 `packages/tokens/src/globa
 
 ---
 
-## 2. 字体：四级分工，不许混排
+## 2. 字体：三层分工，不许混排
 
 | 角色 | 字体 | 用法 | 限制 |
 | --- | --- | --- | --- |
-| UI 正文 / 标签 | `--font-sans`（Segoe UI Variable → Microsoft YaHei UI） | 全站默认 | 默认字体，不要改 |
-| 展示标题 | Smiley Sans（得意黑） | 页面 Hero、空态大标题、版本/品牌字样 | 仅 ≥ 20px；只做展示 |
-| 像素标签 | 破晓像素 PoxiaoPixel | 徽章、状态胶囊、终端感小标签 | 仅 12px 及 12 的整数倍 |
+| UI 正文 / 标题 / 标签 | `--font-sans`（Segoe UI Variable → Microsoft YaHei UI） | 全站默认；对话页、状态标签、小标题 | 默认字体，不要改 |
+| 展示标题 | Smiley Sans（得意黑） | 页面 Hero、空态大标题、版本/品牌字样 | 仅 ≥ 28px；只做展示，不进入对话 |
 | 等宽 / 指标 | `--font-mono`（Cascadia Mono） | 数值、坐标、日志、tok/s | 配合 `tabular-nums` |
 
-**D-07** 字号只能取令牌：`--font-micro(10) / eyebrow(11) / caption(12) / body(14) / chat(15) / subtitle(16) / title(18) / display(22) / hero(40)`。禁止 `text-[Npx]`、禁止内联 `fontSize`（图表库内部除外）。
-**D-08** Smiley Sans 有整体倾斜与手绘感，上游明确**不适合正文、代码、手机界面**。因此只用于 ≥18px 的页面主标题（`.page-title`）、展示标题（`.display-title`）与空态大标题；不用于正文、按钮、表单、列表行、表格与数字，同一行不与 Segoe UI 混排。
-**D-09** 破晓像素是 12px 设计尺寸的点阵字体，必须在 12/24/36px 使用；非整数倍会模糊。只用于**固定短文本**（如「已加载」「GPU」）；模型名、路径、错误信息这类长度不可控或含生僻字的内容禁止使用（GBK 覆盖率 59.74%）。
+**D-07** 字号只能取令牌：`--font-micro(10) / eyebrow(11) / caption(12) / body(14) / chat(15) / subtitle(16) / title(18) / display(22) / page-title(32) / hero(40)`。禁止 `text-[Npx]`、禁止内联 `fontSize`（图表库内部除外）。
+**D-08** Smiley Sans 有整体倾斜与手绘感，上游明确**不适合正文、代码、手机界面**。因此只用于 ≥28px 的页面主标题（`.page-title`）、展示标题（`.display-title`）与空态大标题；不用于正文、按钮、表单、列表行、表格、数字、对话标题或对话空态，同一行不与 Segoe UI 混排。
+**D-09** 状态标签、徽章与小标题统一走 `--font-sans`（600 字重），**不再使用点阵/像素字体**；固定短文本也不得使用展示字体。
 **D-10** 数字指标一律 `--font-mono` + `font-variant-numeric: tabular-nums`，避免刷新时数字跳动。
-**D-11** 两款新字体以 WOFF2 随包分发，`@font-face` 加 `font-display: swap`；授权均为 OFL-1.1，允许随应用嵌入，但衍生物必须沿用 OFL 并在 `THIRD_PARTY_NOTICES` 声明。
+**D-11** 展示字体以 WOFF2 随包分发，`@font-face` 加 `font-display: swap`；授权为 OFL-1.1，允许随应用嵌入，但衍生物必须沿用 OFL 并在 `THIRD_PARTY_NOTICES` 声明。
 **D-58** 字体文件放 `app/src/assets/fonts/` 并用本地相对路径引用。禁止 CDN / 远程字体：桌面端离线即失效，且引入隐私、CSP 与版本漂移问题。只打包实际用到的字重与字形。
-**D-59** 随包展示字体只用于固定文案；模型名、文件路径、错误信息等用户数据必须回退 `--font-sans`，不得依赖展示字体的字符覆盖（破晓像素 GBK 覆盖仅 59.74%，缺字会显示豆腐块）。
+**D-59** 随包展示字体只用于固定展示文案；模型名、文件路径、错误信息、对话内容必须回退 `--font-sans`，不得依赖展示字体的字符覆盖。
+**D-60** 对话界面（Chat 页头、消息、空态、输入区）禁止使用 `--font-brand`；标题用 `--font-display` + `--font-sans` + 600 字重，避免倾斜展示字影响阅读。
 
 ---
 
@@ -257,21 +257,21 @@ Fluent UI 官方仓库是**主要依据**：数值以 `packages/tokens/src/globa
 
 | 阶段 | 内容 | 风险 |
 | --- | --- | --- |
-| P0 | 补齐令牌：Fluent 动效时长/曲线、间距别名、`--font-brand`、`--font-pixel`；`THIRD_PARTY_NOTICES` | 低 |
-| P1 | 字体落地：Smiley Sans / 破晓像素 WOFF2 + `@font-face` + 展示位替换 | 低（中文字库体积大，需子集化） |
+| P0 | 补齐令牌：Fluent 动效时长/曲线、间距别名、`--font-brand`；`THIRD_PARTY_NOTICES` | 低 |
+| P1 | 字体落地：Smiley Sans WOFF2 + `@font-face` + 展示位替换 | 低（中文字库体积大，需子集化） |
 | P2 | 组件收口：把 `.action-button` / `.form-input` 在主要页面替换手搓样式 | 中（改动面广，逐页验证） |
 | P3 | 模型卡片线场：静态首帧 → 悬停动效 → 性能门（24 张阈值） | 中高（Canvas + 性能） |
 | P4 | 数据页 KPI 栅格统一 | 中 |
 | P5 | 全站体检：按第 10 节逐项过 | 低 |
 
 **已定口径**：
-1. 字体**随包分发**（见 D-58），全量不子集：得意黑 woff2 1.10MB + 破晓像素 woff2 1.21MB，合计约 2.3MB。
+1. 字体**随包分发**（见 D-58），全量不子集：仅得意黑 woff2，约 1.10MB；点阵字体已移除。
 2. 线场采用「单卡动效」形态：全部卡片静态首帧，只有悬停/选中那张运行动效，全局最多 1 个并发（见 D-57）。
 3. 线场配色：自定义 > 图标品牌色 > 家族回退 > `--accent`（见 D-43）。
 
 **已落地（P0/P1）**：
-- `index.css` 新增 `--font-brand` / `--font-pixel` 与 `@font-face`（`app/src/assets/fonts/`）
-- `.page-title` / `.display-title` 切到展示字体；`.model-tile-status` 切到像素字体
+- `index.css` 新增 `--font-brand` 与 `@font-face`（`app/src/assets/fonts/`）；点阵字体已移除
+- `.page-title` / `.display-title` 切到展示字体；`.model-tile-status` 与 `h2/h3` 回到正文字体
 - 新增 Fluent 动效令牌 `--duration-*`、`--curve-*`
 
 **仍待定**：
