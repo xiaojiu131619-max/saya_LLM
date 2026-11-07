@@ -15,12 +15,14 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [USER_MANUAL.md](guides/USER_MANUAL.md) | **拾壹完整使用说明书**：界面地图、上手流程、模型加载参数、对话、Pi、引擎、画布、API、设置中心、工具与 MCP、统计、数据管理、排障手册、已知问题 |
 | [DEVELOPMENT_GUIDE.md](guides/DEVELOPMENT_GUIDE.md) | 本地开发、构建、测试和故障排查 |
 | [UI_DESIGN_GUIDE.md](guides/UI_DESIGN_GUIDE.md) | UI/UX 设计边界与实现规则：分层、令牌、字体、图标、动效、组件、布局、禁止清单 |
 | [CANVAS_MODULE.md](guides/CANVAS_MODULE.md) | 无限画布外挂模块：端口/数据目录、Node 复用、画布包构建与发布 |
 | [TECHNICAL_REPORT.md](guides/TECHNICAL_REPORT.md) | 当前架构、数据流与模块清单 |
 | [SWIFT27B_TUNING.md](guides/SWIFT27B_TUNING.md) | Swift-27B 模型调优依据、A/B 实测数据与已知坑 |
 | [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md) | Agent 阶段 3 的 stdio JSON 行协议契约（本轮仅留档） |
+| [PI_AGENT_GUIDE.md](guides/PI_AGENT_GUIDE.md) | Pi 智能体使用说明书：运行链路、配置、权限档、技能树路由、排障手册、已知限制 |
 
 ## plans/ —— 进行中的计划
 

@@ -10,6 +10,25 @@
 
 ### 变更
 
+- **对外 API 强制鉴权**：开启对外 API（自动监听 `0.0.0.0`）时若未设置 API Key，会先生成一把并存入系统凭据管理器再放行开关，生成失败则保持关闭；对外 API 开启期间禁止撤销 Key（需先关闭对外或用「重新申请」更换），杜绝删 Key 后无鉴权暴露到局域网。
+- **本地存储写满不再静默丢数据**：localStorage 配额失败先降级重试（跳过可再生的用量统计），仍失败时弹出全局警告条说明哪些数据没存上；此前空 catch 让聊天历史无声消失。
+- **Pi 凭据不再长期明文落盘**：运行签名里的 API Key 改为存 64 位 FNV-1a 摘要（此前 Key 原文直接写进 localStorage，升级后首次发送会触发一次 Pi 重启，属预期）；`models.json` 的真实 apiKey 只在 Pi 运行期间落盘，停止或启动失败后擦成 `{{SECRET_PI_API_KEY}}` 占位符（崩溃残留会在下次启动写盘时覆盖）。
+- **Pi 权限确认修复两处**：停止 / 重启 Pi 时，所有挂起的确认弹窗现在会收到 `pi:permission_expired` 并自动关闭（此前只静默拒绝工具线程，弹窗残留，用户再点「允许」只是对着已失效的请求确认）；auto 档执行 Python 前的确认弹窗改为等宽滚动完整展示代码（上限 20000 字符，超出整体拒绝并提示拆分或改用 Full 档），不再截断前 400 字符让用户给看不到的后半段盲签。
+
+- **API 服务页重做为双面板**：新增「实时性能」面板作为默认视图，每秒采样 GPU 负载、显存占用、GPU 温度、系统内存，保留最近 2 分钟历史并绘制趋势曲线，另附显存带宽压力与显存余量两个派生指标；原状态 / 用量 / 连接信息 / 高级设置整体收进「API 服务」面板，页头胶囊切换，「立即检测」并入状态卡标题行。
+- **AMD 显卡专项优化**：新增后端调优建议（`get_backend_tuning_advice`），AMD 卡 + Vulkan 内核时给出物理批处理 / KV 量化建议（显存 <12GB 建议 `-ub 256`、KV `q8_0`），模型加载页顶部展示并可一键应用；显存预测对 Vulkan 后端按 1.45 倍放大计算缓冲；设备详情页显示后端调优卡片（含 ROCm/HIP 支持状态与指引）；AMD 卡装 CUDA 内核时给出明确纠正提示。
+- **字体与标题层级调整**：移除破晓像素字体及其令牌、`@font-face` 与随包文件，状态标签和 `h2/h3` 统一回到正文字体；页面主标题由 28px 提升到 32px，模型库标题同步，标题更明显；对话页页头、空态和消息区不再使用得意黑，改用 sans 22px/600，避免倾斜展示字影响长对话阅读。已同步更新 `docs/guides/UI_DESIGN_GUIDE.md` 的 D-09 / D-60。
+- **显存记录与预测修复**：启动 llama-server 时显式开启日志明细级别，解析 `load_tensors` / `llama_kv_cache` / `sched_reserve` 的模型、KV、计算缓冲；ISWA 的「全注意力 + 滑动窗口」两块 KV 改为分别累加；同参数、同设备、同内核的稳定启动记录可直接把实测总量作为预测值，旧记录只要加载前后采样窗口稳定且参数匹配，也允许退化为总量校准（完整缓冲却仍不可信的记录继续拒绝）。
+- **自动调参改为固定 ctx 求最优**：不再为了跑通而缩短上下文；先按「完整 GPU 卸载 → MoE 专家 / 稠密 FFN 卸载 → 量化 KV → 降低 ngl」探测显存边界，再在同一 ctx 下比较关闭 / MTP / DSpark / DFlash、MoE 专家缓存、草稿深度、批处理 / 物理批处理、KV 类型与 CPU 线程数，最后按生成速度（同速时按更低显存）排序并复测前三名。
+- **新增「设备详情」设置页**：启动调参前探测处理器、物理核心 / 逻辑线程、内存、显卡（NVML/DXGI、显存、温度、驱动）、运行后端、CUDA / SM、内核版本与支持的参数能力、模型目录磁盘余量；页面同时给出 90% 显存预算、可用余量、建议线程数与调参说明。
+- **显存预测计入新参数与草稿模型**：`--moe-cache-mib` 直接计入 GPU 权重侧，`--n-cpu-ffn` 按稠密层权重比例近似扣除，`--swa-full` 按完整上下文计算 SWA KV；扫描器记录 mmproj / MTP / DSpark / DFlash 侧车文件大小，预测时按显存卸载策略计入投影与草稿模型权重、KV/运行时开销，并继续用启动记录校准。
+- **加载参数补齐新版 llama.cpp 可调项**：模型加载页新增稠密 FFN 留在 CPU 的层数（`--n-cpu-ffn`）、MoE 专家 GPU 缓存（`--moe-cache-mib`）、大张量按需读取（`--lazy-mode`）、SWA 完整缓存（`--swa-full`）、每路上下文上限（`--kv-unified-per-slot`）、提示词缓存上限（`--cache-ram`）、草稿上下文批大小（`--spec-draft-n-ubatch`）与多模态投影 GPU 卸载开关。默认值全部保持内核默认；新内核专属参数按二进制标记探测，老内核/自编译内核自动跳过并写日志，不再因未知旗标启动失败。所有加载参数（含既有项）在悬停或键盘聚焦信息图标时显示中文详解，覆盖用途、代价与适用场景。
+- **Agent 工作区成为唯一的权限边界**：Chat 的 Pi 工作区新增工作区切换栏，每个工作区对应一个真实本地文件夹（`lib/workspaces.ts` 持久化）；会话绑定 `workspaceId`，切换工作区即切换目录、会话与权限档。Pi 启动时把工作区绝对路径作为沙箱与 cwd（`workspaceDir`），不再派生 `<workDir>/<session>`；权限三档从 Agent 设置页移到对话输入栏，并在每个工作区记忆。后端新增 `workspace_list_dir` / `workspace_run_command` / `workspace_open_path`，文件与命令仍限制在工作区内。
+- **Pi 模型端点自动对接**：新增 `lib/piEndpoint.ts`，按 NiNfer → Strata → llama-server 的优先级探测正在运行且可对话的引擎，自动填 Base URL、模型与 API Key；`autoEndpoint` 默认开启，引擎切换后下一次发送自动重启 Pi 跟上，不再需要手填端点。自动探测结果不写回 localStorage，避免钉死某一刻的端口。
+- **技能独立成树 + MCP 进入 Pi 工具链**：Agent 页新增「技能」标签，`SkillsPage` 改为技能树（按生成/查询/转发/通用分组、触发词/排除词/工具/正文体量详情、零成本路由试跑）。Pi 扩展在 `session_start` 从宿主桥拉取已连接 MCP 工具并按真实 schema 注册，`mcp__<服务器>__<工具>` 调用回到 Rust 权限层；新增 `run_python` 宿主工具，技能说明里的 `python3` 可直接落到工作区 Python 脚本。工具按钮改为就地浮窗（技能 + MCP 连接状态），不再跳设置页。
+- **对话右侧改为工作展示区**：新增 `ChatWorkPanel`，把原「对话参数」收进「参数」标签，其余为文件树/文本图片 PDF 预览、工作区终端、内置浏览器、画布 iframe。Office 文件不在内置编辑器硬改：用系统 Office 打开，或「交给 Pi」让 docx/xlsx/pptx 技能用 Python 改写。
+- **Pi 浮窗支持截图**：可粘贴/拖入截图（最多 3 张）并连同文本发送，新增「翻译」按钮走视觉模型的截图翻译；设置中心新增空置的「浮窗宠物」占位页。
+- **Pi 设置瘦身**：权限、在线安装/升级/回滚、技能库从 Pi 设置页移除（分别归对话输入栏、核心更新页、技能树页），只保留自动端点、随应用启动、路径探测与运行日志。
 - **dsh（DeepSeek Harness）链路整体下线**：删除 `commands/dsh.rs`、`services/dsh_manager.rs`、`services/dsh_config.rs`、`models/dsh_types.rs` 与 15 条 Tauri 命令注册，`fast27b_bind_dsh` / `strata_bind_dsh` 及其状态字段、`AppConfig.dsh` 配置段、`auto_open_dsh_web` 一并移除。托管 Node 安装能力（画布依赖）拆分到新的 `services/node_installer.rs`，行为不变。release exe 体积 27.49 MB → 26.68 MB；`cargo test --lib` 260 通过（原 268，随 dsh 移走 8 条）。
 - **仓库整理**：删除画布发布用中间产物 `app/dist-canvas/`（4.7 MB，由 `scripts/build-canvas-pack.ps1` 重新生成）与 `.mimosa` 扫描缓存（95 MB）；移除失效的 `npm run eval:v4.2` 脚本项（指向不存在的文件）；`docs/plans/DSH_SPIKE_RECORD.md` 归入 `docs/archive/` 并更新索引；README / CANVAS_MODULE / AGENT_PROTOCOL 中「复用 dsh 托管 Node」「dsh 代码暂留」等已失真的描述同步修正。
 - **WebUI 迁入设置中心并升级为「WebUI 测试」页**：Agent 页的 WebUI 标签移入「设置中心 → WebUI 测试」，保留三后端选择（主模型 / NiNfer / Strata）与官方界面入口；新增「连通性测试」卡，经 Rust 端 `probe_local_openai_api`（仅回环地址、不走系统代理）探测当前后端 `/v1/models`，展示延迟、状态码与模型列表，不受浏览器跨域限制。Agent 页只剩 Pi 与画布两个标签，导航圆点改为跟随 Pi 内核运行状态。
