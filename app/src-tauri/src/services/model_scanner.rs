@@ -64,7 +64,8 @@ fn cache_path(file_path: &Path) -> PathBuf {
 // v27：有完整 dense attention 张量证据时展开标量 KV 头数，补齐 Spark 等模型逐层向量。
 // v28：识别 PrismML 的 `<模型名>-DFlash2-<量化>` 草稿侧车命名，并把 dflash 架构
 // 从独立模型列表中移除；旧缓存未记录 dflash_draft_path，需重扫重新配对。
-const SCANNER_VERSION: u32 = 28;
+// v29：记录 mmproj / MTP / DSpark / DFlash 侧车文件大小，供显存预测计入投影与草稿模型。
+const SCANNER_VERSION: u32 = 29;
 
 fn infer_video_support(
     name: &str,
@@ -856,8 +857,13 @@ fn enriched_metadata_entries(
     entries
 }
 
-pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
-    let metadata = path.metadata().ok()?;
+fn path_size_gb(path: &Path) -> f64 {
+    path.metadata()
+        .map(|meta| (meta.len() as f64 / 1024.0 / 1024.0 / 1024.0 * 100.0).round() / 100.0)
+        .unwrap_or(0.0)
+}
+
+pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {    let metadata = path.metadata().ok()?;
     let split_info = split_gguf_info(path);
     let split_total_size_bytes =
         split_info.and_then(|(_part, count)| split_total_size(path, count));
@@ -962,10 +968,14 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
     let keeps_drafter = model_task == "chat";
     let (
         mmproj_path,
+        mmproj_size_gb,
         mmproj_metadata,
         mtp_draft_path,
+        mtp_draft_size_gb,
         dspark_draft_path,
+        dspark_draft_size_gb,
         dflash_draft_path,
+        dflash_draft_size_gb,
         video_support,
     ) = {
         let mmproj = keeps_mmproj
@@ -986,18 +996,29 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
                 m.mmproj_audio_projector_type.clone(),
             )
         });
+        let mmproj_size = mmproj.as_ref().map(|(path, _)| path_size_gb(Path::new(path))).unwrap_or(0.0);
         let drafter = |kind: &str| {
             keeps_drafter
                 .then(|| find_companion_gguf(path, &name, kind, gguf.as_ref()))
                 .flatten()
-                .map(|(path, _)| path)
+                .map(|(path, _)| {
+                    let size = path_size_gb(Path::new(&path));
+                    (path, size)
+                })
         };
+        let mtp = drafter("mtp");
+        let dspark = drafter("dspark");
+        let dflash = drafter("dflash");
         (
             mmproj.map(|(path, _)| path),
+            mmproj_size,
             mmproj_meta,
-            drafter("mtp"),
-            drafter("dspark"),
-            drafter("dflash"),
+            mtp.as_ref().map(|(path, _)| path.clone()),
+            mtp.map(|(_, size)| size).unwrap_or(0.0),
+            dspark.as_ref().map(|(path, _)| path.clone()),
+            dspark.map(|(_, size)| size).unwrap_or(0.0),
+            dflash.as_ref().map(|(path, _)| path.clone()),
+            dflash.map(|(_, size)| size).unwrap_or(0.0),
             video,
         )
     };
@@ -1077,6 +1098,7 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         tokenizer_eos_id: gguf.as_ref().and_then(|g| g.tokenizer_eos_id),
         tokenizer_pad_id: gguf.as_ref().and_then(|g| g.tokenizer_pad_id),
         mmproj_path,
+        mmproj_size_gb,
         mmproj_supports_vision,
         mmproj_supports_audio,
         mmproj_projector_type,
@@ -1084,8 +1106,11 @@ pub fn parse_model_info_from_path(path: &Path) -> Option<ModelInfo> {
         mmproj_audio_projector_type,
         video_support,
         mtp_draft_path,
+        mtp_draft_size_gb,
         dspark_draft_path,
+        dspark_draft_size_gb,
         dflash_draft_path,
+        dflash_draft_size_gb,
         is_dynamic_quant,
         supports_reasoning,
         gguf_tags,

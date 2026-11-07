@@ -23,6 +23,8 @@ export interface VramPrediction {
 export interface VramEstimateOptions {
   kernelVersion?: string | null;
   effectiveParallel?: number | null;
+  /** 推理后端（CUDA / Vulkan / HIP/ROCm）；Vulkan 的计算缓冲更大。 */
+  backend?: string | null;
 }
 
 export interface VramCalibrationInput {
@@ -33,6 +35,8 @@ export interface VramCalibrationInput {
   uncertaintyGb?: number;
   scratchRatio?: number;
   overallRatio?: number;
+  /** 最近一次同模型、同设备、同参数稳定实测的总显存增量；仅用于完全匹配的配置。 */
+  exactGb?: number;
 }
 
 export const SCRATCH_RATIO_MIN = 0.4;
@@ -145,6 +149,44 @@ export function predictVramUsage(
     const outputRatio = outputOffloaded || (buildNumber == null && ngl > 0) ? 1 : 0;
     rawWeightsGpuGb = Math.min(modelGb, modelGb * (repeatingShare * repeatingRatio + (1 - repeatingShare) * outputRatio));
   }
+  // --moe-cache-mib 是显式申请的 GPU 专家缓存，直接计入权重侧占用。
+  const moeCacheGb = Math.max(0, Math.round(Number(config.moeCacheMib || 0))) / 1024;
+  if (moeCacheGb > 0 && ngl > 0) rawWeightsGpuGb += moeCacheGb;
+  // --n-cpu-ffn：前 N 层稠密 FFN 留在内存。没有独立 FFN 张量分项时按稠密层
+  // 权重的 55% 近似，并在缺失项里标明这是估算。
+  const nCpuFfnLayers = model.modelType === 'dense'
+    ? clamp(Math.round(Number(config.nCpuFfn || 0)), 0, layerCount) : 0;
+  if (nCpuFfnLayers > 0) {
+    if (tensorReady && layerCount > 0) {
+      let removedBytes = 0;
+      for (let index = Math.max(0, gpuStart); index < Math.min(layerCount, nCpuFfnLayers); index += 1) {
+        removedBytes += layout!.layers[index].weight_bytes * 0.55;
+      }
+      rawWeightsGpuGb = Math.max(0, rawWeightsGpuGb - removedBytes / gib);
+    } else if (layerCount > 0) {
+      rawWeightsGpuGb = Math.max(0, rawWeightsGpuGb * (1 - (nCpuFfnLayers / layerCount) * 0.55));
+    }
+    missing.push('dense_ffn_offload');
+  }
+  const specMode = config.speculativeDecoding;
+  const draftSizeGb = specMode === 'dspark' ? Math.max(0, model.dsparkDraftSizeGb ?? 0)
+    : specMode === 'dflash' ? Math.max(0, model.dflashDraftSizeGb ?? 0)
+      : specMode === 'mtp' ? Math.max(0, model.mtpDraftSizeGb ?? 0) : 0;
+  const hasProjector = Boolean(model.mmprojPath && (model.supportsVision || model.supportsAudio));
+  const projectorGb = hasProjector && config.mmprojOffload !== false
+    ? Math.max(0, model.mmprojSizeGb ?? 0) : 0;
+  if (ngl > 0 && projectorGb > 0) {
+    rawWeightsGpuGb += projectorGb;
+    weightTotalGb += projectorGb;
+  } else if (ngl > 0 && hasProjector && config.mmprojOffload !== false) {
+    missing.push('projector_memory');
+  }
+  if (ngl > 0 && specMode !== 'off' && draftSizeGb > 0) {
+    rawWeightsGpuGb += draftSizeGb;
+    weightTotalGb += draftSizeGb;
+  } else if (ngl > 0 && specMode !== 'off' && specMode !== 'mtp') {
+    missing.push('draft_memory');
+  }
 
   const embedding = model.embeddingLength && model.embeddingLength > 0 ? model.embeddingLength : 4096;
   if (!model.embeddingLength && ngl > 0) missing.push('embedding_length');
@@ -182,9 +224,9 @@ export function predictVramUsage(
         const isSwa = swaPatternReady && model.swaLayerPattern![index];
         // -c 是全服务上下文，-np 将它分给槽位，不能再按并发数放大 KV。
         const tokens = contextCapacity;
-        const swaTokens = model.slidingWindow
-          ? Math.ceil(Math.min(contextPerStream, model.slidingWindow * (config.kvUnified ? parallel : 1) + ubatch) / 256) * 256 * (config.kvUnified ? 1 : parallel)
-          : tokens;
+        const swaTokens = config.swaFull || !model.slidingWindow
+          ? tokens
+          : Math.ceil(Math.min(contextPerStream, model.slidingWindow * (config.kvUnified ? parallel : 1) + ubatch) / 256) * 256 * (config.kvUnified ? 1 : parallel);
         const swaKey = model.keyLengthSwa ?? keyLength;
         const swaValue = model.valueLengthSwa ?? model.keyLengthSwa ?? valueLength;
         if (aggregateSwa && model.slidingWindow) {
@@ -202,12 +244,29 @@ export function predictVramUsage(
       if (model.kvHeadsSum != null && !validVector(model.kvHeadsByLayer, layerCount) && offloadedLayers < layerCount) missing.push('kv_heads_by_layer');
     }
   }
+  // 内置 MTP 没有独立草稿文件，预测层会额外申请 KV / 计算图；按主模型逐层 KV
+  // 的比例近似，避免把 MTP 当成零开销。
+  if (ngl > 0 && specMode === 'mtp' && model.hasEmbeddedMtp && (model.nextnPredictLayers ?? 0) > 0
+    && rawKvGb != null && layerCount > 0) {
+    rawKvGb += rawKvGb * Math.min(1, (model.nextnPredictLayers ?? 0) / layerCount);
+    missing.push('draft_memory');
+  }
 
   const graphFactor = clamp((layerCount || 32) / 32, 0.75, 3.5);
-  const graphScratch = ubatch * embedding * 2 * (config.fastAttention ? 18 : 28) * graphFactor / gib;
-  const attentionScratch = config.fastAttention ? 0 : ubatch * Math.min(ctx, 8192) * headCount * 2 / gib;
+  // Vulkan 后端的计算图保存与提交开销更大：同样的 ubatch 下计算缓冲通常比 CUDA
+  // 多 30–60%。按 1.45 倍近似；HIP 与 CUDA 同为专用运行时，不放大。
+  const backend = options?.backend?.trim().toLowerCase() ?? '';
+  const computeScale = backend === 'vulkan' ? 1.45 : 1.0;
+  const graphScratch = ubatch * embedding * 2 * (config.fastAttention ? 18 : 28) * graphFactor * computeScale / gib;
+  const attentionScratch = config.fastAttention ? 0 : ubatch * Math.min(ctx, 8192) * headCount * 2 * computeScale / gib;
   const rawComputeGb = ngl > 0 ? Math.max(0.12, graphScratch + attentionScratch + Math.max(0, parallel - 1) * Math.min(0.18, graphScratch * 0.25)) : 0;
-  const rawRuntimeGb = ngl > 0 ? 0.3 + Math.min(0.85, (layerCount || 32) * 0.006) + 0.04 * (parallel - 1) : 0;
+  let rawRuntimeGb = ngl > 0 ? 0.3 + Math.min(0.85, (layerCount || 32) * 0.006) + 0.04 * (parallel - 1) : 0;
+  if (ngl > 0 && specMode !== 'off') {
+    // 草稿模型/内置 MTP 的上下文、采样与图调度开销；侧车按文件大小给少量比例，
+    // 内置 MTP 用固定小开销，具体以启动记录校准为准。
+    rawRuntimeGb += draftSizeGb > 0 ? 0.15 + draftSizeGb * 0.06 : 0.12;
+    missing.push('draft_memory');
+  }
   if (config.kvCache && ngl > 0 && heads?.some((head) => head === 0) && ['qwen35', 'qwen35moe', 'qwen3next'].includes(model.architecture ?? '')) {
     const stateSize = metadataNumber(model, 'ssm.state_size');
     const innerSize = metadataNumber(model, 'ssm.inner_size');
@@ -239,8 +298,11 @@ export function predictVramUsage(
   const subtotal = weightsGpuGb + (kvGb ?? 0) + computeGb + runtimeGb;
   const uncertainty = calibration?.uncertaintyGb;
   const safetyGb = subtotal > 0 ? Math.max(0.15, subtotal * 0.06, uncertainty != null && Number.isFinite(uncertainty) ? clamp(uncertainty, 0, 4) : 0) : 0;
+  const exactGb = calibration?.exactGb != null && Number.isFinite(calibration.exactGb) && calibration.exactGb >= 0
+    ? calibration.exactGb
+    : null;
   return {
-    totalGb: subtotal + safetyGb,
+    totalGb: exactGb ?? subtotal + safetyGb,
     weightsGpuGb, weightsCpuGb: Math.max(0, weightTotalGb - weightsGpuGb), kvGb, computeGb, runtimeGb, safetyGb,
     offloadRatio, expertGpuRatio, missing: [...new Set(missing)], analyticalGb, empiricalGb,
     rawWeightsGpuGb, rawKvGb, rawComputeGb, rawRuntimeGb,

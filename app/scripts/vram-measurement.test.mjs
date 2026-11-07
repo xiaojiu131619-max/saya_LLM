@@ -244,6 +244,19 @@ test('同上下文最终 KV/compute 行覆盖旧行，跨后端不混合', () =>
   assert.equal(mixed.weights_gb, null);
   assert.equal(mixed.backend, null);
 });
+test('ISWA 的全注意力与滑动窗口 KV 分别累加，不互相覆盖', () => {
+  const parsed = parseVramBuffers([
+    'llama_context: constructing llama_context',
+    'llama_context: n_ctx = 4096',
+    'llama_kv_cache_iswa: creating non-SWA KV cache, size = 4096 cells',
+    'llama_kv_cache: CUDA0 KV buffer size = 512 MiB',
+    'llama_kv_cache_iswa: creating SWA KV cache, size = 2560 cells',
+    'llama_kv_cache: CUDA0 KV buffer size = 256 MiB',
+    'sched_reserve: CUDA0 compute buffer size = 128 MiB',
+  ]);
+  assert.equal(parsed.kv_gb, 0.75);
+  assert.equal(parsed.compute_gb, 0.125);
+});
 test('稳定采样需明确 GPU 参数与权重，缺项返回 unverified 且不输出实测', () => {
   assert.deepEqual(assess(), { quality: 'stable', actualGb: 6 });
   for (const incomplete of [emptyBuffers, ...['context', 'gpu_layers', 'backend', 'weights_gb'].map((key) => ({ ...buffers, [key]: null }))]) {

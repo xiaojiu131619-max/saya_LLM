@@ -136,6 +136,9 @@ pub struct ModelInfo {
     pub tokenizer_pad_id: Option<u64>,
     #[serde(default)]
     pub mmproj_path: Option<String>,
+    /// 多模态投影文件大小（GB）；用于显存预测，0 表示未知。
+    #[serde(default)]
+    pub mmproj_size_gb: f64,
     #[serde(default)]
     pub mmproj_supports_vision: bool,
     #[serde(default)]
@@ -150,12 +153,19 @@ pub struct ModelInfo {
     pub video_support: VideoSupportLevel,
     #[serde(default)]
     pub mtp_draft_path: Option<String>,
+    /// 独立 MTP 草稿头文件大小（GB）；0 表示未知或使用内置 MTP。
+    #[serde(default)]
+    pub mtp_draft_size_gb: f64,
     /// 同目录或 dspark/ 子目录发现的 DSpark 推测解码侧车。
     #[serde(default)]
     pub dspark_draft_path: Option<String>,
+    #[serde(default)]
+    pub dspark_draft_size_gb: f64,
     /// 同目录或 dflash/ 子目录发现的 DFlash 推测解码侧车。
     #[serde(default)]
     pub dflash_draft_path: Option<String>,
+    #[serde(default)]
+    pub dflash_draft_size_gb: f64,
     /// 文件名带 UD- 量化标记（unsloth Dynamic GGUF，按层位宽分配的预量化）。
     #[serde(default)]
     pub is_dynamic_quant: bool,

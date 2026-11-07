@@ -78,6 +78,18 @@ export function vramMeasurementConfig(config: ModelLoadConfig): ModelVramMeasure
     cache_type_k: config.cacheTypeKEnabled ? config.cacheTypeK : 'f16',
     cache_type_v: config.cacheTypeVEnabled ? config.cacheTypeV : 'f16',
     moe_cpu_layers: config.moeCpuLayers,
+    ...(Math.max(0, Math.round(Number(config.nCpuFfn || 0))) > 0
+      ? { n_cpu_ffn: Math.max(0, Math.round(Number(config.nCpuFfn || 0))) }
+      : {}),
+    ...(Math.max(0, Math.round(Number(config.moeCacheMib || 0))) > 0
+      ? { moe_cache_mib: Math.max(0, Math.round(Number(config.moeCacheMib || 0))) }
+      : {}),
+    ...(config.swaFull ? { swa_full: true } : {}),
+    ...(config.mmprojOffload === false ? { mmproj_offload: false } : {}),
+    ...(config.kvUnifiedPerSlotEnabled ? { kv_unified_per_slot: config.kvUnifiedPerSlot } : {}),
+    ...(config.speculativeDecoding !== 'off' && config.specDraftNubatch > 0
+      ? { spec_draft_n_ubatch: Math.max(0, Math.round(Number(config.specDraftNubatch) || 0)) }
+      : {}),
     speculative: config.speculativeDecoding,
     no_warmup: config.noWarmup,
     draft_tokens: config.speculativeDecoding !== 'off' && config.specDraftNMaxEnabled
@@ -113,6 +125,8 @@ interface BufferSet {
   gpu: Map<BufferKind, number>;
   cpu: Set<BufferKind>;
   backends: Set<string>;
+  /** ISWA 等混合缓存会为全注意力 / 滑动窗口各分配一块 KV，按缓存类型累加。 */
+  kvSegments: Map<string, number>;
   context: number | null;
   parallel: number | null;
   serverParallel: number | null;
@@ -120,7 +134,7 @@ interface BufferSet {
   ambiguous: boolean;
 }
 const bufferSet = (): BufferSet => ({
-  gpu: new Map(), cpu: new Set(), backends: new Set(), context: null,
+  gpu: new Map(), cpu: new Set(), backends: new Set(), kvSegments: new Map(), context: null,
   parallel: null, serverParallel: null, gpuLayers: null, ambiguous: false,
 });
 const ansiEscape = new RegExp(String.fromCharCode(27) + '\\[[0-?]*[ -/]*[@-~]', 'g');
@@ -138,6 +152,7 @@ export function parseVramBuffers(logs: string[]): ModelVramMeasurement['buffers'
   let context = contexts[0];
   let projector = false;
   let multiGpu = false;
+  let kvTag: string | null = null;
   for (const raw of logs) {
     for (const line of raw.replace(ansiEscape, '').split(/\r?\n/)) {
       if (/\bfitting params\b|\bllama_params_fit(?:_impl)?\b.*\b(?:trying|retrying|attempt)\b|\bretrying\b|\btrying again\b|\bCPU fallback\b/i.test(line)) {
@@ -147,6 +162,7 @@ export function parseVramBuffers(logs: string[]): ModelVramMeasurement['buffers'
         context = contexts[0];
         projector = false;
         multiGpu = false;
+        kvTag = null;
       }
       if (/\b(?:CUDA|Vulkan|ROCm|Hip)[1-9]\d*\b/i.test(line)) multiGpu = true;
       const isProjector = /\b(?:clip_model_load\w*|mtmd\w*|mmproj)\b/i.test(line);
@@ -174,6 +190,12 @@ export function parseVramBuffers(logs: string[]): ModelVramMeasurement['buffers'
           context = bufferSet();
           contexts.push(context);
         }
+        kvTag = null;
+      }
+      if (/\bllama_kv_cache_iswa\s*:\s*creating\s+non-SWA KV cache\b/i.test(line)) {
+        kvTag = 'non-swa';
+      } else if (/\bllama_kv_cache_iswa\s*:\s*creating\s+SWA KV cache\b/i.test(line)) {
+        kvTag = 'swa';
       }
       if (ctx) context.context = Number(ctx[1]);
       const seqMax = /\bllama_context\s*:\s*n_seq_max\s*=\s*(\d+)\b(?!\.)/i.exec(line);
@@ -196,7 +218,12 @@ export function parseVramBuffers(logs: string[]): ModelVramMeasurement['buffers'
         if (set.backends.size && !set.backends.has(backend)) set.ambiguous = true;
         if (kind === 'model' && set.gpu.has(kind) && set.gpu.get(kind) !== size) set.ambiguous = true;
         set.backends.add(backend);
-        set.gpu.set(kind, size);
+        if (kind === 'kv' && kvTag) {
+          set.kvSegments.set(kvTag, size);
+          set.gpu.set(kind, [...set.kvSegments.values()].reduce((sum, value) => sum + value, 0));
+        } else {
+          set.gpu.set(kind, size);
+        }
       } else if (/^(?:CPU(?:\d+|_Mapped|_Host)?|(?:CUDA|Vulkan|ROCm|Hip)_Host)$/i.test(buffer[1])) {
         set.cpu.add(kind);
       }

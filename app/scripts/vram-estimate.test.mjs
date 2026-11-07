@@ -411,9 +411,13 @@ function assessRecord(record, measuredConfig = config, target = model) {
   });
 }
 
-test('校准至少需要两条同参数、同 model/GPU/kernel 的 stable 完整记录', () => {
+test('同参数单条启动记录即可校准总显存，多条记录才生成分项系数', () => {
   assertUnmatched(calibrate([]));
-  assertUnmatched(calibrate([launchRecord()]));
+  const single = calibrate([launchRecord()]);
+  assert.equal(single.matched, true);
+  assert.equal(single.samples, 1);
+  assert.equal(single.confidence, 'limited');
+  near(single.exactGb, 1.75 + 0.0234375 + 0.2 + 0.5);
   const records = stablePair();
   const saved = structuredClone(records);
   for (const record of records) {
@@ -456,6 +460,21 @@ test('旧记录缺 measurement 即使总量很低也不污染新校准', () => {
   assert.equal(value.samples, 2);
   assert.equal(value.legacy, 2);
   for (const key of ['weightsRatio', 'kvRatio', 'computeRatio', 'runtimeOffsetGb', 'uncertaintyGb']) near(value[key], clean[key], key);
+});
+test('旧记录缺缓冲分项但采样稳定时，按总量精确校准', () => {
+  const legacy = launchRecord();
+  legacy.vram_gb = null;
+  legacy.vram_measurement.quality = 'unverified';
+  legacy.vram_measurement.buffers = {
+    weights_gb: null, kv_gb: null, compute_gb: null, context: null,
+    gpu_layers: null, backend: null, parallel: null,
+  };
+  const result = calibrate([legacy]);
+  assert.equal(result.matched, true);
+  assert.equal(result.samples, 1);
+  near(result.exactGb, 1.75 + 0.0234375 + 0.2 + 0.5);
+  const calibrated = predict(model, {}, MODERN_KERNEL, result);
+  near(calibrated.totalGb, result.exactGb);
 });
 for (const quality of ['adapted', 'contaminated', 'unverified']) {
   test(`quality=${quality} 记录拒绝进入校准`, () => {
@@ -599,7 +618,11 @@ test('自动并发按日志有效槽数预测，缺证据不校准且不混合�
   assert.equal(isolated.samples, 2);
   assert.equal(isolated.rejected, 2);
   assert.equal(isolated.effectiveParallel, 4);
-  assertUnmatched(calibrate([three[0], four[0]], automatic));
+  const isolatedSingle = calibrate([three[0], four[0]], automatic);
+  assert.equal(isolatedSingle.matched, true);
+  assert.equal(isolatedSingle.samples, 1);
+  assert.equal(isolatedSingle.effectiveParallel, 4);
+  near(isolatedSingle.exactGb, three[0].vram_gb);
 });
 
 test('无 hardware 时也不合并不同 GPU、容量、kernel 或 backend 的记录', () => {
@@ -614,7 +637,9 @@ test('无 hardware 时也不合并不同 GPU、容量、kernel 或 backend 的�
     assert.equal(value.rejected, 2);
     near(value.weightsRatio, 1.1, '只用最新同环境组，不平均两组 GPU 权重');
     const isolatedSingles = computeVramCalibration(model, [launchRecord(1), alternate[0]], config);
-    assertUnmatched(isolatedSingles);
+    assert.equal(isolatedSingles.matched, true);
+    assert.equal(isolatedSingles.samples, 1);
+    near(isolatedSingles.exactGb, alternate[0].vram_gb, '单条记录只采用最新同环境组');
   }
 });
 test('另一 model、非 launch、无 kernel 和不支持的 measurement 版本拒绝准入', () => {
