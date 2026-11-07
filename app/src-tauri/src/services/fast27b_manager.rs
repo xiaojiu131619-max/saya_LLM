@@ -263,6 +263,26 @@ mod job_guard {
     unsafe impl Send for JobHandle {}
     unsafe impl Sync for JobHandle {}
 
+    impl JobHandle {
+        /// 终止 Job 内全部进程（幂等：进程已退出时调用无害）。
+        /// 只终止不关闭；句柄统一由 Drop 关闭，保证所有权唯一、不双重 CloseHandle。
+        fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for JobHandle {
+        fn drop(&mut self) {
+            // 句柄唯一出口：terminate() 之后再 Drop 是安全的（CloseHandle 只发生这一次）；
+            // 未及 terminate 就 Drop 时由 KILL_ON_JOB_CLOSE 兜底回收整棵进程树。
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
     const JobObjectExtendedLimitInformation: u32 = 9;
 
@@ -335,19 +355,25 @@ mod job_guard {
                 return;
             }
             if let Ok(mut guard) = JOB_HANDLE.lock() {
+                // 上一次启动的 Job 可能在进程异常退出时未被回收，覆盖前先终止旧 Job
+                // 整树；旧句柄随 Drop 统一关闭，避免「崩溃→重启」每次泄漏一个句柄、
+                // 旧 Job 内残留子进程存活到应用退出。
+                if let Some(previous) = guard.take() {
+                    previous.terminate();
+                }
                 *guard = Some(JobHandle(job));
             }
             eprintln!("[fast27b] Job Object 已附加到 fast27b 进程");
         }
     }
 
+    /// 终止 Job 整树并关闭句柄（幂等：无 Job 或进程已退出时调用无害）。
+    /// 正常停止与异常退出监视路径共用；句柄只由 Drop 关闭一次，不会双重 CloseHandle。
     pub fn terminate() {
         if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(JobHandle(job)) = guard.take() {
-                unsafe {
-                    TerminateJobObject(job, 1);
-                    CloseHandle(job);
-                }
+            if let Some(handle) = guard.take() {
+                handle.terminate();
+                // handle 在此 Drop → CloseHandle（KILL_ON_JOB_CLOSE 兜底整树回收）。
             }
         }
     }
@@ -1183,12 +1209,9 @@ fn start_fast27b_locked(
                         None => "进程已被终止".to_string(),
                     })
                     .unwrap_or_else(|| "进程已退出".to_string());
-                if let Ok(mut guard) = FAST27B_CHILD.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = FAST27B_ACTIVE.lock() {
-                    *guard = None;
-                }
+                // 异常退出同样必须回收进程树并关闭 Job 句柄（幂等），再清运行状态；
+                // 旧代码只有正常 stop 才 terminate，「崩溃→重启」会泄漏 Job 句柄。
+                reclaim_exited_process_tree();
                 fast27b_metrics::finish_generation(
                     generation,
                     Fast27bRequestOutcome::Failed,
@@ -1204,6 +1227,21 @@ fn start_fast27b_locked(
     });
 
     Ok(())
+}
+
+/// 异常退出后的资源回收（监视线程与回归测试共用同一条路径）：
+/// 先终止 Job 整树并关闭句柄（幂等，随后正常 stop/再次 attach 重复调用无害），
+/// 再清 CHILD/ACTIVE。主进程退出后 Job 内可能还残留子进程，不 terminate 会泄漏
+/// Job 句柄且残留进程存活到应用退出。
+fn reclaim_exited_process_tree() {
+    #[cfg(windows)]
+    job_guard::terminate();
+    if let Ok(mut guard) = FAST27B_CHILD.lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = FAST27B_ACTIVE.lock() {
+        *guard = None;
+    }
 }
 
 /// 停止 fast27b：立即失效运行事件，整树终止并排空日志后，再终结剩余活跃指标。
@@ -2039,5 +2077,110 @@ mod tests {
             "engine should be down after stop"
         );
         assert!(!is_fast27b_running());
+    }
+
+    // -----------------------------------------------------------------------
+    // Job Object 进程树回收（Windows 真实进程回归测试）
+    // -----------------------------------------------------------------------
+
+    /// 两个测试共用 job_guard 的 JOB_HANDLE 全局，串行执行避免相互覆盖。
+    #[cfg(windows)]
+    static JOB_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 真实长命子进程（ping 约 60 秒），无窗口、不占管道，由 Job Object 负责回收。
+    #[cfg(windows)]
+    fn spawn_job_test_process() -> Child {
+        SpawnProcess::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .expect("无法 spawn 测试子进程 ping")
+    }
+
+    #[cfg(windows)]
+    fn wait_job_test_process_exit(child: &mut Child, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(windows)]
+    fn process_handle_count() -> u32 {
+        extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
+        }
+        let mut count = 0u32;
+        let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+        assert_ne!(ok, 0, "GetProcessHandleCount 调用失败");
+        count
+    }
+
+    /// attach 覆盖旧 Job 时必须先终止旧进程树：旧进程退出、新进程不受影响。
+    /// 旧代码直接覆盖句柄，旧进程会存活到应用退出（本测试在旧代码下失败）。
+    #[test]
+    #[cfg(windows)]
+    fn job_attach_overwrite_terminates_previous_process_tree() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut old = spawn_job_test_process();
+        job_guard::attach(old.as_raw_handle());
+        assert!(matches!(old.try_wait(), Ok(None)), "旧进程附加后应仍在运行");
+
+        let mut new = spawn_job_test_process();
+        job_guard::attach(new.as_raw_handle()); // 覆盖：必须终止旧 Job 整树
+        assert!(
+            wait_job_test_process_exit(&mut old, Duration::from_secs(5)),
+            "attach 覆盖后旧进程必须被终止（旧 Job 不得泄漏）"
+        );
+        assert!(
+            matches!(new.try_wait(), Ok(None)),
+            "新进程不得被旧 Job 的回收误杀"
+        );
+
+        job_guard::terminate();
+        assert!(wait_job_test_process_exit(&mut new, Duration::from_secs(5)));
+    }
+
+    /// 「崩溃→重启」回归：按异常退出监视线程的同一条生产清理路径
+    /// （reclaim_exited_process_tree：先 terminate 回收进程树，再清状态）反复模拟
+    /// 崩溃→重启，断言每个旧进程都被终止，且进程句柄数不随循环增长
+    /// （旧代码异常路径不 terminate，每轮泄漏 1 个 Job 句柄）。
+    #[test]
+    #[cfg(windows)]
+    fn job_crash_restart_cycles_do_not_leak_handles() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const CYCLES: u32 = 32;
+        // 预热一轮，让测试宿主的一次性句柄分配稳定下来。
+        {
+            let mut warmup = spawn_job_test_process();
+            job_guard::attach(warmup.as_raw_handle());
+            reclaim_exited_process_tree();
+            assert!(wait_job_test_process_exit(&mut warmup, Duration::from_secs(5)));
+        }
+        let before = process_handle_count();
+        for cycle in 0..CYCLES {
+            let mut child = spawn_job_test_process();
+            job_guard::attach(child.as_raw_handle());
+            // 与监视线程异常退出分支相同的清理调用（先回收进程树，再清 CHILD/ACTIVE）。
+            reclaim_exited_process_tree();
+            assert!(
+                wait_job_test_process_exit(&mut child, Duration::from_secs(5)),
+                "第 {cycle} 轮：异常退出路径必须终止 Job 内进程"
+            );
+        }
+        let after = process_handle_count();
+        // 并行运行的其它测试可能临时持有少量句柄，留一半循环数的余量；
+        // 未修复时每轮泄漏 1 个 Job 句柄（+32），必然超过余量。
+        assert!(
+            after <= before + CYCLES / 2,
+            "句柄泄漏：循环前 {before}，循环后 {after}（{CYCLES} 轮崩溃→重启）"
+        );
     }
 }
