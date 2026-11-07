@@ -481,9 +481,22 @@ fn install_strata(ctx: &InstallContext<'_>) -> Result<String, String> {
         .ok_or_else(|| "Strata 引擎包里没有找到 strata.exe，已中止（未改动现有文件）。".to_string())?;
 
     // 只替换内核可执行文件：Python 网关与 run config 仍由用户自己维护。
+    // 先复制到同目录临时文件，再 rename 原子替换；任何一步失败都保留旧 exe，
+    // 不会出现「复制到一半被杀 → 截断的 strata.exe」。
     let target = work_dir.join("strata.exe");
-    std::fs::copy(&engine, &target)
-        .map_err(|e| format!("写入 {} 失败：{e}", target.display()))?;
+    let temp_target = work_dir.join(format!("strata.exe.new-{}", std::process::id()));
+    let _ = std::fs::remove_file(&temp_target);
+    if let Err(error) = std::fs::copy(&engine, &temp_target) {
+        let _ = std::fs::remove_file(&temp_target);
+        return Err(format!("写入临时文件 {} 失败：{error}", temp_target.display()));
+    }
+    if let Err(error) = std::fs::rename(&temp_target, &target) {
+        let _ = std::fs::remove_file(&temp_target);
+        return Err(format!(
+            "替换 {} 失败（旧引擎未改动）：{error}",
+            target.display()
+        ));
+    }
     write_stamp("strata-engine", &version)?;
     let _ = std::fs::remove_dir_all(&staging);
     Ok(format!("Strata 引擎已更新到 {version}（{variant}）"))
@@ -521,9 +534,49 @@ fn install_ninfer(ctx: &InstallContext<'_>) -> Result<String, String> {
         .parent()
         .ok_or_else(|| "无法确定引擎文件所在目录".to_string())?;
 
-    std::fs::create_dir_all(&engine_dir)
-        .map_err(|e| format!("无法创建引擎目录（{}）：{e}", engine_dir.display()))?;
-    copy_dir_contents(source_dir, &engine_dir)?;
+    // 覆盖式逐文件复制会在中途失败时留下新旧 DLL 混合的引擎目录。
+    // 改为：先完整复制到同级 `<引擎目录>.new-<pid>`，成功后改名交换；
+    // 交换阶段失败则恢复旧目录，保证磁盘上始终有一份完整可用的引擎。
+    let parent = engine_dir
+        .parent()
+        .ok_or_else(|| format!("无法确定引擎目录的上级目录：{}", engine_dir.display()))?;
+    let dir_name = engine_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "engine".to_string());
+    let pid = std::process::id();
+    let staged_dir = parent.join(format!("{dir_name}.new-{pid}"));
+    let old_dir = parent.join(format!("{dir_name}.old-{pid}"));
+    let _ = std::fs::remove_dir_all(&staged_dir);
+    let _ = std::fs::remove_dir_all(&old_dir);
+    if let Err(error) = copy_dir_contents(source_dir, &staged_dir) {
+        let _ = std::fs::remove_dir_all(&staged_dir);
+        return Err(format!("复制引擎文件失败（旧引擎未改动）：{error}"));
+    }
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("无法创建引擎上级目录（{}）：{e}", parent.display()))?;
+    // 目标目录已存在（哪怕是空目录）时 Windows 不允许直接 rename 覆盖，先移走旧目录。
+    let had_old = engine_dir.exists();
+    if had_old {
+        if let Err(error) = std::fs::rename(&engine_dir, &old_dir) {
+            let _ = std::fs::remove_dir_all(&staged_dir);
+            return Err(format!("移出旧引擎目录失败（旧引擎未改动）：{error}"));
+        }
+    }
+    if let Err(error) = std::fs::rename(&staged_dir, &engine_dir) {
+        let _ = std::fs::remove_dir_all(&staged_dir);
+        if had_old {
+            if let Err(restore_error) = std::fs::rename(&old_dir, &engine_dir) {
+                return Err(format!(
+                    "切换新引擎失败：{error}；恢复旧引擎也失败：{restore_error}（旧引擎保留在 {}）",
+                    old_dir.display()
+                ));
+            }
+            return Err(format!("切换新引擎失败（已恢复旧引擎）：{error}"));
+        }
+        return Err(format!("切换新引擎失败：{error}"));
+    }
+    let _ = std::fs::remove_dir_all(&old_dir);
     write_stamp("ninfer-engine", &version)?;
     let _ = std::fs::remove_dir_all(&staging);
     Ok(format!("NiNfer 引擎已更新到 {version}"))
