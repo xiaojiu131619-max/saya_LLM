@@ -3,8 +3,8 @@
 //! 不把技能库全部注册成 Pi skills —— 那样会把技能索引和正文塞进模型上下文，
 //! 效率和准确率都会掉。这里保留拾一雷达的完整打分口径：
 //! 1. 只扫描 `*/SKILL.md` 的元数据；
-//! 2. 零模型成本的关键词打分：技能名 +3、格式词 +3、别名 +2、触发词 +2、
-//!    描述 token +0.5（封顶 4）、`not_for` −4、查询型 −0.5；
+//! 2. 零模型成本的关键词打分：技能名 +3、格式词（技能名 +3 / 仅描述 +1）、
+//!    别名 +2、触发词 +2、描述 token +0.5（封顶 4）、`not_for` −4、查询型 −0.5；
 //! 3. 转发器互斥：image-gen / video-gen / music-gen / media-enhance 的实现
 //!    委托给 comfyui-workflows（本仓对应画布工具），同一句话只留分最高的
 //!    一个转发器，避免四条技能抢同一件事；
@@ -32,6 +32,16 @@ static USE_WHEN: Lazy<Regex> = Lazy::new(|| {
 static TRIGGERS_ON: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)triggers?\s+on\s*[:：]?\s*([^.\n]{4,400})").unwrap()
 });
+/// 中文描述里常见的触发短语列举：「当用户提及 A、B、C 等关键词时触发」。
+/// 此前只认「触发词：」，这类写法几乎全部漏掉（周报/播客/事故复盘都因此漏召回）。
+static MENTION_TRIGGERS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?:提及|提到)([^。；\n]{2,160})").unwrap());
+/// 「关键词：」列表——与「触发词：」同口径的另一种写法。
+static KEYWORD_TRIGGERS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"关键词[:：]\s*([^。\n]{2,160})").unwrap());
+/// 英文「Triggered by / Triggered when …」。
+static TRIGGERED_BY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)trigger(?:ed)?\s+(?:by|when)\s*[:：]?\s*([^.\n]{4,200})").unwrap());
 static NOT_FOR_BLOCK: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:do not use for|not for|不要用于|不适用于)\s*[:：]\s*([^.\n]+)").unwrap()
 });
@@ -509,9 +519,19 @@ fn push_trigger(out: &mut Vec<String>, value: &str) {
     // 这些形态在用户输入里永远不会原样出现，等于白抽。清洗后再入表。
     let cleaned = clean_trigger(value);
     let len = cleaned.chars().count();
-    if (2..=40).contains(&len) {
+    if (2..=40).contains(&len) && !is_generic_trigger(&cleaned) {
         out.push(cleaned);
     }
+}
+
+/// 通用动词不当触发词：从「要求运行/解释/复现」这类列表里拆出来的
+/// 「解释」「运行」会让任何提到这些词的请求都命中该技能。
+fn is_generic_trigger(value: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "解释", "运行", "复现", "使用", "支持", "帮助", "处理", "实现", "生成", "设计", "问题",
+        "请求", "操作", "内容", "相关", "方式", "方法", "功能", "需求", "情况",
+    ];
+    GENERIC.contains(&value)
 }
 
 /// 剪除抽出来的短语中的句内标点前的部分。
@@ -570,6 +590,32 @@ fn dedupe(items: Vec<String>) -> Vec<String> {
     out
 }
 
+/// 剪掉触发短语列表尾部的说明文字（「等关键词时触发」「时使用」等），
+/// 让 `提及 A、B、C 等关键词时触发` 只留下 A/B/C 三个词。
+fn strip_trigger_tail(text: &str) -> String {
+    let mut out = text.trim().to_string();
+    for marker in [
+        "等关键词时触发",
+        "等关键词时使用",
+        "等关键词",
+        "等场景",
+        "等请求",
+        "等操作",
+        "时触发",
+        "时使用",
+        "等",
+    ] {
+        if let Some(pos) = out.rfind(marker) {
+            let tail = out[pos + marker.len()..].trim();
+            if tail.chars().count() <= 2 {
+                out.truncate(pos);
+                break;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
 /// 从 description 里抽触发词：拾一支持「触发词：」「Use when」「Triggers on」和引号短语。
 fn derived_triggers(description: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -583,6 +629,15 @@ fn derived_triggers(description: &str) -> Vec<String> {
     if let Some(caps) = TRIGGERS_ON.captures(description) {
         let segment = caps[1].split("or when").next().unwrap_or(&caps[1]);
         push_split(&mut out, segment);
+    }
+    if let Some(caps) = KEYWORD_TRIGGERS.captures(description) {
+        push_split(&mut out, &strip_trigger_tail(&caps[1]));
+    }
+    for caps in MENTION_TRIGGERS.captures_iter(description) {
+        push_split(&mut out, &strip_trigger_tail(&caps[1]));
+    }
+    for caps in TRIGGERED_BY.captures_iter(description) {
+        push_split(&mut out, &strip_trigger_tail(&caps[1]));
     }
     for caps in QUOTED.captures_iter(description) {
         push_trigger(&mut out, &caps[1]);
@@ -661,43 +716,67 @@ fn delegated_body(routes: &str, handoff: &str) -> String {
 /// mtime（与拾一的缓存失效口径一致）：新增/删除技能或改分类表会失效，
 /// 改单个 SKILL.md 内容不会变——那种情况重启应用或碰一下技能根目录即可。
 pub fn index_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
-    cached_index(root).map(|snapshot| snapshot.metas)
+    cached_index(root).map(|snapshot| snapshot.metas.clone())
 }
 
-/// 索引快照：元数据（已按 `_tree.json` 补分类路径与关联）+ 分类表。
-#[derive(Clone)]
+/// 索引快照：元数据（已按 `_tree.json` 补分类路径与关联）+ 路由预计算 + 分类表。
+/// 用 `Arc` 共享：每次路由只 clone 少量入选技能，不再整份复制 200+ 条元数据。
 struct IndexSnapshot {
     metas: Vec<PiSkillMeta>,
+    prepared: Vec<PreparedSkill>,
     taxonomy: Taxonomy,
 }
 
-fn cached_index(root: &Path) -> Result<IndexSnapshot, String> {
+/// 路由期要用的预计算数据：小写化与触发词表在索引期做一次，
+/// 避免每次路由给每个技能重复分配字符串。
+struct PreparedSkill {
+    name_lower: String,
+    desc_lower: String,
+    triggers_lower: Vec<String>,
+    not_for_lower: Vec<String>,
+}
+
+fn build_prepared(metas: &[PiSkillMeta]) -> Vec<PreparedSkill> {
+    metas
+        .iter()
+        .map(|meta| PreparedSkill {
+            name_lower: meta.name.to_lowercase(),
+            desc_lower: meta.description.to_lowercase(),
+            triggers_lower: meta.triggers.iter().map(|term| term.to_lowercase()).collect(),
+            not_for_lower: meta.not_for.iter().map(|term| term.to_lowercase()).collect(),
+        })
+        .collect()
+}
+
+fn cached_index(root: &Path) -> Result<std::sync::Arc<IndexSnapshot>, String> {
     if !root.is_dir() {
         return Err(format!("技能库目录不存在：{}", root.display()));
     }
     let signature = index_signature(root);
     if let Some(entry) = INDEX_CACHE.lock().ok().and_then(|guard| guard.clone()) {
         if entry.root == root && Some(entry.signature) == signature {
-            return Ok(IndexSnapshot {
-                metas: entry.metas,
-                taxonomy: entry.taxonomy,
-            });
+            return Ok(entry.snapshot);
         }
     }
     let taxonomy = load_taxonomy(root);
     let mut metas = scan_skills(root)?;
     apply_taxonomy(&mut metas, &taxonomy);
+    let prepared = build_prepared(&metas);
+    let snapshot = std::sync::Arc::new(IndexSnapshot {
+        metas,
+        prepared,
+        taxonomy,
+    });
     if let Ok(mut guard) = INDEX_CACHE.lock() {
         if let Some(signature) = signature {
             *guard = Some(IndexCacheEntry {
                 root: root.to_path_buf(),
                 signature,
-                metas: metas.clone(),
-                taxonomy: taxonomy.clone(),
+                snapshot: snapshot.clone(),
             });
         }
     }
-    Ok(IndexSnapshot { metas, taxonomy })
+    Ok(snapshot)
 }
 
 /// 把分类路径与关联技能写进元数据（缓存里存的就是补全后的版本）。
@@ -722,29 +801,29 @@ fn apply_taxonomy(metas: &mut [PiSkillMeta], taxonomy: &Taxonomy) {
     }
 }
 
-type IndexSignature = (std::time::SystemTime, usize, Option<std::time::SystemTime>);
+/// 索引签名 = 技能根目录 mtime + `_tree.json` mtime。
+///
+/// 不能再对每个技能目录做 `is_file()` 统计：Windows 上一次路由要做 200+ 次
+/// stat，实测单次签名校验约 16ms，比整轮打分还慢。根目录 mtime 在增删技能
+/// 目录时必然会变，语义与计数完全等价；改单个 SKILL.md 内容仍按既有约定
+/// 需要重启或碰一下根目录。
+type IndexSignature = (std::time::SystemTime, Option<std::time::SystemTime>);
 
 #[derive(Clone)]
 struct IndexCacheEntry {
     root: PathBuf,
     signature: IndexSignature,
-    metas: Vec<PiSkillMeta>,
-    taxonomy: Taxonomy,
+    snapshot: std::sync::Arc<IndexSnapshot>,
 }
 
 static INDEX_CACHE: Lazy<Mutex<Option<IndexCacheEntry>>> = Lazy::new(|| Mutex::new(None));
 
 fn index_signature(root: &Path) -> Option<IndexSignature> {
     let modified = std::fs::metadata(root).ok()?.modified().ok()?;
-    let count = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().join("SKILL.md").is_file())
-        .count();
     let tree = std::fs::metadata(root.join(TAXONOMY_FILE))
         .ok()
         .and_then(|metadata| metadata.modified().ok());
-    Some((modified, count, tree))
+    Some((modified, tree))
 }
 
 fn scan_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
@@ -843,12 +922,43 @@ fn scan_skills(root: &Path) -> Result<Vec<PiSkillMeta>, String> {
     Ok(out)
 }
 
-fn matches(text: &str, lower: &str, term: &str) -> bool {
+/// 子串匹配（输入与词都小写）。对 ≤4 字符的纯 ASCII 词要求词边界：
+/// 否则 `ab` 会命中 `about`、`RCA` 会命中任意含该片段的词，短触发词
+/// 会把大量无关请求吸进技能。
+fn contains_term(lower: &str, term: &str) -> bool {
     let term = term.trim();
     if term.is_empty() {
         return false;
     }
-    text.contains(term) || lower.contains(&term.to_lowercase())
+    let needs_boundary = term.len() <= 4 && term.chars().all(|c| c.is_ascii_alphanumeric());
+    if !needs_boundary {
+        return lower.contains(term);
+    }
+    let mut offset = 0usize;
+    while let Some(pos) = lower[offset..].find(term) {
+        let abs = offset + pos;
+        let end = abs + term.len();
+        let before_ok = lower[..abs]
+            .chars()
+            .next_back()
+            .map_or(true, |ch| !ch.is_ascii_alphanumeric());
+        let after_ok = lower[end..]
+            .chars()
+            .next()
+            .map_or(true, |ch| !ch.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = end;
+        if offset >= lower.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn matches(lower: &str, term: &str) -> bool {
+    contains_term(lower, &term.to_lowercase())
 }
 
 /// 文本里的格式词（按非字母数字分词，等价词边界；`stl` 不会命中 `steps`）。
@@ -895,10 +1005,12 @@ pub fn select_skills(
 ) -> Result<SkillRoute, String> {
     let snapshot = cached_index(root)?;
     let lower = text.to_lowercase();
-    let text_tokens = tokens(text);
     let formats = format_terms_in_text(&lower);
+    // 描述分词只在出现强信号时才用得到：没有强信号的技能最多靠描述拿 1.0 分，
+    // 永远到不了 2.5 门槛。按需生成，纯闲聊输入可以完全跳过。
+    let mut text_tokens: Option<Vec<String>> = None;
     let mut scored: Vec<ScoredSkill> = Vec::new();
-    for meta in snapshot.metas {
+    for (meta, prepared) in snapshot.metas.iter().zip(snapshot.prepared.iter()) {
         let mut score = 0.0f32;
         // 强信号：名称 / 别名 / 触发词 / 格式词至少命中一个。纯描述 token
         // 命中太弱（真机实测：「帮我看看工作区里有什么文件」会误中市场查询
@@ -906,44 +1018,51 @@ pub fn select_skills(
         let mut strong = false;
         // 豁免：名称与格式词的歧义最低，其余强信号（别名/触发词）不够格。
         let mut escape = false;
-        let name_lower = meta.name.to_lowercase();
-        if lower.contains(&name_lower) {
+        if contains_term(&lower, &prepared.name_lower) {
             score += 3.0;
             strong = true;
             escape = true;
         }
-        // 格式词命中 +3：STL/MP4/XLSX 这类歧义最低；要求词出现在技能
-        // 描述或名字里，避免「pdf」命中所有无关技能。
+        // 格式词：出现在技能名里才是强信号（xlsx/pdf 这类技能名，歧义最低）；
+        // 只出现在描述里通常只是「支持导出 PDF」的能力陈述——给 +3 强信号
+        // 会让所有「能导 PDF」的技能同时加分并逃过分支裁剪，把真正的目标
+        // 技能（如 PDF 转 Word 的 docx）挤掉。描述命中只记一次弱加分：
+        // 按词累加会让「支持 PDF/XLSX/DOCX」的罗列型描述重新越过门槛。
+        let mut desc_format_hit = false;
         for term in &formats {
-            let description_lower = meta.description.to_lowercase();
-            if description_lower.contains(term) || name_lower.contains(term) {
+            if contains_term(&prepared.name_lower, term) {
                 score += 3.0;
                 strong = true;
                 escape = true;
+            } else if contains_term(&prepared.desc_lower, term) {
+                desc_format_hit = true;
             }
+        }
+        if desc_format_hit {
+            score += 1.0;
         }
         for alias in aliases_for(&meta.name) {
-            if lower.contains(alias) {
+            if contains_term(&lower, alias) {
                 score += 2.0;
                 strong = true;
             }
         }
-        for trigger in &meta.triggers {
-            if matches(text, &lower, trigger) {
+        for trigger_lower in &prepared.triggers_lower {
+            if contains_term(&lower, trigger_lower) {
                 score += 2.0;
                 strong = true;
             }
         }
-        for negative in &meta.not_for {
-            if matches(text, &lower, negative) {
+        for negative_lower in &prepared.not_for_lower {
+            if contains_term(&lower, negative_lower) {
                 score -= 4.0;
             }
         }
-        if !meta.description.is_empty() {
-            let description = meta.description.to_lowercase();
-            let hits = text_tokens
+        if strong && !prepared.desc_lower.is_empty() {
+            let tokens = text_tokens.get_or_insert_with(|| tokens(text));
+            let hits = tokens
                 .iter()
-                .filter(|token| description.contains(token.as_str()))
+                .filter(|token| prepared.desc_lower.contains(token.as_str()))
                 .count();
             score += (hits.min(4) as f32) * 0.5;
         }
@@ -953,12 +1072,16 @@ pub fn select_skills(
         let qualifies = if strong {
             score >= 1.0
         } else {
-            // 没有任何强信号时，需要 5 个以上描述 token 才有可能靠分数入选
-            // （4 个封顶只有 2.0，永远到不了 2.5）。
+            // 没有强信号时不参与描述分词，仅描述格式词最多 +1.0，
+            // 永远到不了 2.5 门槛。
             score >= 2.5
         };
         if qualifies {
-            scored.push(ScoredSkill { meta, score, escape });
+            scored.push(ScoredSkill {
+                meta: meta.clone(),
+                score,
+                escape,
+            });
         }
     }
     scored.sort_by(|a, b| {
@@ -1042,7 +1165,7 @@ pub fn select_skills(
                 .find(|branch| branch.label == entry.label);
             if let Some(branch) = branch {
                 for trigger in &branch.triggers {
-                    if matches(text, &lower, trigger) {
+                    if matches(&lower, trigger) {
                         entry.score += 2.0;
                     }
                 }
@@ -1524,10 +1647,10 @@ mod tests {
     }
 
     #[test]
-    fn two_stage_gating_cuts_offbranch_and_escape_saves_format_hit() {
-        // 四个分支：媒体(4.0) 数据(3.0,格式词) 工程(3.0,格式词) 文档(2.0)。
-        // Top-2 = 媒体 + 数据；工程分支的 budget-tool 靠 xlsx 格式词豁免活下来，
-        // 文档分支的 doc-writer（无豁免）被裁掉。
+    fn two_stage_gating_cuts_offbranch_and_format_only_desc_is_weak() {
+        // 四个分支：媒体(4.0) 文档(2.0) 数据(0.0) 工程(0.0)。
+        // Top-2 = 媒体 + 文档；数据/工程里的技能只有「描述提到 xlsx」这条弱信号，
+        // 不再给强信号与豁免（此前会让所有「支持导出 xlsx」的技能齐刷刷入选）。
         let root = temp_root("two-stage");
         write_skill(
             &root,
@@ -1565,11 +1688,38 @@ mod tests {
         let route = select_skills(&root, "把这份数据导出成 xlsx 报表", 3, 4000).expect("select");
         let names: Vec<&str> = route.skills.iter().map(|s| s.name.as_str()).collect();
         println!("两级路由 -> {names:?}（分支：{:?}）", route.branches);
-        assert_eq!(route.branches, vec!["数据".to_string(), "媒体".to_string()]);
+        assert_eq!(route.branches, vec!["媒体".to_string(), "文档".to_string()]);
         assert!(names.contains(&"notepad"), "最高分在晋级分支内：{names:?}");
-        assert!(names.contains(&"sheet-helper"), "格式词豁免技能应入选：{names:?}");
-        assert!(names.contains(&"budget-tool"), "工程分支被裁，但 xlsx 格式词豁免应保住 budget-tool：{names:?}");
-        assert!(!names.contains(&"doc-writer"), "文档分支未晋级且无豁免，应被裁掉：{names:?}");
+        assert!(names.contains(&"doc-writer"), "文档分支晋级后其成员应入选：{names:?}");
+        assert!(
+            !names.contains(&"sheet-helper"),
+            "仅在描述里写 xlsx 不算强信号，不应入选：{names:?}"
+        );
+        assert!(
+            !names.contains(&"budget-tool"),
+            "描述里的格式词不再豁免分支裁剪：{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn description_format_terms_do_not_stack_past_weak_threshold() {
+        // 描述里罗列 PDF/XLSX/DOCX 但没有名称/别名/触发词命中时，
+        // 弱加分只能记一次，不能靠格式词数量凑过 2.5 门槛。
+        let root = temp_root("weak-format");
+        write_skill(
+            &root,
+            "report-writer",
+            "name: report-writer\ndescription: 支持导出 PDF、XLSX、DOCX 三种格式",
+            "按模板输出。",
+        );
+        let route = select_skills(&root, "把 PDF 和 XLSX、DOCX 合并成一个文件", 2, 4000)
+            .expect("select");
+        let names: Vec<&str> = route.skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(
+            names.is_empty(),
+            "仅在描述里罗列格式词不应越过弱信号门槛：{names:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1662,5 +1812,65 @@ mod tests {
         assert_eq!(route.skills[0].name, "doc-writer");
         assert!(route.branches.is_empty(), "退化平铺时不该有晋级分支");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 路由性能基准（默认不跑）：`cargo test route_latency_bench -- --ignored --nocapture`
+    ///
+    /// 2026-11-07 优化前（debug）：缓存签名校验 15.8ms/次、整轮路由 26.3ms；
+    /// 优化后：签名约 0.2ms、整轮约 1.6ms。若路由明显变慢，先跑这里定位。
+    #[test]
+    #[ignore]
+    fn route_latency_bench() {
+        let Some(root) = default_skills_dir(None) else {
+            return;
+        };
+        let queries = [
+            "帮我写一份周报",
+            "统计分析这份 CSV 的显著性并给出结论",
+            "生成一份 OpenAPI 文档",
+            "用 TDD 重构这个模块并补单测",
+            "查询一下 A 股行情和市盈率",
+            "帮我写一期播客脚本",
+            "把这份 PDF 转成 Word 并排版",
+            "优化一下我的简历，投后端岗位",
+            "分析 SaaS 的 MRR 流失率和 CAC",
+            "帮我审一下这篇论文，给修改意见",
+            "kubectl 查看 pod 日志",
+            "生成一个甘特图",
+            "做一次线上事故复盘",
+            "把这段英文翻译成中文",
+            "给三个方案做加权评分选型",
+            "画一张赛博朋克插画",
+            "把这张图放大到 4k",
+            "做一个 3D 打印的手机支架 stl",
+            "整理一下会议纪要，提取行动项",
+            "帮我设计定价方案",
+            "写一封催办邮件",
+            "分析这份财报的三张表",
+            "画一个登录页原型",
+            "解释一下这个 SQL 为什么慢",
+            "周杰伦的音乐风格是什么",
+            "帮我看看工作区里有什么文件",
+        ];
+        let metas = index_skills(root.as_path()).expect("index");
+        println!("index: {} skills", metas.len());
+        let mut times: Vec<std::time::Duration> = Vec::new();
+        for _ in 0..20 {
+            for q in queries {
+                let started = std::time::Instant::now();
+                let _ = select_skills(root.as_path(), q, 2, 8000).expect("select");
+                times.push(started.elapsed());
+            }
+        }
+        let n = times.len();
+        let total: std::time::Duration = times.iter().sum();
+        times.sort();
+        println!(
+            "routes={n} avg={:?} p50={:?} p95={:?} worst={:?}",
+            total / n as u32,
+            times[n / 2],
+            times[n * 95 / 100],
+            times[n - 1]
+        );
     }
 }

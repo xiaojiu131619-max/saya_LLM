@@ -8,7 +8,7 @@
       "children": [
         { "id": "image", "label": "图像", "members": ["image-gen", "media-enhance", "about-me-avatar", "retro-tech-illustration-cn", "living-ascii-wallpaper"] },
         { "id": "video", "label": "视频", "members": ["video-gen", "video-studio", "video-compare-tool"] },
-        { "id": "audio", "label": "音频", "members": ["music-gen", "podcast-blueprint", "podcast-episode-writer"] },
+        { "id": "audio", "label": "音频", "members": ["music-gen", "podcast-blueprint"] },
         { "id": "voice", "label": "语音", "members": ["edge-tts", "tts-local"] },
         { "id": "canvas", "label": "画布转发", "members": ["comfyui-workflows"] }
       ]
@@ -38,10 +38,10 @@
       "label": "办公文档",
       "triggers": ["word文档", "excel表格", "电子表格", "ppt", "幻灯片", "会议纪要", "公文", "流程文档"],
       "children": [
-        { "id": "document", "label": "文档", "members": ["docx", "pdf", "process-doc", "sop-writer", "work-report-writer"] },
+        { "id": "document", "label": "文档", "members": ["docx", "pdf", "sop-writer", "work-report-writer"] },
         { "id": "sheet", "label": "表格", "members": ["xlsx"] },
         { "id": "slides", "label": "演示文稿", "members": ["guizang-ppt-skill", "geo-magazine-slides-cn", "slide-forge"] },
-        { "id": "minutes", "label": "会议纪要", "members": ["meeting-recap", "structured-minutes"] }
+        { "id": "minutes", "label": "会议纪要", "members": ["meeting-recap"] }
       ]
     },
     {
@@ -60,9 +60,9 @@
       "label": "数据与统计",
       "triggers": ["统计检验", "显著性", "相关性", "回归分析", "异常值", "数据质量", "加权打分"],
       "children": [
-        { "id": "stats", "label": "统计检验", "members": ["auto-hypothesis-test", "auto-stat-test", "stats-analysis", "corr-insight", "correlation-auditor", "regression-insight", "outlier-scan"] },
+        { "id": "stats", "label": "统计检验", "members": ["auto-stat-test", "stats-analysis", "corr-insight", "regression-insight", "outlier-scan"] },
         { "id": "quality", "label": "数据质量", "members": ["dataset-health-audit", "database-inspector"] },
-        { "id": "scoring", "label": "评估与决策", "members": ["weighted-scorer", "weighted-scoring", "split-test-evaluator", "saas-analyzer", "saas-metrics-coach"] }
+        { "id": "scoring", "label": "评估与决策", "members": ["weighted-scoring", "split-test-evaluator", "saas-analyzer"] }
       ]
     },
     {
@@ -71,10 +71,10 @@
       "triggers": ["重构", "单元测试", "压测", "部署", "日志排查", "代码审查", "api文档", "落地页原型"],
       "children": [
         { "id": "web", "label": "Web 与后端", "members": ["backend-building", "webapp-building", "matlab-translator"] },
-        { "id": "devdoc", "label": "API 与教程文档", "members": ["api-doc-gen", "dev-guide-generator", "dev-guide-writer", "route-to-openapi"] },
-        { "id": "quality", "label": "代码质量与测试", "members": ["code-arch-optimizer", "deep-module-refactor", "code-safety-audit", "test-driven-dev", "tdd-coach", "test-suite-architect", "software-testing-guide", "hands-on-testing", "graded-review", "independent-review", "web-security-audit"] },
-        { "id": "ops", "label": "运维与性能", "members": ["kubectl", "k8s-cluster-ops", "terraform-deploy-traps", "http-load-profiler", "http-load-tester", "py-perf-analyzer", "log-diagnostic", "log-error-digest", "storage-analyzer-khazix", "incident-retrospective", "incident-review-guide"] },
-        { "id": "workflow", "label": "协作与规范", "members": ["smart-commit-gen", "git-repo-audit", "gitlab-cli-guide", "locale-guard", "localization-toolkit", "ddd-glossary-gen", "domain-glossary"] },
+        { "id": "devdoc", "label": "API 与教程文档", "members": ["api-doc-gen", "dev-guide-writer"] },
+        { "id": "quality", "label": "代码质量与测试", "members": ["code-arch-optimizer", "code-safety-audit", "tdd-coach", "software-testing-guide", "hands-on-testing", "graded-review", "independent-review", "web-security-audit"] },
+        { "id": "ops", "label": "运维与性能", "members": ["k8s-cluster-ops", "terraform-deploy-traps", "http-load-tester", "py-perf-analyzer", "log-diagnostic", "storage-analyzer-khazix", "incident-retrospective"] },
+        { "id": "workflow", "label": "协作与规范", "members": ["smart-commit-gen", "git-repo-audit", "gitlab-cli-guide", "locale-guard", "ddd-glossary-gen"] },
         { "id": "designeng", "label": "设计工程", "members": ["ui-blueprint", "interface-design-lab", "api-shape-explorer", "design-system-builder", "theme-kit", "lp-proto-gen", "musepool"] }
       ]
     },
@@ -84,9 +84,9 @@
       "triggers": ["写一篇文章", "润色", "论文", "翻译", "演讲稿", "去AI味"],
       "children": [
         { "id": "general", "label": "通用写作", "members": ["general-writing", "creative-writing", "report-writing", "humanizer-zh", "copy-editor"] },
-        { "id": "academic", "label": "学术写作", "members": ["paper-writing", "research-paper-refiner", "scholarly-writing-refiner", "sci-paper-cn", "academic-paper-reviewer", "paper-review-coach", "ref-style-converter"] },
-        { "id": "translation", "label": "翻译", "members": ["translation-craft", "xindaya-translator"] },
-        { "id": "speech", "label": "演讲与修辞", "members": ["keynote-composer", "rhetoric-speech-craft"] }
+        { "id": "academic", "label": "学术写作", "members": ["paper-writing", "research-paper-refiner", "sci-paper-cn", "paper-review-coach", "ref-style-converter"] },
+        { "id": "translation", "label": "翻译", "members": ["xindaya-translator"] },
+        { "id": "speech", "label": "演讲与修辞", "members": ["rhetoric-speech-craft"] }
       ]
     },
     {
@@ -119,7 +119,7 @@
         { "id": "cn", "label": "A 股与数据", "members": ["cn-finance-data", "cn-market-lookup"] },
         { "id": "equity", "label": "个股研究", "members": ["equity-earnings-review", "equity-research-report-cn", "equity-researcher", "stock-finance-profiler", "stock-research-report-cn", "stock-tech-analysis", "commodity-research-outlook"] },
         { "id": "fund", "label": "基金与策略", "members": ["event-etf-study", "fund-risk-analyzer", "trading-strategy-backtest", "value-invest-scorer"] },
-        { "id": "valuation", "label": "估值与财务", "members": ["cashflow-valuation", "financial-ratio-toolkit", "financial-report-reader", "financial-statement-analyzer", "investment-memo", "investor-letter-writer"] },
+        { "id": "valuation", "label": "估值与财务", "members": ["cashflow-valuation", "financial-report-reader", "financial-statement-analyzer", "investment-memo", "investor-letter-writer"] },
         { "id": "fundraising", "label": "融资与 BP", "members": ["business-plan-ppt", "fundraising-bp-planner", "investor-pitch-planner", "vc-industry-research"] }
       ]
     },
@@ -134,9 +134,9 @@
       "label": "产品与项目",
       "triggers": ["prd", "需求文档", "okr", "sprint", "排期", "向上汇报", "连环追问"],
       "children": [
-        { "id": "product", "label": "产品定义", "members": ["idea-to-prd", "product-spec-writer", "user-story-canvas", "story-map-builder", "pipeline-blueprint", "project-sizing-guide"] },
-        { "id": "plan", "label": "计划管理", "members": ["okr-planner", "sprint-plan-builder", "iteration-planner"] },
-        { "id": "comms", "label": "沟通与追问", "members": ["audience-adapter", "audience-adaptive-comms", "cross-examine", "grilling", "deep-probe"] }
+        { "id": "product", "label": "产品定义", "members": ["idea-to-prd", "user-story-canvas", "pipeline-blueprint", "project-sizing-guide"] },
+        { "id": "plan", "label": "计划管理", "members": ["okr-planner", "iteration-planner"] },
+        { "id": "comms", "label": "沟通与追问", "members": ["audience-adapter", "grilling"] }
       ]
     },
     {
@@ -145,7 +145,7 @@
       "triggers": ["背卡片", "复习", "测验", "教我", "面试模拟", "简历", "adhd"],
       "children": [
         { "id": "memory", "label": "记忆与测验", "members": ["anki-card-maker", "flashcard-studio", "bloom-quiz-maker"] },
-        { "id": "teach", "label": "教学与辅导", "members": ["teach-assist", "programming-tutor", "code-mentor", "sql-tutor"] },
+        { "id": "teach", "label": "教学与辅导", "members": ["teach-assist", "programming-tutor", "sql-tutor"] },
         { "id": "career", "label": "求职与个人", "members": ["interview-simulator", "resume-craft", "adhd-assistant", "adhd-daily-planner"] }
       ]
     },
@@ -177,10 +177,7 @@
     { "from": "equity-research-report-cn", "type": "complement", "to": "cn-finance-data", "note": "研报常需要拉行情与财务数据" },
     { "from": "deep-research-v2", "type": "complement", "to": "research-writer", "note": "调研结果常要成文" },
     { "from": "browse", "type": "complement", "to": "smart-web-scraper", "note": "浏览与抓取配套" },
-    { "from": "kubectl", "type": "complement", "to": "k8s-cluster-ops", "note": "同一 kubectl 工具链" },
     { "from": "skill-creator", "type": "complement", "to": "skill-finder", "note": "找不到技能就造一个" },
-    { "from": "idea-to-prd", "type": "complement", "to": "product-spec-writer", "note": "PRD 之后常要细化规格" },
-    { "from": "meeting-recap", "type": "complement", "to": "structured-minutes", "note": "会议纪要两种产出形态" },
     { "from": "auto-stat-test", "type": "complement", "to": "stats-analysis", "note": "自动选检验与手工分析互补" },
     { "from": "business-plan-ppt", "type": "complement", "to": "fundraising-bp-planner", "note": "BP 大纲与路演 PPT 配套" },
     { "from": "code-safety-audit", "type": "complement", "to": "web-security-audit", "note": "通用与 Web 安全审计互补" },
