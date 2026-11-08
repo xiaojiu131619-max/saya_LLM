@@ -15,9 +15,6 @@
 
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
-use std::sync::Mutex;
-
-use once_cell::sync::Lazy;
 
 use crate::services::pi_agent;
 
@@ -30,27 +27,8 @@ const TOOL_ERRORS_MAX_LINES: usize = 100;
 /// 注入给模型的记忆块字符上限（MEMORY + 工具错误合计）。
 pub const INJECT_MAX_CHARS: usize = 3000;
 
-/// 测试用：覆写记忆目录，避免单测写到真实应用数据目录。
-static MEMORY_DIR_OVERRIDE: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
-
-#[doc(hidden)]
-pub fn set_memory_dir_for_tests(path: Option<PathBuf>) {
-    if let Ok(mut slot) = MEMORY_DIR_OVERRIDE.lock() {
-        *slot = path;
-    }
-}
-
 pub fn memory_dir() -> PathBuf {
-    if let Ok(slot) = MEMORY_DIR_OVERRIDE.lock() {
-        if let Some(path) = slot.clone() {
-            return path;
-        }
-    }
     pi_agent::pi_data_root().join("memory")
-}
-
-fn memory_file() -> PathBuf {
-    memory_dir().join("MEMORY.md")
 }
 
 fn timestamp() -> String {
@@ -66,7 +44,7 @@ fn sanitize_entry(text: &str) -> String {
     // 单行化 + 去控制字符 + 截断，保证追加不会破坏行结构。
     let cleaned: String = text
         .chars()
-        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else if ch.is_control() { ' ' } else { ch })
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let cleaned = cleaned.trim();
     if cleaned.chars().count() <= ENTRY_MAX_CHARS {
@@ -74,11 +52,6 @@ fn sanitize_entry(text: &str) -> String {
     } else {
         cleaned.chars().take(ENTRY_MAX_CHARS).collect()
     }
-}
-
-/// 把一行事实追加进 MEMORY.md；超限时从最旧的行裁起。
-pub fn append_memory(text: &str) -> Result<(), String> {
-    append_memory_in(memory_dir(), text)
 }
 
 /// 把一行事实写进指定记忆目录（`save_memory` 工具与测试共用）。
@@ -176,11 +149,6 @@ fn render_memory_in(dir: PathBuf) -> String {
         out = kept;
     }
     out
-}
-
-/// 记忆文件路径（界面「打开记忆目录」用）。
-pub fn file_paths() -> Vec<PathBuf> {
-    vec![memory_file(), memory_dir().join("tool-errors.md")]
 }
 
 #[cfg(test)]

@@ -252,132 +252,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-#[allow(non_snake_case, non_upper_case_globals, dead_code)]
-mod job_guard {
-    use std::sync::Mutex;
-
-    type HANDLE = *mut std::ffi::c_void;
-
-    // HANDLE 是裸指针，需要包装才能在线程间安全传递
-    struct JobHandle(HANDLE);
-    unsafe impl Send for JobHandle {}
-    unsafe impl Sync for JobHandle {}
-
-    impl JobHandle {
-        /// 终止 Job 内全部进程（幂等：进程已退出时调用无害）。
-        /// 只终止不关闭；句柄统一由 Drop 关闭，保证所有权唯一、不双重 CloseHandle。
-        fn terminate(&self) {
-            unsafe {
-                TerminateJobObject(self.0, 1);
-            }
-        }
-    }
-
-    impl Drop for JobHandle {
-        fn drop(&mut self) {
-            // 句柄唯一出口：terminate() 之后再 Drop 是安全的（CloseHandle 只发生这一次）；
-            // 未及 terminate 就 Drop 时由 KILL_ON_JOB_CLOSE 兜底回收整棵进程树。
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-    const JobObjectExtendedLimitInformation: u32 = 9;
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        PerProcessUserTimeLimit: i64,
-        PerJobUserTimeLimit: i64,
-        LimitFlags: u32,
-        MinimumWorkingSetSize: usize,
-        MaximumWorkingSetSize: usize,
-        ActiveProcessLimit: u32,
-        Affinity: usize,
-        // 必须是 PriorityClass / SchedulingClass（各 u32），
-        // 多 4 字节会让 SetInformationJobObject 报 ERROR_BAD_LENGTH。
-        PriorityClass: u32,
-        SchedulingClass: u32,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        IoInfo: [u64; 6],
-        ProcessMemoryLimit: usize,
-        JobMemoryLimit: usize,
-        PeakProcessMemoryUsed: usize,
-        PeakJobMemoryUsed: usize,
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
-
-    extern "system" {
-        fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
-            hJob: HANDLE,
-            JobObjectInfoClass: u32,
-            lpJobObjectInfo: *const u8,
-            cbJobObjectInfoLength: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
-        fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> i32;
-        fn CloseHandle(hObject: HANDLE) -> i32;
-    }
-
-    static JOB_HANDLE: Mutex<Option<JobHandle>> = Mutex::new(None);
-
-    pub fn attach(process_handle: HANDLE) {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                eprintln!("[fast27b] Job Object 创建失败");
-                return;
-            }
-            let mut info = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ret = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const u8,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ret == 0 {
-                eprintln!("[fast27b] SetInformationJobObject 失败");
-                CloseHandle(job);
-                return;
-            }
-            if AssignProcessToJobObject(job, process_handle) == 0 {
-                eprintln!("[fast27b] AssignProcessToJobObject 失败");
-                CloseHandle(job);
-                return;
-            }
-            if let Ok(mut guard) = JOB_HANDLE.lock() {
-                // 上一次启动的 Job 可能在进程异常退出时未被回收，覆盖前先终止旧 Job
-                // 整树；旧句柄随 Drop 统一关闭，避免「崩溃→重启」每次泄漏一个句柄、
-                // 旧 Job 内残留子进程存活到应用退出。
-                if let Some(previous) = guard.take() {
-                    previous.terminate();
-                }
-                *guard = Some(JobHandle(job));
-            }
-            eprintln!("[fast27b] Job Object 已附加到 fast27b 进程");
-        }
-    }
-
-    /// 终止 Job 整树并关闭句柄（幂等：无 Job 或进程已退出时调用无害）。
-    /// 正常停止与异常退出监视路径共用；句柄只由 Drop 关闭一次，不会双重 CloseHandle。
-    pub fn terminate() {
-        if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(handle) = guard.take() {
-                handle.terminate();
-                // handle 在此 Drop → CloseHandle（KILL_ON_JOB_CLOSE 兜底整树回收）。
-            }
-        }
-    }
-}
+static JOB_SLOT: crate::services::job_guard::JobSlot =
+    crate::services::job_guard::JobSlot::new("fast27b");
 
 // ---------------------------------------------------------------------------
 // 日志缓冲
@@ -1105,7 +981,7 @@ fn start_fast27b_locked(
     #[cfg(windows)]
     {
         if let Some(guard) = FAST27B_CHILD.lock().ok().as_mut().and_then(|g| g.as_mut()) {
-            job_guard::attach(guard.as_raw_handle());
+            JOB_SLOT.assign(guard.as_raw_handle());
         }
     }
 
@@ -1235,7 +1111,7 @@ fn start_fast27b_locked(
 /// Job 句柄且残留进程存活到应用退出。
 fn reclaim_exited_process_tree() {
     #[cfg(windows)]
-    job_guard::terminate();
+    JOB_SLOT.terminate();
     if let Ok(mut guard) = FAST27B_CHILD.lock() {
         *guard = None;
     }
@@ -1284,7 +1160,7 @@ fn stop_fast27b_locked() -> Result<(), String> {
         *guard = None;
     }
     #[cfg(windows)]
-    job_guard::terminate();
+    JOB_SLOT.terminate();
     // 旧监视线程可以已退出，但读线程必须继续读到 EOF；完成/传输失败日志优先于兜底取消。
     drain_engine_log_readers();
     fast27b_metrics::finish_generation(generation, outcome, reason);
@@ -2083,7 +1959,7 @@ mod tests {
     // Job Object 进程树回收（Windows 真实进程回归测试）
     // -----------------------------------------------------------------------
 
-    /// 两个测试共用 job_guard 的 JOB_HANDLE 全局，串行执行避免相互覆盖。
+    /// 两个测试共用 JOB_SLOT 全局，串行执行避免相互覆盖。
     #[cfg(windows)]
     static JOB_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2130,11 +2006,11 @@ mod tests {
     fn job_attach_overwrite_terminates_previous_process_tree() {
         let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut old = spawn_job_test_process();
-        job_guard::attach(old.as_raw_handle());
+        JOB_SLOT.assign(old.as_raw_handle());
         assert!(matches!(old.try_wait(), Ok(None)), "旧进程附加后应仍在运行");
 
         let mut new = spawn_job_test_process();
-        job_guard::attach(new.as_raw_handle()); // 覆盖：必须终止旧 Job 整树
+        JOB_SLOT.assign(new.as_raw_handle()); // 覆盖：必须终止旧 Job 整树
         assert!(
             wait_job_test_process_exit(&mut old, Duration::from_secs(5)),
             "attach 覆盖后旧进程必须被终止（旧 Job 不得泄漏）"
@@ -2144,7 +2020,7 @@ mod tests {
             "新进程不得被旧 Job 的回收误杀"
         );
 
-        job_guard::terminate();
+        JOB_SLOT.terminate();
         assert!(wait_job_test_process_exit(&mut new, Duration::from_secs(5)));
     }
 
@@ -2160,14 +2036,14 @@ mod tests {
         // 预热一轮，让测试宿主的一次性句柄分配稳定下来。
         {
             let mut warmup = spawn_job_test_process();
-            job_guard::attach(warmup.as_raw_handle());
+            JOB_SLOT.assign(warmup.as_raw_handle());
             reclaim_exited_process_tree();
             assert!(wait_job_test_process_exit(&mut warmup, Duration::from_secs(5)));
         }
         let before = process_handle_count();
         for cycle in 0..CYCLES {
             let mut child = spawn_job_test_process();
-            job_guard::attach(child.as_raw_handle());
+            JOB_SLOT.assign(child.as_raw_handle());
             // 与监视线程异常退出分支相同的清理调用（先回收进程树，再清 CHILD/ACTIVE）。
             reclaim_exited_process_tree();
             assert!(

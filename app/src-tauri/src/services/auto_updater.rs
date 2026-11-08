@@ -213,7 +213,7 @@ pub fn list_installed_kernels() -> Vec<InstalledKernel> {
                 kernels.push((
                     ts,
                     InstalledKernel {
-                        is_active: active.as_ref().map_or(false, |a| *a == entry.path()),
+                        is_active: active.as_ref().is_some_and(|a| *a == entry.path()),
                         is_selected,
                         version: parse_kernel_version(&name),
                         name,
@@ -325,12 +325,17 @@ fn command_text(command: &mut Command) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let combined = format!(
+    Some(combined_output(&output))
+}
+
+/// 合并子进程的 stdout 与 stderr：不少 CLI 把版本信息写到 stderr，
+/// 只看其中一路会漏掉关键内容。
+fn combined_output(output: &std::process::Output) -> String {
+    format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-    Some(combined)
+    )
 }
 
 pub(crate) fn detect_nvidia_gpu_names() -> Vec<String> {
@@ -359,7 +364,7 @@ pub(crate) fn detect_video_controller_names() -> Vec<String> {
             "-Command",
             "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
         ]);
-        return command_text(&mut command)
+        command_text(&mut command)
             .map(|text| {
                 text.lines()
                     .map(str::trim)
@@ -367,7 +372,7 @@ pub(crate) fn detect_video_controller_names() -> Vec<String> {
                     .map(ToString::to_string)
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
     }
 
     #[cfg(not(windows))]
@@ -557,10 +562,9 @@ fn cuda_asset_score(name: &str, cuda_version: Option<&str>, blackwell: bool) -> 
     let tier = if blackwell_penalty { 3 } else { base_tier };
     let distance = if asset_major == cuda_major {
         asset_minor.abs_diff(cuda_minor)
-    } else if asset_major > cuda_major {
-        asset_major - cuda_major
     } else {
-        cuda_major - asset_major
+        // 主版本不同时，按主版本号差距计距（不考虑方向）。
+        asset_major.abs_diff(cuda_major)
     };
     (tier, distance, u32::MAX - asset_minor)
 }
@@ -582,6 +586,11 @@ fn cuda_asset_matches(name: &str, cuda_version: Option<&str>, blackwell: bool) -
     true
 }
 
+/// 小写后的资源名是否指向纯 CPU 后端（`avx` / `noavx` 变体也算 CPU）。
+fn is_cpu_asset_name(lower: &str) -> bool {
+    lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx")
+}
+
 fn asset_backend(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.contains("cuda") {
@@ -598,7 +607,7 @@ fn asset_backend(name: &str) -> &'static str {
         "OpenCL"
     } else if lower.contains("sycl") {
         "SYCL"
-    } else if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
+    } else if is_cpu_asset_name(&lower) {
         "CPU"
     } else {
         "通用"
@@ -643,7 +652,7 @@ fn host_matched_asset(
                 // HIP-capable 的 AMD 卡：ROCm 包也算本机匹配（可在「核心更新」正常下载）。
                 || (hip_capable && (lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon")))
         }
-        "CPU" => lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx"),
+        "CPU" => is_cpu_asset_name(&lower),
         _ => false,
     }
 }
@@ -672,7 +681,7 @@ fn package_asset_score(
             if lower.contains("vulkan") {
                 return (4, 0, 0, lower);
             }
-            if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
+            if is_cpu_asset_name(&lower) {
                 return (5, 0, 0, lower);
             }
         }
@@ -683,7 +692,7 @@ fn package_asset_score(
             if is_rocm {
                 return (if hip_capable { 2 } else { 6 }, 0, 0, lower);
             }
-            if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
+            if is_cpu_asset_name(&lower) {
                 return (4, 0, 0, lower);
             }
             // Vulkan host（AMD / Intel）：CUDA 用不上，明确排到最后。
@@ -692,7 +701,7 @@ fn package_asset_score(
             }
         }
         "CPU" => {
-            if lower.contains("cpu") || lower.contains("avx") || lower.contains("noavx") {
+            if is_cpu_asset_name(&lower) {
                 return (0, 0, 0, lower);
             }
             if lower.contains("vulkan") {
@@ -1270,39 +1279,54 @@ pub(crate) fn download_with_progress(
     Ok(bytes)
 }
 
+/// 一次发布包下载的描述：目标地址、加速源策略与预期校验和。
+/// 收拢成结构体，调用点按字段名书写，不会把两个 URL 或两个校验和传错位置。
+struct ZipDownload<'a> {
+    /// 面向用户的名称（如 `llama.cpp b6459`），只用于进度文案。
+    label: &'a str,
+    url: &'a str,
+    use_mirror: bool,
+    mirror_url: Option<&'a str>,
+    expected_sha256: &'a str,
+}
+
 /// 下载并强制校验一个发布包。
 ///
 /// 调用方必须先从 GitHub API 取到官方 SHA256 再传进来；
 /// 校验不通过一律返回 Err，绝不允许未校验的字节流入解压和执行环节。
 fn download_zip_bytes(
     client: &reqwest::blocking::Client,
-    label: &str,
-    url: &str,
-    use_mirror: bool,
-    mirror_url: Option<&str>,
-    expected_sha256: &str,
+    request: ZipDownload<'_>,
     proxy_url: Option<&str>,
     on_progress: &dyn Fn(String),
 ) -> Result<(Vec<u8>, String), String> {
-    on_progress(format!("正在下载 {}...", label));
-    let bytes = try_download_stream(client, url, use_mirror, mirror_url, expected_sha256, proxy_url, &|msg| {
-        eprintln!("[updater] {}", msg);
-        on_progress(msg);
-    })?;
+    on_progress(format!("正在下载 {}...", request.label));
+    let bytes = try_download_stream(
+        client,
+        request.url,
+        request.use_mirror,
+        request.mirror_url,
+        request.expected_sha256,
+        proxy_url,
+        &|msg| {
+            eprintln!("[updater] {}", msg);
+            on_progress(msg);
+        },
+    )?;
 
     validate_downloaded_zip(&bytes)?;
     let sha256 = sha256_hex(&bytes);
-    if sha256 != expected_sha256 {
+    if sha256 != request.expected_sha256 {
         return Err(format!(
             "{} 校验和不匹配，已中止安装（期望 {}...，实际 {}...）。",
-            label,
-            &expected_sha256[..12],
+            request.label,
+            &request.expected_sha256[..12],
             &sha256[..12]
         ));
     }
     on_progress(format!(
         "{} 下载完成，SHA256 校验通过：{}...",
-        label,
+        request.label,
         &sha256[..12]
     ));
     Ok((bytes, sha256))
@@ -1390,11 +1414,7 @@ fn validate_llama_server(exe_path: &Path) -> Result<String, String> {
     let output = command
         .output()
         .map_err(|error| format!("无法运行新版 llama-server: {}", error))?;
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let combined = combined_output(&output);
     let preview = combined.trim();
     if !output.status.success() {
         return Err(format!(
@@ -1487,7 +1507,7 @@ fn detect_installed_version(resources: &Path) -> Option<String> {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed.replace(':', "_").replace(' ', "_"))
+                Some(trimmed.replace([':', ' '], "_"))
             }
         })
         .or_else(|| load_log().current_version)
@@ -1567,11 +1587,13 @@ pub fn download_and_install(
 
     let (bytes, sha256) = download_zip_bytes(
         &client,
-        &format!("llama.cpp {}", version),
-        url,
-        use_mirror,
-        mirror_url,
-        &expected_sha256,
+        ZipDownload {
+            label: &format!("llama.cpp {}", version),
+            url,
+            use_mirror,
+            mirror_url,
+            expected_sha256: &expected_sha256,
+        },
         proxy_url,
         &on_progress,
     )?;
@@ -1633,11 +1655,13 @@ pub fn download_and_install(
         let expected_runtime_sha256 = fetch_expected_sha256(&runtime_tag, &runtime_asset, proxy_url)?;
         let (runtime_bytes, runtime_sha256) = download_zip_bytes(
             &client,
-            "CUDA runtime",
-            &runtime_url,
-            use_mirror,
-            mirror_url,
-            &expected_runtime_sha256,
+            ZipDownload {
+                label: "CUDA runtime",
+                url: &runtime_url,
+                use_mirror,
+                mirror_url,
+                expected_sha256: &expected_runtime_sha256,
+            },
             proxy_url,
             &on_progress,
         )?;
@@ -1742,7 +1766,6 @@ mod tests {
 
     const REAL_ASSET_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b6459/llama-b6459-bin-win-cuda-12.4-x64.zip";
 
-    #[test]
     /// 半成品目录带 `.partial` 后缀：安装未完成 / 进程被杀时残留的目录
     /// 永远不能被 active_kernel_dir 当成当前核心（时间戳解析也要拒绝它）。
     #[test]

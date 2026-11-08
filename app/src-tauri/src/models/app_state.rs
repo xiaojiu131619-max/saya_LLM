@@ -552,14 +552,6 @@ impl StrataModel {
         }
     }
 
-    /// 模型展示名（`/health` 未回报时的兜底）。
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::S => "Qwen3.8-Flash-Next（Gyro-S）",
-            Self::M => "Qwen3.8-Flash-Next（Gyro-M · ABL）",
-        }
-    }
-
     /// strata launch 生成的 run config 文件名（按优先级探测）。
     fn config_filenames(self) -> &'static [&'static str] {
         match self {

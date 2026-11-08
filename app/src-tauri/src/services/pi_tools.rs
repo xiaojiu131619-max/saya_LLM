@@ -164,8 +164,10 @@ static PERMISSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static BRIDGE_TOKEN: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 static PERMISSION_MODE: Lazy<Mutex<PiPermissionMode>> =
     Lazy::new(|| Mutex::new(PiPermissionMode::Auto));
-/// 挂起的权限确认：id → (应答通道, 工具名)。工具名用于失效事件回显。
-static PENDING_PERMISSIONS: Lazy<Mutex<HashMap<String, (mpsc::Sender<bool>, String)>>> =
+/// 一条挂起的权限确认：应答通道 + 工具名（工具名用于失效事件回显）。
+type PendingPermission = (mpsc::Sender<bool>, String);
+/// 挂起的权限确认：id → 挂起项。
+static PENDING_PERMISSIONS: Lazy<Mutex<HashMap<String, PendingPermission>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// 发权限事件用的 AppHandle；start_bridge 时刷新。
@@ -657,17 +659,19 @@ fn execute_mcp_tool(
             break;
         }
     }
-    let Some((config, read_only, destructive)) = matched else {
+    let Some((config, read_only, _destructive)) = matched else {
         return PiToolResult::err(
             format!("MCP 工具 {tool} 不在已连接服务器中，请先在工具浮窗里连接对应服务"),
             true,
         );
     };
+    // auto 档：任何非只读的 MCP 工具都逐条询问。`destructive` 只用于前端提示，
+    // 不参与这里的判定；原条件 `!read_only && (destructive || !read_only)` 等价于 `!read_only`。
     match mode {
         PiPermissionMode::Plan if !read_only => {
             return PiToolResult::err("只读档：不允许调用会修改数据的 MCP 工具", true);
         }
-        PiPermissionMode::Auto if !read_only && (destructive || !read_only) => {
+        PiPermissionMode::Auto if !read_only => {
             let allow = state.prompt.ask(
                 tool,
                 "调用 MCP 工具",
@@ -991,9 +995,10 @@ pub fn execute_tool(
             }
         }
         // ── 画布联动（只读 + 生图；详见 canvas_agent）────────────
-        "canvas_status" => match crate::services::canvas_agent::status() {
-            value => PiToolResult::ok(value.to_string(), None),
-        },
+        "canvas_status" => {
+            let value = crate::services::canvas_agent::status();
+            PiToolResult::ok(value.to_string(), None)
+        }
         "canvas_list_workflows" => match crate::services::canvas_agent::list_workflows() {
             Ok(value) => PiToolResult::ok(value.to_string(), None),
             Err(error) => PiToolResult::err(error, false),

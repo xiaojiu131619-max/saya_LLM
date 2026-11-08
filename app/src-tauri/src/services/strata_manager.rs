@@ -325,150 +325,12 @@ pub fn probe_health(port: u16) -> Option<StrataHealth> {
     })
 }
 
-/// 读取网关 `/v1/models` 报出的模型 ID。
-///
-/// 智慧模型的模型名由 run config 决定（S：`qwen3.8-flash-next-gyro-gyro-s`，
-/// M：`qwen3.8-flash-next-gyro-gyro-m`），应用配置里没有这一项——
-/// 对外调用必须按网关实际回报的 ID 写，写错会得到一个 404。
-pub fn probe_model_ids(port: u16, api_key: &str) -> Vec<String> {
-    let url = format!("http://127.0.0.1:{}/v1/models", port);
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .no_proxy()
-        .build()
-    else {
-        return Vec::new();
-    };
-    let Ok(response) = client.get(&url).bearer_auth(api_key).send() else {
-        return Vec::new();
-    };
-    if response.status().as_u16() != 200 {
-        return Vec::new();
-    }
-    let Ok(value) = response.json::<serde_json::Value>() else {
-        return Vec::new();
-    };
-    value
-        .get("data")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 // ---------------------------------------------------------------------------
 // Job Object（整树回收）
 // ---------------------------------------------------------------------------
 
-#[allow(non_snake_case, non_upper_case_globals, dead_code)]
-mod job_guard {
-    use std::sync::Mutex;
-
-    type HANDLE = *mut std::ffi::c_void;
-
-    // HANDLE 是裸指针，需要包装才能在线程间安全传递
-    struct JobHandle(HANDLE);
-    unsafe impl Send for JobHandle {}
-    unsafe impl Sync for JobHandle {}
-
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-    const JobObjectExtendedLimitInformation: u32 = 9;
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        PerProcessUserTimeLimit: i64,
-        PerJobUserTimeLimit: i64,
-        LimitFlags: u32,
-        MinimumWorkingSetSize: usize,
-        MaximumWorkingSetSize: usize,
-        ActiveProcessLimit: u32,
-        Affinity: usize,
-        // 必须是 PriorityClass / SchedulingClass（各 u32），
-        // 多 4 字节会让 SetInformationJobObject 报 ERROR_BAD_LENGTH。
-        PriorityClass: u32,
-        SchedulingClass: u32,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        IoInfo: [u64; 6],
-        ProcessMemoryLimit: usize,
-        JobMemoryLimit: usize,
-        PeakProcessMemoryUsed: usize,
-        PeakJobMemoryUsed: usize,
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
-
-    extern "system" {
-        fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
-            hJob: HANDLE,
-            JobObjectInfoClass: u32,
-            lpJobObjectInfo: *const u8,
-            cbJobObjectInfoLength: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
-        fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> i32;
-        fn CloseHandle(hObject: HANDLE) -> i32;
-    }
-
-    static JOB_HANDLE: Mutex<Option<JobHandle>> = Mutex::new(None);
-
-    pub fn attach(process_handle: HANDLE) -> bool {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                eprintln!("[strata] Job Object 创建失败");
-                return false;
-            }
-            let mut info = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ret = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const u8,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ret == 0 {
-                eprintln!("[strata] SetInformationJobObject 失败");
-                CloseHandle(job);
-                return false;
-            }
-            if AssignProcessToJobObject(job, process_handle) == 0 {
-                // 常见原因：应用自身已被外层 Job 托管（从某些宿主启动时会这样），
-                // 子进程继承了那个 Job，再指派到新 Job 会被拒绝。
-                // 这种情况 Job 兜不住内核，stop 时靠按命令行精确清理补上。
-                eprintln!("[strata] AssignProcessToJobObject 失败");
-                CloseHandle(job);
-                return false;
-            }
-            if let Ok(mut guard) = JOB_HANDLE.lock() {
-                *guard = Some(JobHandle(job));
-            }
-            eprintln!("[strata] Job Object 已附加到 strata 网关进程");
-            true
-        }
-    }
-
-    /// 终止整棵树（网关 + 它拉起的 strata.exe 内核）。
-    pub fn terminate() {
-        if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(JobHandle(job)) = guard.take() {
-                unsafe {
-                    TerminateJobObject(job, 1);
-                    CloseHandle(job);
-                }
-            }
-        }
-    }
-}
+static JOB_SLOT: crate::services::job_guard::JobSlot =
+    crate::services::job_guard::JobSlot::new("strata");
 
 // ---------------------------------------------------------------------------
 // 全局状态
@@ -728,9 +590,12 @@ fn start_strata_locked(
     // 附加失败不是致命错误——stop_strata 还有按命令行精确清理这一道。
     #[cfg(windows)]
     {
+        // 先取出子进程并释放锁，再附加 Job Object：`if let` 会把 scrutinee 的
+        // MutexGuard 延长到整个分支，分支内再次 lock 同一把锁会死锁。
+        let child = STRATA_CHILD.lock().ok().and_then(|mut g| g.take());
         let attached = {
-            if let Some(child) = STRATA_CHILD.lock().ok().and_then(|mut g| g.take()) {
-                let result = job_guard::attach(child.as_raw_handle());
+            if let Some(child) = child {
+                let result = JOB_SLOT.assign(child.as_raw_handle());
                 if let Ok(mut guard) = STRATA_CHILD.lock() {
                     *guard = Some(child);
                 }
@@ -931,7 +796,7 @@ fn stop_strata_locked() -> Result<(), String> {
 
     // 优先走 Job Object 整树终止：strata.exe 内核是网关的子进程，
     // 只杀 Python 会留下正在占显存的内核。
-    job_guard::terminate();
+    JOB_SLOT.terminate();
 
     let mut had_process = false;
     if let Ok(mut guard) = STRATA_CHILD.lock() {

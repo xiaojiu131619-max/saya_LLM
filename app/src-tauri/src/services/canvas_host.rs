@@ -20,14 +20,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 pub struct CanvasHostHandle {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    port: u16,
 }
 
 impl CanvasHostHandle {
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
     /// 停止托管线程。最多等待一个 200ms 的轮询周期。
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
@@ -76,7 +71,6 @@ pub fn start(root: PathBuf, port: u16, gateway_port: u16) -> Result<CanvasHostHa
     Ok(CanvasHostHandle {
         shutdown,
         thread: Some(thread),
-        port,
     })
 }
 

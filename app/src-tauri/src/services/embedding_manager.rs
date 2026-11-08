@@ -33,111 +33,8 @@ use crate::models::server_config::ServerConfig;
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-#[allow(non_snake_case, non_upper_case_globals, dead_code)]
-mod job_guard {
-    use std::sync::Mutex;
-
-    type HANDLE = *mut std::ffi::c_void;
-
-    struct JobHandle(HANDLE);
-    unsafe impl Send for JobHandle {}
-    unsafe impl Sync for JobHandle {}
-
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-    const JobObjectExtendedLimitInformation: u32 = 9;
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        PerProcessUserTimeLimit: i64,
-        PerJobUserTimeLimit: i64,
-        LimitFlags: u32,
-        MinimumWorkingSetSize: usize,
-        MaximumWorkingSetSize: usize,
-        ActiveProcessLimit: u32,
-        Affinity: usize,
-        // 必须是 PriorityClass / SchedulingClass（各 u32），
-        // 多 4 字节会让 SetInformationJobObject 报 ERROR_BAD_LENGTH。
-        PriorityClass: u32,
-        SchedulingClass: u32,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        IoInfo: [u64; 6],
-        ProcessMemoryLimit: usize,
-        JobMemoryLimit: usize,
-        PeakProcessMemoryUsed: usize,
-        PeakJobMemoryUsed: usize,
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
-
-    extern "system" {
-        fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
-            hJob: HANDLE,
-            JobObjectInfoClass: u32,
-            lpJobObjectInfo: *const u8,
-            cbJobObjectInfoLength: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
-        fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> i32;
-        fn CloseHandle(hObject: HANDLE) -> i32;
-    }
-
-    static JOB_HANDLE: Mutex<Option<JobHandle>> = Mutex::new(None);
-
-    pub fn attach(process_handle: HANDLE) {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                eprintln!("[embedding] Job Object 创建失败");
-                return;
-            }
-            let mut info = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ret = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const u8,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ret == 0 {
-                eprintln!("[embedding] SetInformationJobObject 失败");
-                CloseHandle(job);
-                return;
-            }
-            if AssignProcessToJobObject(job, process_handle) == 0 {
-                eprintln!("[embedding] AssignProcessToJobObject 失败");
-                CloseHandle(job);
-                return;
-            }
-            if let Ok(mut guard) = JOB_HANDLE.lock() {
-                // 上一次启动的 Job Object 可能在进程自行退出时未被回收（只有
-                // stop_embedding_server 会关闭它），覆盖前先终止并关闭，避免句柄泄漏。
-                if let Some(JobHandle(previous)) = guard.take() {
-                    TerminateJobObject(previous, 1);
-                    CloseHandle(previous);
-                }
-                *guard = Some(JobHandle(job));
-            }
-            eprintln!("[embedding] Job Object 已附加到向量服务进程");
-        }
-    }
-
-    pub fn terminate() {
-        if let Ok(mut guard) = JOB_HANDLE.lock() {
-            if let Some(JobHandle(job)) = guard.take() {
-                unsafe {
-                    TerminateJobObject(job, 1);
-                    CloseHandle(job);
-                }
-            }
-        }
-    }
-}
+static JOB_SLOT: crate::services::job_guard::JobSlot =
+    crate::services::job_guard::JobSlot::new("embedding");
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -579,7 +476,7 @@ pub fn start_embedding_server(
     #[cfg(windows)]
     {
         if let Some(guard) = EMBEDDING_CHILD.lock().ok().as_mut().and_then(|g| g.as_mut()) {
-            job_guard::attach(guard.as_raw_handle());
+            JOB_SLOT.assign(guard.as_raw_handle());
         }
     }
 
@@ -734,7 +631,7 @@ pub fn start_embedding_server(
 pub fn stop_embedding_server() -> Result<(), String> {
     EMBEDDING_GENERATION.fetch_add(1, Ordering::SeqCst);
     #[cfg(windows)]
-    job_guard::terminate();
+    JOB_SLOT.terminate();
 
     let mut had_process = false;
     {

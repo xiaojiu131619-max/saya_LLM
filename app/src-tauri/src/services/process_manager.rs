@@ -13,80 +13,24 @@ use std::time::{Duration, Instant};
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
-#[allow(non_snake_case, non_upper_case_globals, dead_code)]
 mod job_guard {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     use once_cell::sync::Lazy;
 
-    type HANDLE = *mut std::ffi::c_void;
-
-    // HANDLE 是裸指针，需要包装才能在线程间安全传递
-    struct JobHandle(HANDLE);
-    unsafe impl Send for JobHandle {}
-    unsafe impl Sync for JobHandle {}
-
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x00002000;
-    const JOB_OBJECT_LIMIT_TERMINATE: u32 = 0x00000004;
-    const JobObjectExtendedLimitInformation: u32 = 9;
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        PerProcessUserTimeLimit: i64,
-        PerJobUserTimeLimit: i64,
-        LimitFlags: u32,
-        MinimumWorkingSetSize: usize,
-        MaximumWorkingSetSize: usize,
-        ActiveProcessLimit: u32,
-        Affinity: usize,
-        // 末尾两项是 PriorityClass / SchedulingClass（各 u32）。
-        // 早期误写成 ChildProcessCount + Reserved[2]，使结构体多 4 字节，
-        // SetInformationJobObject 会以 ERROR_BAD_LENGTH 失败、整树回收实际从未生效。
-        PriorityClass: u32,
-        SchedulingClass: u32,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        IoInfo: [u64; 6],
-        ProcessMemoryLimit: usize,
-        JobMemoryLimit: usize,
-        PeakProcessMemoryUsed: usize,
-        PeakJobMemoryUsed: usize,
-    }
-
-    // x64 下 JOBOBJECT_EXTENDED_LIMIT_INFORMATION 固定 144 字节；布局写错会让
-    // SetInformationJobObject 以 ERROR_BAD_LENGTH 失败，编译期直接拦住。
-    #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
-
-    extern "system" {
-        fn CreateJobObjectW(lpJobAttributes: *const u8, lpName: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
-            hJob: HANDLE,
-            JobObjectInfoClass: u32,
-            lpJobObjectInfo: *const u8,
-            cbJobObjectInfoLength: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
-        fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> i32;
-        fn CloseHandle(hObject: HANDLE) -> i32;
-    }
+    use crate::services::job_guard::{Handle, Job};
 
     /// 按用途分组的 Job 表：同一个 tag 下的所有子进程共享一个 Job。
     ///
-    /// 早期实现只有一个 `Option<JobHandle>`，每次 attach 都新建 Job 并直接覆盖旧句柄：
-    /// 旧 Job 既不终止也无法再访问，后启动的 MCP 旁路会「顶掉」llama-server 的句柄，
-    /// `stop_server()` 于是只能终止最后一个 Job，整棵 llama 进程树被漏掉，句柄也一路泄漏。
-    /// 现在每个 tag 只建一个 Job，重复 attach 复用同一个 Job。
-    static JOBS: Lazy<Mutex<HashMap<String, JobHandle>>> =
+    /// 主服务与旁路（MCP / 画布 / Pi）各占一个 tag：停止主服务时不能连带杀掉
+    /// 仍在服役的旁路进程，而应用退出时所有 Job 句柄关闭，各进程树都会被系统回收。
+    static JOBS: Lazy<Mutex<HashMap<String, Job>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
 
     /// 把子进程放进 `tag` 对应的 Job；必要时创建 Job。
     /// 返回是否成功进入某个 Job（失败不致命，调用方仍有 taskkill 兜底）。
-    pub fn attach(process_handle: HANDLE, tag: &str) -> bool {
+    pub fn attach(process_handle: Handle, tag: &str) -> bool {
         let mut jobs = match JOBS.lock() {
             Ok(guard) => guard,
             Err(error) => {
@@ -97,57 +41,24 @@ mod job_guard {
 
         // 复用同 tag 的现有 Job：同一服务代次的进程树必须落在同一个 Job 里，
         // 这样 terminate(tag) 才能一次性回收整棵树。
-        if let Some(JobHandle(job)) = jobs.get(tag) {
-            unsafe {
-                if AssignProcessToJobObject(*job, process_handle) != 0 {
-                    return true;
-                }
-                // 旧 Job 已被 TerminateJobObject 终止时无法再接收进程，重建一个。
-                eprintln!("[server] 现有 Job({tag}) 不可复用，重建");
-            }
-            if let Some(JobHandle(stale)) = jobs.remove(tag) {
-                unsafe {
-                    CloseHandle(stale);
-                }
+        if let Some(job) = jobs.get(tag) {
+            if job.assign(process_handle, "server") {
+                return true;
             }
         }
-
-        unsafe {
-            // 创建一个无名 Job Object
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                eprintln!("[server] Job Object 创建失败");
-                return false;
-            }
-
-            // 设置 KILL_ON_JOB_CLOSE：父进程退出时 OS 自动终止子进程
-            let mut info = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            let ret = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const u8,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ret == 0 {
-                eprintln!("[server] SetInformationJobObject 失败");
-                CloseHandle(job);
-                return false;
-            }
-
-            // 将子进程附加到 Job Object
-            let ret = AssignProcessToJobObject(job, process_handle);
-            if ret == 0 {
-                eprintln!("[server] AssignProcessToJobObject 失败");
-                CloseHandle(job);
-                return false;
-            }
-
-            jobs.insert(tag.to_string(), JobHandle(job));
-            eprintln!("[server] Job Object 已附加到子进程（tag={tag}）");
-            true
+        if jobs.remove(tag).is_some() {
+            eprintln!("[server] 现有 Job({tag}) 不可复用，重建");
         }
+
+        let Some(job) = Job::create("server") else {
+            return false;
+        };
+        if !job.assign(process_handle, "server") {
+            return false;
+        }
+        jobs.insert(tag.to_string(), job);
+        eprintln!("[server] Job Object 已附加到子进程（tag={tag}）");
+        true
     }
 
     /// 终止并释放一个 tag 的整棵进程树。
@@ -156,25 +67,8 @@ mod job_guard {
             Ok(mut guard) => guard.remove(tag),
             Err(_) => None,
         };
-        if let Some(JobHandle(job)) = job {
-            unsafe {
-                TerminateJobObject(job, 1);
-                CloseHandle(job);
-            }
-        }
-    }
-
-    /// 应用退出时释放所有 Job 句柄。KILL_ON_JOB_CLOSE 会在最后一个句柄关闭时
-    /// 由系统回收其中所有进程，所以这里只需关句柄，不必逐个 Terminate。
-    pub fn cleanup() {
-        let jobs = match JOBS.lock() {
-            Ok(mut guard) => std::mem::take(&mut *guard),
-            Err(_) => return,
-        };
-        for (_, JobHandle(handle)) in jobs {
-            unsafe {
-                CloseHandle(handle);
-            }
+        if let Some(job) = job {
+            job.terminate();
         }
     }
 }
@@ -330,16 +224,20 @@ fn select_server_tools(
     selection
 }
 
+/// 去掉首尾空白与 IPv6 字面量的方括号，供各处主机名比较复用。
+fn normalized_host(host: &str) -> &str {
+    host.trim().trim_start_matches('[').trim_end_matches(']')
+}
+
 fn server_tools_are_protected(host: &str, api_key: Option<&str>) -> bool {
     if api_key.is_some_and(|key| !key.trim().is_empty()) {
         return true;
     }
-    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let normalized = normalized_host(host);
     normalized.eq_ignore_ascii_case("localhost")
         || normalized
             .parse::<IpAddr>()
-            .map(|address| address.is_loopback())
-            .unwrap_or(false)
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn append_server_tools(
@@ -701,11 +599,9 @@ fn is_app_managed_llama_exe(path: &Path) -> bool {
     let Ok(canonical) = path.canonicalize() else {
         return false;
     };
-    resources_roots.into_iter().any(|root| {
-        root.canonicalize()
-            .map(|canonical_root| canonical.starts_with(canonical_root))
-            .unwrap_or(false)
-    })
+    resources_roots
+        .into_iter()
+        .any(|root| root.canonicalize().is_ok_and(|dir| canonical.starts_with(dir)))
 }
 
 /// 当前由本应用管理的 llama 进程 PID 集合（对话服务 + 向量服务）。
@@ -780,20 +676,18 @@ pub(crate) fn parse_progress(line: &str) -> u32 {
         return 85;
     }
 
-    if line.contains("offloaded ") {
-        if let Some(caps) = line.find("offloaded ") {
-            let rest = &line[caps + 10..];
-            if let Some(slash) = rest.find('/') {
-                let done: u32 = rest[..slash].trim().parse().unwrap_or(0);
-                let rest2 = &rest[slash + 1..];
-                let end: u32 = rest2
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                if end > 0 {
-                    return 20 + ((done * 60).checked_div(end).unwrap_or(1).min(65));
-                }
+    if let Some(index) = line.find("offloaded ") {
+        let rest = &line[index + 10..];
+        if let Some((done_text, total_text)) = rest.split_once('/') {
+            let done: u32 = done_text.trim().parse().unwrap_or(0);
+            let total: u32 = total_text
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
+            // total 为 0 的异常行不给出进度，继续交给下面的规则判断。
+            if let Some(progress) = (done * 60).checked_div(total) {
+                return 20 + progress.min(65);
             }
         }
     }
@@ -855,7 +749,7 @@ fn health_check_host(config: &ServerConfig) -> String {
 }
 
 fn is_external_bind_host(host: &str) -> bool {
-    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let normalized = normalized_host(host);
     if matches!(normalized, "0.0.0.0" | "::") {
         return true;
     }
@@ -864,8 +758,7 @@ fn is_external_bind_host(host: &str) -> bool {
     }
     normalized
         .parse::<IpAddr>()
-        .map(|address| !address.is_loopback() && !address.is_unspecified())
-        .unwrap_or(false)
+        .is_ok_and(|address| !address.is_loopback() && !address.is_unspecified())
 }
 
 fn discover_lan_ip() -> Option<IpAddr> {
@@ -887,7 +780,7 @@ fn discover_lan_ip() -> Option<IpAddr> {
 }
 
 fn external_host_for_bind(host: &str, detected_lan_ip: Option<IpAddr>) -> Option<String> {
-    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let normalized = normalized_host(host);
     if matches!(normalized, "0.0.0.0" | "::") {
         return detected_lan_ip.map(|address| address.to_string());
     }
@@ -1157,314 +1050,6 @@ fn detect_error(line: &str) -> Option<ServerError> {
     None
 }
 
-#[allow(dead_code)]
-fn start_server_once_legacy<F: Fn(ServerProgress) + Send + 'static>(
-    config: &ServerConfig,
-    on_progress: F,
-    on_ready: impl Fn() + Send + Sync + 'static,
-    on_error: impl Fn(ServerError) + Send + Sync + 'static,
-) -> Result<()> {
-    eprintln!(
-        "[server] start_server called with: ngl={}, n_ctx={}, host={}, port={}",
-        config.ngl,
-        config.n_ctx,
-        bind_host(config),
-        config.port
-    );
-
-    {
-        let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
-        if let Some(mut old_child) = guard.take() {
-            eprintln!("[server] stopping existing server before restart...");
-            let _ = old_child.kill();
-            let _ = old_child.wait();
-        }
-    }
-
-    let exe = resolve_exe_path(&config.executable_path);
-    eprintln!("[server] resolved exe path: {}", exe);
-    if !Path::new(&exe).exists() {
-        return Err(anyhow::anyhow!(
-            "找不到 llama-server.exe (搜索路径: {})。请在设置中指定正确路径，或将其放入 resources/ 目录。",
-            exe
-        ));
-    }
-
-    stop_stale_servers_for_exe_excluding(&exe, &managed_llama_pids());
-    clear_logs();
-
-    // Honor the configured ngl exactly. The detail page defaults the slider to
-    // the model's full layer count, so an untouched config still offloads every
-    // layer — but if the user (or Auto-Tune) lowered ngl, we respect that here
-    // instead of forcing it back to max.
-    let effective_ngl = config.ngl;
-    eprintln!("[server] using configured ngl={}", effective_ngl);
-    let host = bind_host(config);
-
-    let mut cmd = Command::new(&exe);
-    configure_media_runtime_path(&mut cmd, Path::new(&exe));
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    cmd.arg("-m")
-        .arg(&config.model_path)
-        .arg("--port")
-        .arg(config.port.to_string())
-        .arg("--host")
-        .arg(&host)
-        .arg("-ngl")
-        .arg(effective_ngl.to_string())
-        .arg("-c")
-        .arg(config.n_ctx.to_string())
-        .arg("-b")
-        .arg(config.batch_size.to_string());
-
-    if let Some(alias) = config.model_alias.as_deref().filter(|a| !a.is_empty()) {
-        cmd.arg("--alias").arg(alias);
-    }
-
-    if config.ubatch_size > 0 {
-        cmd.arg("-ub").arg(config.ubatch_size.to_string());
-    }
-    if config.threads > 0 {
-        cmd.arg("-t").arg(config.threads.to_string());
-    }
-    if config.parallel > 0 {
-        cmd.arg("-np").arg(config.parallel.to_string());
-    }
-
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    // 新版 llama.cpp 把模型/KV/计算缓冲的明细放在 info 级（3）之上；
-    // 显存记录依赖 load_tensors / llama_kv_cache / sched_reserve 行，必须显式开到 4。
-    // 只影响日志体积，不改变实际分配与推理参数。
-    if kernel_supports_feature(exe.as_ref(), "--log-verbosity") {
-        cmd.arg("--log-verbosity").arg("4");
-    } else {
-        add_log("[server] 当前内核不支持 --log-verbosity，本次启动记录将缺少缓冲分项。");
-    }
-    cmd.arg("--flash-attn")
-        .arg(if config.flash_attn { "on" } else { "off" });
-    if !config.kv_offload {
-        cmd.arg("--no-kv-offload");
-    }
-    cmd.arg(if config.kv_unified {
-        "--kv-unified"
-    } else {
-        "--no-kv-unified"
-    });
-    apply_mmap_mlock_args(&mut cmd, &exe, config);
-    if config.no_warmup {
-        cmd.arg("--no-warmup");
-    }
-    if config.no_cuda {
-        cmd.arg("--device").arg("none");
-    }
-    if config.ncmoe > 0 {
-        cmd.arg("-ncmoe").arg(config.ncmoe.to_string());
-    }
-    append_server_tools(
-        &mut cmd,
-        &exe,
-        config.tools.as_deref(),
-        &host,
-        config.api_key.as_deref(),
-    );
-    if let Some(api_key) = config
-        .api_key
-        .as_ref()
-        .map(|key| key.trim())
-        .filter(|key| !key.is_empty())
-    {
-        cmd.arg("--api-key").arg(api_key);
-    }
-    if config.cache_type_k_enabled && !config.cache_type_k.trim().is_empty() {
-        cmd.arg("-ctk").arg(&config.cache_type_k);
-    }
-    if config.cache_type_v_enabled && !config.cache_type_v.trim().is_empty() {
-        cmd.arg("-ctv").arg(&config.cache_type_v);
-    }
-    if let Some(value) = config.rope_freq_base {
-        if value > 0.0 {
-            cmd.arg("--rope-freq-base").arg(value.to_string());
-        }
-    }
-    if let Some(value) = config.rope_freq_scale {
-        if value > 0.0 {
-            cmd.arg("--rope-freq-scale").arg(value.to_string());
-        }
-    }
-    if let Some(seed) = config.seed {
-        cmd.arg("-s").arg(seed.to_string());
-    }
-    if let Some(template) = config
-        .chat_template
-        .as_ref()
-        .map(|template| template.trim())
-        .filter(|template| !template.is_empty())
-    {
-        cmd.arg("--chat-template").arg(template);
-    }
-
-    // Print the exact command line so the user can copy-paste and test manually.
-    eprintln!(
-        "[server] spawn: {}",
-        build_redacted_command_line(&exe, &cmd)
-    );
-
-    let mut child = cmd.spawn()?;
-    eprintln!("[server] child pid = {:?}", child.id());
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    {
-        let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
-        *guard = Some(child);
-    }
-
-    // 附加 Job Object：确保父进程崩溃时子进程被 OS 回收
-    #[cfg(windows)]
-    {
-        if let Some(guard) = CHILD_PROCESS.lock().ok().as_mut().and_then(|g| g.as_mut()) {
-            job_guard::attach(guard.as_raw_handle(), SERVER_JOB_TAG);
-        }
-    }
-
-    let (tx, rx) = mpsc::channel::<String>();
-
-    if let Some(out) = stdout {
-        let tx_out = tx.clone();
-        std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if tx_out.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    if let Some(err) = stderr {
-        std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    // Whichever signals readiness/failure first wins; the guard makes sure the
-    // frontend only ever receives one terminal event.
-    let fired = Arc::new(AtomicBool::new(false));
-    let on_ready = Arc::new(on_ready);
-    let on_error = Arc::new(on_error);
-
-    // HTTP health-check fallback: the log line "server is listening" can be
-    // missed (buffering, reworded across llama.cpp versions), which previously
-    // left the loading screen stuck forever. Polling /health is authoritative.
-    {
-        let fired = fired.clone();
-        let on_ready = on_ready.clone();
-        let port = config.port;
-        let health_host = health_check_host(config);
-        let api_key = config
-            .api_key
-            .as_ref()
-            .map(|key| key.trim().to_string())
-            .filter(|key| !key.is_empty());
-        std::thread::spawn(move || {
-            let client = match reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[server] health-check client build failed: {}", e);
-                    return;
-                }
-            };
-            let url = format!("http://{}:{}/health", health_host, port);
-            eprintln!("[server] health-check polling {}", url);
-            let deadline = Instant::now() + Duration::from_secs(600);
-            while Instant::now() < deadline {
-                // Give up if the process already died.
-                if !is_server_running() {
-                    eprintln!("[server] health-check abort: process died");
-                    return;
-                }
-                let request = client.get(&url);
-                let request = if let Some(key) = &api_key {
-                    request.bearer_auth(key)
-                } else {
-                    request
-                };
-                if let Ok(resp) = request.send() {
-                    if resp.status().is_success() {
-                        eprintln!("[server] health-check ready ({})", resp.status());
-                        if !fired.swap(true, Ordering::SeqCst) {
-                            on_ready();
-                        }
-                        return;
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            eprintln!("[server] health-check timed out after 600s");
-        });
-    }
-
-    std::thread::spawn(move || {
-        let mut max_progress = 0u32;
-        for line in rx {
-            add_log(&line);
-            let p = parse_progress(&line);
-            if p > max_progress {
-                max_progress = p;
-            }
-            on_progress(ServerProgress {
-                progress: max_progress,
-                stage: stage_name(max_progress),
-                log: line.clone(),
-            });
-
-            if line.contains("server is listening") {
-                if !fired.swap(true, Ordering::SeqCst) {
-                    on_ready();
-                }
-                return;
-            }
-
-            if let Some(err) = detect_error(&line) {
-                if !fired.swap(true, Ordering::SeqCst) {
-                    on_error(err);
-                }
-                return;
-            }
-        }
-
-        // Log stream ended. If we never signaled readiness, the process bailed
-        // before listening — report a failure (unless the health check already
-        // declared success).
-        if !fired.swap(true, Ordering::SeqCst) {
-            eprintln!(
-                "[server] log stream ended without ready/error signal — process exited early"
-            );
-            on_error(ServerError {
-                error_type: "unknown".into(),
-                title: "启动失败".into(),
-                details: "进程异常退出，请在 llama.cpp 目录下手动运行 llama-server.exe 测试".into(),
-                suggestions: vec![
-                    "检查模型文件路径是否正确".into(),
-                    "在命令行手动测试: llama-server.exe -m 模型路径".into(),
-                    "检查显卡驱动是否正常".into(),
-                ],
-            });
-        }
-    });
-
-    Ok(())
-}
-
 enum MonitorResult {
     Ready,
     Error(ServerError),
@@ -1531,15 +1116,6 @@ fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// 当前生效的 llama-server 启动配置（进程未启动时可能为 None）。
-/// 供对话页等处读取真实上下文长度等参数，避免写死固定值。
-pub fn current_server_config() -> Option<ServerConfig> {
-    LAST_SERVER_CONFIG
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
 }
 
 pub fn ping_server() -> PingResult {
@@ -1681,9 +1257,13 @@ fn compatible_cpu_config(config: &ServerConfig) -> ServerConfig {
     fallback
 }
 
+/// 是否还允许再试一次 CPU 兼容模式：用户关闭回退或已显式选 CPU 时不再重试。
+fn cpu_fallback_allowed(config: &ServerConfig, already_retried: bool) -> bool {
+    config.retry_cpu_fallback && !config.no_cuda && !already_retried
+}
+
 fn should_retry_with_cpu(error: &ServerError, config: &ServerConfig) -> bool {
-    config.retry_cpu_fallback
-        && !config.no_cuda
+    cpu_fallback_allowed(config, false)
         && matches!(
             error.error_type.as_str(),
             "warmup" | "cuda" | "vulkan" | "oom"
@@ -1793,7 +1373,8 @@ pub fn kernel_supports_feature(exe: &str, flag: &str) -> bool {
 }
 
 /// 追加新内核专属参数；探测不到时只记日志，避免用户看到晦涩的参数解析失败。
-fn append_new_kernel_arg(    cmd: &mut Command,
+fn append_new_kernel_arg(
+    cmd: &mut Command,
     supported: bool,
     flag: &str,
     value: Option<String>,
@@ -1993,8 +1574,8 @@ pub fn detect_kernel_backend(exe: &str) -> KernelBackend {
 /// - HIP 内核 + 无 HIP 设备 = ROCm/HIP 包只覆盖部分 AMD 卡（RX 6000/7000/9000、
 ///   Pro W6000/W7000、Instinct），装在其它卡上必然退回 CPU——无论机器上还有没有
 ///   Vulkan 设备都应阻断并指路（NVIDIA 卡装了 ROCm 包同样用不上）。
-/// NVIDIA 卡配 Vulkan 内核可以正常跑（只是通常慢些），因此放行，
-/// 避免为了速度偏好阻断用户的可行配置。
+///   NVIDIA 卡配 Vulkan 内核可以正常跑（只是通常慢些），因此放行，
+///   避免为了速度偏好阻断用户的可行配置。
 fn backend_mismatch_reason(
     backend: KernelBackend,
     has_cuda_device: bool,
@@ -2444,7 +2025,7 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     // 新版 llama.cpp 把模型/KV/计算缓冲的明细放在 info 级（3）之上；
     // 显存记录依赖 load_tensors / llama_kv_cache / sched_reserve 行，必须显式开到 4。
     // 只影响日志体积，不改变实际分配与推理参数。
-    if kernel_supports_feature(exe.as_ref(), "--log-verbosity") {
+    if kernel_supports_feature(exe, "--log-verbosity") {
         cmd.arg("--log-verbosity").arg("4");
     } else {
         add_log("[server] 当前内核不支持 --log-verbosity，本次启动记录将缺少缓冲分项。");
@@ -2817,15 +2398,6 @@ fn exited_error() -> ServerError {
     }
 }
 
-pub fn start_server<F: Fn(ServerProgress) + Send + Sync + 'static>(
-    config: &ServerConfig,
-    on_progress: F,
-    on_ready: impl Fn() + Send + Sync + 'static,
-    on_error: impl Fn(ServerError) + Send + Sync + 'static,
-) -> Result<()> {
-    start_server_internal(config, on_progress, on_ready, on_error, None).map(|_| ())
-}
-
 /// 调参专用：不清扫外部进程，释放所有权前必须等待返回的线程退出。
 pub(crate) fn start_tuning_server(
     config: &ServerConfig,
@@ -2979,21 +2551,21 @@ pub(crate) fn start_server_internal(
                                                 })
                                             })
                                             .unwrap_or(false);
-                                        if alive {
-                                            if last_warning.as_deref() != Some(err.details.as_str()) {
-                                                eprintln!(
-                                                    "[server] runtime diagnostic (gen={}): {}",
-                                                    generation, err.error_type
-                                                );
-                                                log_server_event(
-                                                    "warn",
-                                                    &format!(
-                                                        "运行期告警（{}，服务仍在运行）：{}",
-                                                        err.error_type, err.details
-                                                    ),
-                                                );
-                                                last_warning = Some(err.details.clone());
-                                            }
+                                        if alive
+                                            && last_warning.as_deref() != Some(err.details.as_str())
+                                        {
+                                            eprintln!(
+                                                "[server] runtime diagnostic (gen={}): {}",
+                                                generation, err.error_type
+                                            );
+                                            log_server_event(
+                                                "warn",
+                                                &format!(
+                                                    "运行期告警（{}，服务仍在运行）：{}",
+                                                    err.error_type, err.details
+                                                ),
+                                            );
+                                            last_warning = Some(err.details.clone());
                                         }
                                     }
                                 }
@@ -3079,7 +2651,7 @@ pub(crate) fn start_server_internal(
                 }
                 MonitorResult::Exited => {
                     // 静默退出也可能是 CUDA 问题，尝试 CPU 回退
-                    if current_config.retry_cpu_fallback && !current_config.no_cuda && !did_cpu_retry {
+                    if cpu_fallback_allowed(&current_config, did_cpu_retry) {
                         eprintln!("[server] server exited silently, retrying in CPU compatibility mode");
                         add_log("[server] 服务静默退出，自动切换到 CPU 兼容模式重试");
                         stop_server().ok();
@@ -3095,7 +2667,7 @@ pub(crate) fn start_server_internal(
                 }
                 MonitorResult::TimedOut => {
                     // 启动超时也可能是 CUDA 问题，尝试 CPU 回退
-                    if current_config.retry_cpu_fallback && !current_config.no_cuda && !did_cpu_retry {
+                    if cpu_fallback_allowed(&current_config, did_cpu_retry) {
                         eprintln!("[server] server timed out, retrying in CPU compatibility mode");
                         add_log("[server] 启动超时，自动切换到 CPU 兼容模式重试");
                         stop_server().ok();
@@ -3339,16 +2911,9 @@ fn collect_api_usage(line: &str) {
             });
             table.last_mut().expect("刚 push，必存在")
         };
-        if prompt > 0 {
-            entry.prompt_tokens += prompt;
-        }
-        if completion > 0 {
-            entry.completion_tokens += completion;
-        }
-        let added = prompt + completion;
-        if added > 0 {
-            entry.total_tokens += added;
-        }
+        entry.prompt_tokens += prompt;
+        entry.completion_tokens += completion;
+        entry.total_tokens += prompt + completion;
         if is_completion {
             entry.response_count += 1;
         }
@@ -3368,7 +2933,7 @@ fn parse_print_timing(line: &str) -> Option<(u64, u64)> {
     let tokens_part = line
         .split('/')
         .nth(1)
-        .and_then(|rest| rest.trim().split_whitespace().next())?;
+        .and_then(|rest| rest.split_whitespace().next())?;
     let count: u64 = tokens_part.parse().ok()?;
     if is_prompt {
         Some((count, 0))
@@ -3379,20 +2944,18 @@ fn parse_print_timing(line: &str) -> Option<(u64, u64)> {
 
 /// 当前服务关联的模型名（优先 alias，其次模型文件名），用于归并 token 统计。
 fn current_server_model_name() -> String {
-    let model_name = LAST_SERVER_CONFIG
+    LAST_SERVER_CONFIG
         .lock()
         .ok()
-        .and_then(|config| config.as_ref().map(|c| {
-            c.model_alias
-                .clone()
-                .or_else(|| {
-                    std::path::Path::new(&c.model_path)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                })
-        }))
-        .flatten();
-    model_name.unwrap_or_else(|| "llama-server".to_string())
+        .and_then(|state| {
+            let config = state.as_ref()?;
+            config.model_alias.clone().or_else(|| {
+                Path::new(&config.model_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+        })
+        .unwrap_or_else(|| "llama-server".to_string())
 }
 
 /// 读取当前累计的 token 用量（供前端并入使用详情）。
@@ -3580,7 +3143,7 @@ mod tests {
                     .parent()
                     .map(|dir| dir.join("resources").join("kernels"))
                     .unwrap_or_default();
-                match kernels.read_dir().ok().and_then(|mut entries| {
+                match kernels.read_dir().ok().and_then(|entries| {
                     entries
                         .filter_map(|entry| entry.ok())
                         .filter(|entry| entry.path().is_dir())
@@ -3948,8 +3511,10 @@ mod tests {
         std::fs::write(kernel_dir.join("llama.dll"), b"no branch kernels here").unwrap();
         std::fs::write(kernel_dir.join("ggml-cuda.dll"), b"cuda kernels").unwrap();
 
-        let mut config = ServerConfig::default();
-        config.model_path = model.to_string_lossy().to_string();
+        let config = ServerConfig {
+            model_path: model.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         let error = super::validate_quant_support(&exe.to_string_lossy(), &config)
             .expect_err("官方内核应被预检拦下");
         let message = error.to_string();
@@ -3969,8 +3534,10 @@ mod tests {
         std::fs::write(&exe, b"prism build").unwrap();
         std::fs::write(kernel_dir.join("llama.dll"), b"PTQ1_0 TQ1_0").unwrap();
 
-        let mut config = ServerConfig::default();
-        config.model_path = model.to_string_lossy().to_string();
+        let config = ServerConfig {
+            model_path: model.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         assert!(
             super::validate_quant_support(&exe.to_string_lossy(), &config).is_ok(),
             "带对应 kernel 的自编译内核应放行"
@@ -3983,8 +3550,10 @@ mod tests {
         std::fs::create_dir_all(&official_dir).unwrap();
         let official_exe = official_dir.join("llama-server.exe");
         std::fs::write(&official_exe, b"official").unwrap();
-        let mut plain_config = ServerConfig::default();
-        plain_config.model_path = plain.to_string_lossy().to_string();
+        let plain_config = ServerConfig {
+            model_path: plain.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         assert!(
             super::validate_quant_support(&official_exe.to_string_lossy(), &plain_config).is_ok(),
             "普通量化不应触发分支量化预检"
@@ -4261,5 +3830,64 @@ mod tests {
         );
 
         std::fs::remove_dir_all(base).ok();
+    }
+
+    /// 多 tag Job 回归：不同 tag 的进程树互相隔离。
+    /// 终止一个 tag 只能回收自己的进程，另一个 tag 的进程必须继续运行。
+    #[test]
+    #[cfg(windows)]
+    fn job_tags_are_isolated_and_terminate_only_their_tree() {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+
+        fn spawn_ping() -> std::process::Child {
+            std::process::Command::new("ping")
+                .args(["-n", "60", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn()
+                .expect("无法 spawn 测试子进程 ping")
+        }
+
+        fn wait_exit(child: &mut std::process::Child, timeout: std::time::Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < deadline {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            false
+        }
+
+        let tag_a = format!("test-multi-a-{}", std::process::id());
+        let tag_b = format!("test-multi-b-{}", std::process::id());
+        let mut child_a = spawn_ping();
+        let mut child_b = spawn_ping();
+        assert!(
+            super::job_guard::attach(child_a.as_raw_handle(), &tag_a),
+            "tag-a 进程应成功加入 Job"
+        );
+        assert!(
+            super::job_guard::attach(child_b.as_raw_handle(), &tag_b),
+            "tag-b 进程应成功加入 Job"
+        );
+
+        super::job_guard::terminate(&tag_a);
+        assert!(
+            wait_exit(&mut child_a, std::time::Duration::from_secs(5)),
+            "终止 tag-a 后其进程必须退出"
+        );
+        assert!(
+            matches!(child_b.try_wait(), Ok(None)),
+            "tag-b 的进程不得被 tag-a 的回收误杀"
+        );
+
+        super::job_guard::terminate(&tag_b);
+        assert!(
+            wait_exit(&mut child_b, std::time::Duration::from_secs(5)),
+            "终止 tag-b 后其进程必须退出"
+        );
     }
 }

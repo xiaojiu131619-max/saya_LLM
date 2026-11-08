@@ -13,6 +13,7 @@ pub mod ffmpeg_installer;
 pub mod gguf_parser;
 pub mod gpu_monitor;
 pub mod gpu_profile;
+pub mod job_guard;
 pub mod mcp_client;
 pub mod mcp_endpoint;
 pub mod mcp_http;

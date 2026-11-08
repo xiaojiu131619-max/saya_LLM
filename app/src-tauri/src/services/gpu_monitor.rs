@@ -12,7 +12,7 @@ pub struct GpuMonitor {
 }
 
 enum GpuMonitorInner {
-    Nvml(NvmlMonitor),
+    Nvml(Box<NvmlMonitor>),
     #[cfg(windows)]
     Windows(WindowsGpuMonitor),
 }
@@ -31,7 +31,7 @@ impl GpuMonitor {
                     nvml.device_names().join(" / ")
                 );
                 return Ok(Self {
-                    inner: GpuMonitorInner::Nvml(nvml),
+                    inner: GpuMonitorInner::Nvml(Box::new(nvml)),
                 });
             }
         }
@@ -52,14 +52,6 @@ impl GpuMonitor {
         }
 
         Err(anyhow!("未检测到可用的显卡监测后端"))
-    }
-
-    pub fn device_count(&self) -> u32 {
-        match &self.inner {
-            GpuMonitorInner::Nvml(inner) => inner.device_count(),
-            #[cfg(windows)]
-            GpuMonitorInner::Windows(inner) => inner.device_count(),
-        }
     }
 
     pub fn device_names(&self) -> Vec<String> {
@@ -201,6 +193,7 @@ impl GpuVendor {
     }
 
     /// 名称兜底：拿不到 VendorId 时（非 Windows、DXGI 失败）按名称判断。
+    #[cfg(test)]
     pub fn from_name(name: &str) -> Self {
         let lower = name.to_ascii_lowercase();
         if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") {
@@ -227,15 +220,6 @@ impl GpuVendor {
             GpuVendor::Other => "Vulkan",
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            GpuVendor::Nvidia => "NVIDIA",
-            GpuVendor::Amd => "AMD",
-            GpuVendor::Intel => "Intel",
-            GpuVendor::Other => "其它",
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -258,13 +242,12 @@ impl DxgiAdapter {
     /// 但共享内存是从系统 RAM 里划的、并非全部都能给 GPU 用，因此按保守比例折算——
     /// 宁可少算让用户保守设置 ngl，也不要高估导致加载即 OOM。
     fn usable_total_gb(&self) -> f64 {
-        const IGPU_DEDICATED_THRESHOLD_GB: f64 = 0.5;
         /// 核显共享内存可按此比例用于推理（llama.cpp/Vulkan 常见可用比例）。
         const IGPU_SHARED_USABLE_RATIO: f64 = 0.5;
-        if self.dedicated_total_gb > IGPU_DEDICATED_THRESHOLD_GB {
-            self.dedicated_total_gb
-        } else {
+        if self.uses_shared_memory() {
             (self.shared_total_gb * IGPU_SHARED_USABLE_RATIO).max(self.dedicated_total_gb)
+        } else {
+            self.dedicated_total_gb
         }
     }
 
@@ -340,42 +323,37 @@ fn enumerate_display_adapters() -> Result<Vec<DxgiAdapter>> {
             .map_err(|error| anyhow!("CreateDXGIFactory1 失败：{error}"))?;
         let mut adapters = Vec::new();
         let mut index = 0u32;
-        loop {
-            match factory.EnumAdapters1(index) {
-                Ok(adapter) => {
-                    index += 1;
-                    let desc = match adapter.GetDesc1() {
-                        Ok(desc) => desc,
-                        Err(_) => continue,
-                    };
-                    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
-                        continue;
-                    }
-                    let name = utf16_trim(&desc.Description);
-                    if !is_real_display_adapter(&name) {
-                        continue;
-                    }
-                    let dedicated_gb = desc.DedicatedVideoMemory as f64 / 1024.0 / 1024.0 / 1024.0;
-                    let shared_gb = desc.SharedSystemMemory as f64 / 1024.0 / 1024.0 / 1024.0;
-                    // 独显看专用显存；核显/APU 的专用显存为 0（或极小），只能靠共享内存，
-                    // 早期在这里直接 continue 会把 AMD 核显整块丢掉——机器上明明有 GPU，
-                    // 应用却报「未检测到显卡」。因此改为：专用与共享都拿不到才跳过。
-                    if dedicated_gb <= 0.0 && shared_gb <= 0.0 {
-                        continue;
-                    }
-                    adapters.push(DxgiAdapter {
-                        name,
-                        luid_key: adapter_luid_key(
-                            desc.AdapterLuid.HighPart,
-                            desc.AdapterLuid.LowPart,
-                        ),
-                        dedicated_total_gb: dedicated_gb,
-                        shared_total_gb: shared_gb,
-                        vendor_id: desc.VendorId,
-                    });
-                }
-                Err(_) => break,
+        while let Ok(adapter) = factory.EnumAdapters1(index) {
+            index += 1;
+            let desc = match adapter.GetDesc1() {
+                Ok(desc) => desc,
+                Err(_) => continue,
+            };
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
             }
+            let name = utf16_trim(&desc.Description);
+            if !is_real_display_adapter(&name) {
+                continue;
+            }
+            let dedicated_gb = desc.DedicatedVideoMemory as f64 / 1024.0 / 1024.0 / 1024.0;
+            let shared_gb = desc.SharedSystemMemory as f64 / 1024.0 / 1024.0 / 1024.0;
+            // 独显看专用显存；核显/APU 的专用显存为 0（或极小），只能靠共享内存，
+            // 早期在这里直接 continue 会把 AMD 核显整块丢掉——机器上明明有 GPU，
+            // 应用却报「未检测到显卡」。因此改为：专用与共享都拿不到才跳过。
+            if dedicated_gb <= 0.0 && shared_gb <= 0.0 {
+                continue;
+            }
+            adapters.push(DxgiAdapter {
+                name,
+                luid_key: adapter_luid_key(
+                    desc.AdapterLuid.HighPart,
+                    desc.AdapterLuid.LowPart,
+                ),
+                dedicated_total_gb: dedicated_gb,
+                shared_total_gb: shared_gb,
+                vendor_id: desc.VendorId,
+            });
         }
         adapters
     };
@@ -412,16 +390,6 @@ pub enum HipSupport {
     Unverified,
     /// 核显（Radeon 6xxM-8xxM / Radeon(TM) Graphics）与 RX 5000 及更早：不可用。
     Unsupported,
-}
-
-impl HipSupport {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            HipSupport::Supported => "supported",
-            HipSupport::Unverified => "unverified",
-            HipSupport::Unsupported => "unsupported",
-        }
-    }
 }
 
 /// 按显卡名称判定 HIP/ROCm 支持级别。名称来自 DXGI 适配器描述，
@@ -796,7 +764,6 @@ mod tests {
     #[ignore = "需要真实显卡与可用的显卡监测后端"]
     fn live_windows_gpu_monitor_reads_dedicated_memory() {
         let mut monitor = super::GpuMonitor::new().expect("应能初始化显卡监测");
-        assert!(monitor.device_count() > 0, "应至少检测到一张显卡");
         let names = monitor.device_names();
         assert!(!names.is_empty());
         let info = monitor.refresh().expect("应能刷新硬件信息");
