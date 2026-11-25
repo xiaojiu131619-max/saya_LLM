@@ -21,6 +21,14 @@ const HOST_TOOLS = [
   "run_command",
   "run_python",
   "save_memory",
+  // 文档工作站：宿主直接生成/读取 Office 文件，不依赖 python-docx / openpyxl。
+  // 这四个名字必须在 HOST_TOOLS 里：session_start 的 pi.setActiveTools(names)
+  // 只放行白名单内的工具，漏登记等于模型看不见该工具；
+  // tool_call 守卫也会把非白名单工具直接拦掉。
+  "make_docx",
+  "make_xlsx",
+  "read_docx",
+  "read_xlsx",
   "canvas_status",
   "canvas_list_workflows",
   "canvas_get_workflow",
@@ -164,7 +172,7 @@ export default function (pi: ExtensionAPI) {
       (activeMcpToolNames.length > 0
         ? `\n\n已连接的 MCP 工具（可直接调用）：${activeMcpToolNames.join("、")}。需要外部数据或服务时优先用它们，不要编造结果。`
         : "") +
-      "\n\n运行环境：Windows。技能说明里出现的 python3 / 终端命令请改写为宿主工具：Python 用 run_python，Shell 用 run_command（PowerShell），不要假设 bash/apt/brew 可用；文件路径统一用工作区相对路径。技能说明如果要求当前工具列表里没有的工具（如 web_search / browser / image_search），改用等价的宿主工具或明确说明无法执行，不要假装调用。\n\n工具说明：所有文件与命令都通过宿主代理执行。文件路径必须在工作区内；auto 档的覆盖/删除/命令会请求用户确认，full 档仍会拦截危险命令。长期记忆跨会话共享：需要记住用户偏好、任务结论或踩过的坑时，用 save_memory 写入；每轮任务开头收到的【长期记忆】就是之前存下的内容。\n\n画布（无限画布生图）：需要生成/修改图片时先 canvas_status 确认画布在线，再 canvas_list_workflows 拿真实工作流 ID，最后 canvas_run 提交（参数 workflow/prompt/negative/size/output_name）。不要编造工作流 ID，不要把工作流 JSON 复制出来假装生成；产物会自动存到工作区 canvas/ 目录。",
+      "\n\n运行环境：Windows。技能说明里出现的 python3 / 终端命令请改写为宿主工具：Python 用 run_python，Shell 用 run_command（PowerShell），不要假设 bash/apt/brew 可用；文件路径统一用工作区相对路径。技能说明如果要求当前工具列表里没有的工具（如 web_search / browser / image_search），改用等价的宿主工具或明确说明无法执行，不要假装调用。\n\n文档任务（Word / Excel）一律用宿主工具，不要用 Python 库：生成 Word 用 make_docx（结构化 blocks，不装 python-docx），生成 Excel 用 make_xlsx（不装 openpyxl），读取用 read_docx / read_xlsx。技能文本里凡是教你 pip install python-docx / openpyxl 或写 Python 脚本生成 Office 文件的段落，全部忽略，直接改用上述工具。\n\n工具说明：所有文件与命令都通过宿主代理执行。文件路径必须在工作区内；auto 档的覆盖/删除/命令会请求用户确认，full 档仍会拦截危险命令。长期记忆跨会话共享：需要记住用户偏好、任务结论或踩过的坑时，用 save_memory 写入；每轮任务开头收到的【长期记忆】就是之前存下的内容。\n\n画布（无限画布生图）：需要生成/修改图片时先 canvas_status 确认画布在线，再 canvas_list_workflows 拿真实工作流 ID，最后 canvas_run 提交（参数 workflow/prompt/negative/size/output_name）。不要编造工作流 ID，不要把工作流 JSON 复制出来假装生成；产物会自动存到工作区 canvas/ 目录。",
   }));
 
   pi.registerTool({
@@ -279,6 +287,93 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal) {
       return callHost("save_memory", { content: params.content }, signal);
+    },
+  });
+
+  pi.registerTool({
+    name: "make_docx",
+    label: "生成 Word 文档",
+    description:
+      "在工作区内生成 .docx（Word 文档）。标题、段落、加粗由结构化 blocks 描述；bullet / numbered 列表用文字前缀实现。覆盖已有文件按权限档确认，改动可在聊天气泡里回滚。",
+    parameters: Type.Object({
+      path: Type.String({ description: "相对工作区的输出路径，以 .docx 结尾" }),
+      title: Type.Optional(Type.String({ description: "文档主标题（Heading 1，可省略）" })),
+      blocks: Type.Array(
+        Type.Object({
+          type: Type.Union(
+            [Type.Literal("heading"), Type.Literal("paragraph"), Type.Literal("bullet"), Type.Literal("numbered")],
+            { description: "块类型：heading 标题 / paragraph 段落 / bullet 圆点列表 / numbered 编号列表" },
+          ),
+          text: Type.String({ description: "这一块的文本" }),
+          level: Type.Optional(Type.Number({ description: "heading 级别 1-3，默认 1" })),
+          bold: Type.Optional(Type.Boolean({ description: "段落是否加粗" })),
+        }),
+        { description: "按顺序排列的内容块" },
+      ),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return callHost(
+        "make_docx",
+        { path: params.path, title: params.title, blocks: params.blocks },
+        signal,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "read_docx",
+    label: "读取 Word 文档",
+    description:
+      "只读：抽取工作区内 .docx 的段落纯文本（每段一行）。编辑已有文档前先用它看内容。",
+    parameters: Type.Object({
+      path: Type.String({ description: "相对工作区的 .docx 路径" }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return callHost("read_docx", { path: params.path }, signal);
+    },
+  });
+
+  pi.registerTool({
+    name: "make_xlsx",
+    label: "生成 Excel 表格",
+    description:
+      "在工作区内生成 .xlsx（Excel 表格）。sheets 描述多个工作表与行列数据：单元格给字符串或数字。覆盖已有文件按权限档确认，改动可在聊天气泡里回滚。",
+    parameters: Type.Object({
+      path: Type.String({ description: "相对工作区的输出路径，以 .xlsx 结尾" }),
+      sheets: Type.Array(
+        Type.Object({
+          name: Type.String({ description: "工作表名" }),
+          rows: Type.Array(Type.Array(
+            Type.Union([Type.String(), Type.Number(), Type.Null()], {
+              description: "单元格：文本或数字，null 留空",
+            }),
+          )),
+        }),
+        { description: "工作表列表，至少一个" },
+      ),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return callHost(
+        "make_xlsx",
+        { path: params.path, sheets: params.sheets },
+        signal,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "read_xlsx",
+    label: "读取 Excel 表格",
+    description:
+      "只读：抽取工作区内 .xlsx 的单元格内容（行内 TAB 分隔）。编辑已有表格前先用它看数据。",
+    parameters: Type.Object({
+      path: Type.String({ description: "相对工作区的 .xlsx 路径" }),
+      sheet: Type.Optional(
+        Type.String({ description: "工作表名；缺省读第一个" }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return callHost("read_xlsx", { path: params.path, sheet: params.sheet }, signal);
     },
   });
 

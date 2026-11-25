@@ -7,6 +7,7 @@
 //! 文件/命令由宿主代理：Pi 内置工具被禁用，扩展只把调用转给 `pi_tools`。
 //! 命令执行不是 OS 级沙箱；详见 `pi_tools` 的安全边界说明。
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -105,6 +106,21 @@ static PI_AGENT_DIR: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()
 static PI_CLI_PATH: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 static PI_SESSION_ID: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 static PI_RUN_ID: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+/// 还没发出去的 prompt：Pi 还在跑上一轮时先排队，等 `agent_settled` 再按序发送。
+/// 直接写 stdin 会被 Pi 以「Agent is already processing」拒收，气泡就会永久停在执行中。
+static PI_PENDING_PROMPTS: Lazy<Mutex<VecDeque<serde_json::Value>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
+/// 串行化「判断空闲 → 写 stdin」这一步，避免两个并发任务同时发出。
+static PI_PROMPT_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+/// 当前是否已有一轮在 Pi 里跑（直到 agent_settled 才复位）。
+static PI_STREAMING: AtomicBool = AtomicBool::new(false);
+/// 最近一次启动的 AppHandle：取消时用它把作废的排队任务通知前端。
+static PI_APP: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
+
+/// 最近使用过的工作区（canonicalize 后）。Chat 切换会话后仍要能预览旧消息的产物，
+/// 所以除了当前工作区，还要记住历史选区；上限防止无限增长。
+static PI_WORK_HISTORY: Lazy<Mutex<Vec<PathBuf>>> = Lazy::new(|| Mutex::new(Vec::new()));
+const WORK_HISTORY_CAP: usize = 20;
 
 static PI_RUNNING: AtomicBool = AtomicBool::new(false);
 static PI_PID: AtomicU32 = AtomicU32::new(0);
@@ -197,7 +213,7 @@ pub fn current_work_dir() -> Option<PathBuf> {
     }
 }
 
-/// 启动时配置的工作区根目录；产物读取只允许落在它下面。
+/// 启动时配置的工作区根目录。产物读取以它、当前工作区和历史选区为边界。
 pub fn current_work_root() -> Option<PathBuf> {
     let path = get_string(&PI_WORK_ROOT);
     let path = path.trim();
@@ -206,6 +222,30 @@ pub fn current_work_root() -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(path))
     }
+}
+
+/// 记住一个实际用过的会话工作区（供产物读取跨会话定位旧消息的产物）。
+fn remember_work_dir(dir: &Path) {
+    let Ok(canonical) = dir.canonicalize() else {
+        return;
+    };
+    if let Ok(mut list) = PI_WORK_HISTORY.lock() {
+        if list.contains(&canonical) {
+            return;
+        }
+        list.push(canonical);
+        if list.len() > WORK_HISTORY_CAP {
+            list.remove(0);
+        }
+    }
+}
+
+/// 最近使用过的工作区列表（已 canonicalize），产物读取的允许边界之一。
+pub(crate) fn known_work_dirs() -> Vec<PathBuf> {
+    PI_WORK_HISTORY
+        .lock()
+        .map(|list| list.clone())
+        .unwrap_or_default()
 }
 
 /// 探测 Pi CLI 与 Node。
@@ -635,6 +675,10 @@ pub fn is_running() -> bool {
 pub fn stop() {
     PI_GENERATION.fetch_add(1, Ordering::SeqCst);
     PI_RUNNING.store(false, Ordering::SeqCst);
+    PI_STREAMING.store(false, Ordering::SeqCst);
+    if let Ok(mut queue) = PI_PENDING_PROMPTS.lock() {
+        queue.clear();
+    }
     if let Ok(mut stdin) = PI_STDIN.lock() {
         *stdin = None;
     }
@@ -763,6 +807,8 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
     };
     std::fs::create_dir_all(&work_dir)
         .map_err(|error| format!("创建 Pi 工作区失败：{error}"))?;
+    // 记录本次实际工作区：产物读取允许当前/历史选区，不再只认工作区根目录。
+    remember_work_dir(&work_dir);
     let session_dir = if options.session_dir.trim().is_empty() {
         default_session_dir()
     } else {
@@ -850,6 +896,13 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
     set_string(&PI_CLI_PATH, cli);
     set_string(&PI_SESSION_ID, &session_id);
     set_string(&PI_RUN_ID, "");
+    PI_STREAMING.store(false, Ordering::SeqCst);
+    if let Ok(mut queue) = PI_PENDING_PROMPTS.lock() {
+        queue.clear();
+    }
+    if let Ok(mut slot) = PI_APP.lock() {
+        *slot = Some(app.clone());
+    }
     if let Ok(mut slot) = PI_STDIN.lock() {
         *slot = Some(stdin);
     }
@@ -884,11 +937,27 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
                     // 之前在 run() 里就把全局 run id 换掉，于是「取消上一轮后马上再发」
                     // 时，上一轮迟迟不来的收尾事件会被打成新的一轮 —— 前端误判收尾、
                     // 把新一轮的空气泡结掉，真正输出整段丢失。
+                    //
+                    // 被拒收的 prompt 不能切换全局轮次标签；但应答本身要按它自己的 id
+                    // 发出，前端才能把对应气泡收尾，而不是永久停在「执行中」。
+                    let event_type = event
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
                     let mut run_id = get_string(&PI_RUN_ID);
-                    if event.get("type").and_then(|value| value.as_str()) == Some("response") {
+                    let mut rejected_prompt = false;
+                    if event_type.as_deref() == Some("response") {
                         if let Some(id) = event.get("id").and_then(|value| value.as_str()) {
                             if id.starts_with("run-") {
-                                set_string(&PI_RUN_ID, id);
+                                let accepted = event
+                                    .get("success")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                if accepted {
+                                    set_string(&PI_RUN_ID, id);
+                                } else {
+                                    rejected_prompt = true;
+                                }
                                 run_id = id.to_string();
                             }
                         }
@@ -899,6 +968,17 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
                             serde_json::json!({ "runId": run_id, "event": event }),
                         )
                         .ok();
+                    if rejected_prompt {
+                        // prompt 被 Pi 拒收（例如上下文压缩中）：这一轮已经结束，
+                        // 继续发排队任务，避免后续任务跟着卡死。
+                        PI_STREAMING.store(false, Ordering::SeqCst);
+                        push_log("[pi] prompt 被拒收，继续发送排队任务");
+                        flush_pending_prompt(&app_out);
+                    } else if event_type.as_deref() == Some("agent_settled") {
+                        // Pi 真正收尾这一轮（含取消）；把之后排队的任务按序发出。
+                        PI_STREAMING.store(false, Ordering::SeqCst);
+                        flush_pending_prompt(&app_out);
+                    }
                 }
                 Err(_) => {
                     app_out
@@ -908,6 +988,30 @@ pub fn start(app: AppHandle, options: PiAgentStartOptions) -> Result<PiAgentStat
             }
         }
         if PI_GENERATION.load(Ordering::SeqCst) == generation {
+            PI_STREAMING.store(false, Ordering::SeqCst);
+            // 进程退出时排队的任务不可能再执行：按拒收回给前端，气泡能收尾。
+            let dropped = drain_pending_prompts();
+            for command in dropped {
+                let id = pending_prompt_id(&command);
+                if id.is_empty() {
+                    continue;
+                }
+                app_out
+                    .emit(
+                        "pi:event",
+                        serde_json::json!({
+                            "runId": id.clone(),
+                            "event": {
+                                "type": "response",
+                                "id": id,
+                                "command": "prompt",
+                                "success": false,
+                                "error": "Pi 进程已退出，排队任务未执行"
+                            }
+                        }),
+                    )
+                    .ok();
+            }
             PI_RUNNING.store(false, Ordering::SeqCst);
             PI_PID.store(0, Ordering::SeqCst);
             app_out
@@ -959,8 +1063,73 @@ fn write_command(value: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+fn pending_prompt_id(command: &serde_json::Value) -> String {
+    command
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn drain_pending_prompts() -> Vec<serde_json::Value> {
+    PI_PENDING_PROMPTS
+        .lock()
+        .map(|mut queue| queue.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Pi 收尾后把排队中的下一条 prompt 发出去。
+///
+/// 只在 Pi 空闲（`agent_settled` 之后）调用，从根上避免「一轮未结束又发 prompt」
+/// 被 Pi 拒收，也避免上一轮的收尾事件被误算到新一轮头上。
+fn flush_pending_prompt(app: &AppHandle) {
+    let Ok(_gate) = PI_PROMPT_GATE.lock() else {
+        return;
+    };
+    loop {
+        let next = PI_PENDING_PROMPTS
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.pop_front());
+        let Some(command) = next else {
+            return;
+        };
+        let id = pending_prompt_id(&command);
+        // 真正发车时才切检查点轮次：排队的 prompt 不能提前抢走上一轮的文件改动。
+        pi_tools::begin_change_set();
+        PI_STREAMING.store(true, Ordering::SeqCst);
+        match write_command(&command) {
+            Ok(()) => {
+                push_log(&format!("[pi] prompt {id} 已发送（排队任务）"));
+                return;
+            }
+            Err(error) => {
+                PI_STREAMING.store(false, Ordering::SeqCst);
+                push_log(&format!("[pi] prompt {id} 发送失败：{error}"));
+                app.emit(
+                    "pi:event",
+                    serde_json::json!({
+                        "runId": id.clone(),
+                        "event": {
+                            "type": "response",
+                            "id": id,
+                            "command": "prompt",
+                            "success": false,
+                            "error": error
+                        }
+                    }),
+                )
+                .ok();
+            }
+        }
+    }
+}
+
 /// 发一条任务。`skill_context` 是宿主雷达选中的技能正文；【长期记忆】块
 /// 由宿主读取全局记忆后自动拼在前面。返回本轮 run_id。
+///
+/// 如果 Pi 还在跑上一轮，任务先进入宿主队列（返回的 run_id 不变），
+/// 等这一轮 `agent_settled` 后再发送，避免被 Pi 以「正在处理」拒收。
 pub fn run(prompt: &str, skill_context: Option<&str>, images: Option<&[serde_json::Value]>) -> Result<String, String> {
     if !PI_RUNNING.load(Ordering::SeqCst) {
         push_log(&format!(
@@ -997,7 +1166,27 @@ pub fn run(prompt: &str, skill_context: Option<&str>, images: Option<&[serde_jso
     if let Some(images) = images.filter(|list| !list.is_empty()) {
         command["images"] = serde_json::Value::Array(images.to_vec());
     }
-    write_command(&command)?;
+    {
+        let _gate = PI_PROMPT_GATE
+            .lock()
+            .map_err(|_| "Pi 任务队列锁失败".to_string())?;
+        if PI_STREAMING.load(Ordering::SeqCst) {
+            // Pi 还在跑上一轮：先排队，等 agent_settled 后再发。
+            // 直接写 stdin 会被 Pi 拒收（要求 streamingBehavior），新气泡会卡住。
+            PI_PENDING_PROMPTS
+                .lock()
+                .map_err(|_| "Pi 任务队列锁失败".to_string())?
+                .push_back(command);
+            push_log(&format!("[pi] prompt {run_id} 已排队（上一轮未收尾）"));
+            return Ok(run_id);
+        }
+        pi_tools::begin_change_set();
+        PI_STREAMING.store(true, Ordering::SeqCst);
+        if let Err(error) = write_command(&command) {
+            PI_STREAMING.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    }
     push_log(&format!(
         "[pi] prompt {run_id}: {}",
         text.chars().take(120).collect::<String>()
@@ -1010,7 +1199,39 @@ pub fn cancel() -> Result<(), String> {
     if !PI_RUNNING.load(Ordering::SeqCst) {
         return Err("Pi 未启动".to_string());
     }
-    write_command(&serde_json::json!({ "type": "abort" }))?;
+    // 取消 = 这一轮连同还没发出去的排队任务一起作废；否则用户点了停止，
+    // 排队中的任务仍会在上一轮收尾后悄悄开跑。
+    let dropped = drain_pending_prompts();
+    if !dropped.is_empty() {
+        if let Some(app) = PI_APP.lock().ok().and_then(|slot| slot.clone()) {
+            for command in dropped {
+                let id = pending_prompt_id(&command);
+                if id.is_empty() {
+                    continue;
+                }
+                app.emit(
+                    "pi:event",
+                    serde_json::json!({
+                        "runId": id.clone(),
+                        "event": {
+                            "type": "response",
+                            "id": id,
+                            "command": "prompt",
+                            "success": false,
+                            "error": "任务已取消"
+                        }
+                    }),
+                )
+                .ok();
+            }
+        }
+    }
+    let abort = write_command(&serde_json::json!({ "type": "abort" }));
+    // 挂起的权限确认也必须一起撤销：只发 abort 不会唤醒工具桥上等待
+    // rx.recv_timeout 的线程，用户随后点「允许」仍会真的执行写文件/命令。
+    // 即使 abort 写入失败（stdin 已关）也要先拒绝，避免桥被占满 120 秒。
+    pi_tools::deny_all_pending();
+    abort?;
     push_log("[pi] abort");
     Ok(())
 }

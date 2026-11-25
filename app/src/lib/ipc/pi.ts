@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isDesktopRuntime } from '../desktopRuntime';
+import type { PiFileChange } from '@/types';
 import { listenDesktopEvent } from './system';
 
 /**
@@ -241,6 +242,12 @@ export async function piFloatWindow() {
   await invoke('pi_float_window');
 }
 
+/** 聚焦主窗口：浮窗的权限提示用「回到主界面」按钮直接跳到确认弹窗。 */
+export async function piFocusMainWindow() {
+  if (!isDesktopRuntime()) return;
+  await invoke('show_main_window');
+}
+
 export async function piAgentStart(options: PiAgentStartOptions) {
   if (!isDesktopRuntime()) return null;
   return invoke<PiAgentStatus>('pi_agent_start', { options });
@@ -299,6 +306,23 @@ export async function piAgentCompact(customInstructions?: string) {
   await invoke('pi_agent_compact', {
     customInstructions: customInstructions?.trim() ? customInstructions : null,
   });
+}
+
+/** 检查点回滚结果摘要（后端 RollbackSummary）。 */
+export interface PiRollbackSummary {
+  changeSetId: string;
+  restored: number;
+  removed: number;
+  skipped: string[];
+}
+
+/**
+ * 把一组文件恢复到 Pi 改动之前的原状。只在用户二次确认后调用。
+ * 注意与 piAgentRollback（Pi npm 安装回滚）无关。
+ */
+export async function piChangesRollback(changeSetId: string, paths: string[]): Promise<PiRollbackSummary> {
+  if (!isDesktopRuntime()) throw new Error('检查点回滚只在桌面版可用。');
+  return invoke<PiRollbackSummary>('pi_changes_rollback', { changeSetId, paths });
 }
 
 /** 工作区文件树的一项。 */
@@ -400,6 +424,8 @@ export interface PiAgentSubscriptions {
   onError: (payload: { message?: string }) => void;
   onPermission: (request: PiPermissionRequest) => void;
   onPermissionExpired: (payload: PiPermissionExpired) => void;
+  /** write_file / edit_file 每次成功落盘后的一条改动（检查点卡片）。 */
+  onFileChanges: (change: PiFileChange) => void;
 }
 
 /** 订阅 Pi 进程的 Tauri 事件。返回一个统一取消订阅的函数。 */
@@ -418,6 +444,7 @@ export function subscribePiAgent(subscriptions: PiAgentSubscriptions) {
       'pi:permission_expired',
       subscriptions.onPermissionExpired,
     ),
+    listenDesktopEvent<PiFileChange>('pi:file-changes', subscriptions.onFileChanges),
   ];
 
   return () => {

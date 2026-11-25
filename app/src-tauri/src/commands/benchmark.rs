@@ -193,7 +193,7 @@ async fn run_tune(
         ),
         None,
     );
-    progress(app, config, "init", "先探测设备，再在用户设定的上下文长度下搜索：不改变 ctx，按「完整 GPU 卸载 → CPU 专家/FFN 卸载 → 量化 KV → 降低 ngl」寻找可运行边界；随后在同一配置上比较推测解码、MoE 缓存、KV、批处理与线程。粗测最多 32 点，候选去重，最优点另做复测。短提示显存读数不代表满上下文峰值。", None);
+    progress(app, config, "init", "先探测设备，再在用户设定的上下文长度下搜索：不改变 ctx，按「完整 GPU 卸载 → CPU 专家/FFN 卸载 → 量化 KV → 降低 ngl」寻找可运行边界；随后在同一配置上比较推测解码、MoE 缓存、KV 与线程。批处理保持基线值，因为短负载测不出预填充差异。粗测最多 32 点，候选去重，最优点另做复测。短提示显存读数不代表满上下文峰值。", None);
     let mut search = benchmark::Search::new(config);
     while let Some(point) = search.next() {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -267,7 +267,7 @@ async fn run_tune(
                 config,
                 "tune",
                 &format!(
-                    "参数优化 ctx={} ngl={} ncmoe={} ncffn={} KV={} spec={} cache={}MiB batch={}/{} threads={}",
+                    "参数优化 ctx={} ngl={} ncmoe={} ncffn={} KV={} spec={} cache={}MiB batch(基线)={}/{} threads={}",
                     point.ctx, point.ngl, point.ncmoe, point.n_cpu_ffn,
                     point.cache_type_k, point.speculative, point.moe_cache_mib,
                     point.batch_size, point.ubatch_size, point.threads

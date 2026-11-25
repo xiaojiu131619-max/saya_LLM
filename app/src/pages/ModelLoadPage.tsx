@@ -3,9 +3,11 @@ import { Boxes, Layers } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { checkDesktopEngine, getDesktopServerLogs, getDesktopVramSnapshot, getServerApiKey, isDesktopRuntime, listenDesktopEvent, startDesktopServer, stopDesktopServer } from '@/lib/desktop';
 import { getBackendTuningAdvice, type BackendTuningAdvice } from '@/lib/ipc/hardware';
+import { getDesktopServerLaunchSnapshot } from '@/lib/ipc/server';
 import { buildServerConfig } from '@/lib/serverConfig';
 import { autoTuneManager, ensureAutoTuneRuntime, assertNoAutoTune, subscribeAutoTuneRecords } from '@/lib/autoTuneRuntime';
-import { autoTuneBusy } from '@/lib/autoTuneTask';
+import { autoTuneBusy, tuneRecordPatch } from '@/lib/autoTuneTask';
+import type { TuneRecord } from '@/lib/ipc/model';
 import { computeVramCalibration } from '@/lib/vramCalibration';
 import { predictVramUsage } from '@/lib/vramEstimate';
 import { assessVramMeasurement, modelVramSignature, parseVramBuffers, summarizeVramSamples, vramMeasurementConfig, type VramSnapshot } from '@/lib/vramMeasurement';
@@ -29,6 +31,8 @@ function defaultModelLoadConfig(model: ModelInfo): ModelLoadConfig {
     mmap: true,
     mlock: false,
     noWarmup: false,
+    // 默认不自动降级：GPU 失败直接报错，是否用 CPU 兼容模式由用户显式打开。
+    retryCpuFallback: false,
     cacheTypeKEnabled: false,
     cacheTypeK: 'f16',
     cacheTypeVEnabled: false,
@@ -80,6 +84,9 @@ export default function ModelLoadPage() {
   // API 调用名草稿：输入过程中不落库，失焦/回车才算「输入结束」并保存。
   const [apiNameDraft, setApiNameDraft] = useState<string | null>(null);
   const [logoMessage, setLogoMessage] = useState<string | null>(null);
+  // GPU 失败后宿主会自动以 CPU 兼容模式重启（改写 ngl/ctx/batch），而界面参数仍是请求值；
+  // 就绪后读取后端记录的「实际下发参数」，把降级事实明确告诉用户。
+  const [launchNotice, setLaunchNotice] = useState<string | null>(null);
   const modelId = model?.id;
   const [runRecords, setRunRecords] = useState<ModelRunRecord[]>([]);
   const [kernelVersion, setKernelVersion] = useState<string | null>(null);
@@ -169,6 +176,7 @@ export default function ModelLoadPage() {
       cancelLoadRef.current = null;
       setIsLoading(true);
       setLoadError(null);
+      setLaunchNotice(null);
       setLoadProgressPercent(4);
       setLoadProgress('正在启动 llama-server...');
       dispatch({ type: 'UPDATE_MODEL_STATUS', payload: { modelId: model.id, status: 'loading' } });
@@ -230,6 +238,19 @@ export default function ModelLoadPage() {
         await Promise.race([startDesktopServer(launchModel, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools), cancellation]);
         setLoadProgressPercent((current) => Math.max(current, 12));
         await Promise.race([ready, cancellation]);
+
+        // 就绪后核对「实际下发参数」：GPU 失败时宿主会自动以 CPU 兼容模式重启，
+        // 并把 ngl 置 0、ctx 压到 4096 等；不提示的话用户会以为仍在跑自己设置的 GPU 参数。
+        const launchSnapshot = await Promise.race([
+          getDesktopServerLaunchSnapshot().catch(() => null),
+          cancellation,
+        ]);
+        if (launchSnapshot?.cpuFallback) {
+          setLaunchNotice(
+            `本次以 CPU 兼容模式运行：实际 ngl ${launchSnapshot.ngl}、ctx ${launchSnapshot.nCtx}（你设置的是 ngl ${launchSnapshot.requestedNgl}、ctx ${launchSnapshot.requestedNCtx}）。`
+            + '通常是显存不足或 GPU 后端启动失败；降低 GPU 卸载层数或 KV 显存占用后重新加载可恢复 GPU 推理。',
+          );
+        }
 
         setLoadProgress('API 已就绪，正在记录显存采样…');
         const loaded = await sampleVram();
@@ -342,7 +363,7 @@ export default function ModelLoadPage() {
   };
 
   const startAutoTuneRun = async () => {
-    if (!isDesktopRuntime() || autoTuneRunning || isLoading || state.models.some((item) => item.status === 'loading')) return;
+    if (!isDesktopRuntime() || autoTuneRunning || isLoading || state.serverRunning || state.models.some((item) => item.status === 'loading')) return;
     try {
       await ensureAutoTuneRuntime();
       const baseline = buildServerConfig(model, state.serverPort, 'resources/llama-server.exe', state.apiConfig, state.chatConfig.enabledTools);
@@ -359,6 +380,9 @@ export default function ModelLoadPage() {
         },
         modelName: model.name, modelPath: model.filePath ?? '', modelSignature: modelVramSignature(model), loadConfig: { ...model.loadConfig },
       });
+      // 调参开始后后端会反复拉起测量服务；它不是可对话的模型服务。
+      // 这里先把运行状态落成 false，切到对话页时聊天不会恢复可发送。
+      dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
     } catch (error) {
       setLoadError(`自动调参启动失败：${String(error)}`);
     }
@@ -369,11 +393,30 @@ export default function ModelLoadPage() {
     catch (error) { setLoadError(`停止请求失败，请重试停止：${String(error)}`); }
   };
 
+  // 撤销 / 再次应用调参结果：只在模型身份匹配的记录上由界面暴露入口，
+  // 这里直接写回加载配置，不触碰其它模型。
+  const restoreAutoTuneConfig = (next: ModelLoadConfig) => {
+    setLoadError(null);
+    dispatch({ type: 'UPDATE_MODEL_CONFIG', payload: { modelId: model.id, config: next } });
+  };
+  const applyAutoTuneRecord = (record: TuneRecord) => {
+    setLoadError(null);
+    dispatch({ type: 'UPDATE_MODEL_CONFIG', payload: { modelId: model.id, config: tuneRecordPatch(record) } });
+  };
+
   const config = model.loadConfig;
   const vramPrediction = predictVramUsage(
     model,
     config,
     calibration && calibration.samples > 0 ? calibration : undefined,
+    { kernelVersion, effectiveParallel: calibration?.effectiveParallel, backend: engineBackend },
+  );
+  // 与实测校准并列展示的「纯估算值」：去掉 exactGb 覆盖，保留同参数校准出的分项系数，
+  // 用来回答「这次实测比估算高/低多少」，而不是总显示 0% 偏差。
+  const analyticalPrediction = predictVramUsage(
+    model,
+    config,
+    calibration && calibration.samples > 0 ? { ...calibration, exactGb: undefined } : undefined,
     { kernelVersion, effectiveParallel: calibration?.effectiveParallel, backend: engineBackend },
   );
 
@@ -440,6 +483,7 @@ export default function ModelLoadPage() {
     <ModelLoadView
       model={model}
       prediction={vramPrediction}
+      analyticalPrediction={analyticalPrediction}
       calibration={calibration}
       systemStats={state.systemStats}
       activeTab={activeTab}
@@ -447,16 +491,22 @@ export default function ModelLoadPage() {
       isLoading={isLoading}
       loadMessage={loadProgress}
       loadError={loadError}
+      launchNotice={launchNotice}
       loadPercent={loadProgressPercent}
       statusMessage={logoMessage}
       autoTuneRunning={autoTuneRunning}
       autoTuneStopping={autoTuneTask?.status === 'stopping'}
       autoTuneApplying={autoTuneTask?.application === 'pending'}
-      autoTuneBlocked={state.models.some((item) => item.status === 'loading')}
+      autoTuneTask={ownTuneTask}
+      // 后端 register_tune 会拒绝「已有模型在运行」：按钮必须提前反映这个前置条件，
+      // 而不是让用户点完只看到一条红色启动失败。
+      autoTuneBlocked={state.serverRunning || state.models.some((item) => item.status === 'loading')}
       autoTuneLog={autoTuneLog}
       autoTuneApplied={autoTuneApplied}
       runRecords={runRecords}
       onClearLog={() => autoTuneManager.clearLog()}
+      onRestoreConfig={restoreAutoTuneConfig}
+      onApplyTuneRecord={applyAutoTuneRecord}
       onChangeConfig={updateConfig}
       onLoad={() => void handleLoad()}
       onStop={() => void handleStopLoading()}

@@ -154,6 +154,19 @@ fn find_binary(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 已安装的 ffmpeg / ffprobe 路径（`stem` 传 `ffmpeg` 或 `ffprobe`）；未安装返回 None。
+///
+/// 这里是「安装位置」的唯一来源：画布网关要显式拿到这两个二进制（v0.25 的
+/// 视频剪辑、换脸、长视频拼接都依赖它们），不应各自再拼一遍 resources 路径。
+pub fn installed_binary(stem: &str) -> Option<PathBuf> {
+    let exe = auto_updater::resource_dir().join(media_exe_name(stem));
+    if exe.is_file() {
+        Some(exe)
+    } else {
+        None
+    }
+}
+
 /// 读取已安装 ffmpeg 的版本标识；未安装或无法运行返回 None。
 ///
 /// BtbN 是滚动构建（tag 恒为 `latest`），所以这里取 `-version` 首行里的构建标识
@@ -163,10 +176,7 @@ fn find_binary(root: &Path, file_name: &str) -> Option<PathBuf> {
 /// 复用 `validate_media_binary`：它已经用参数列表方式启动、带 CREATE_NO_WINDOW
 /// 与输出校验，避免再引入一个可被指摘的启动点。
 pub fn installed_version() -> Option<String> {
-    let exe = auto_updater::resource_dir().join("ffmpeg.exe");
-    if !exe.is_file() {
-        return None;
-    }
+    let exe = installed_binary("ffmpeg")?;
     let first_line = validate_media_binary(&exe, "ffmpeg").ok()?;
     let token = first_line
         .strip_prefix("ffmpeg version ")?

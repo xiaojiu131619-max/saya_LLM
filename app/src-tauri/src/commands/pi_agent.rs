@@ -264,3 +264,20 @@ pub async fn workspace_run_command(
 pub fn workspace_open_path(work_dir: String, rel_path: String) -> Result<(), String> {
     pi_tools::open_workspace_path(&work_dir, &rel_path)
 }
+
+/// 把一组文件恢复到 Pi 改动之前的原状（检查点回滚）。
+///
+/// 由前端在二次确认后调用；清单与备份全部来自数据目录里的检查点，
+/// 路径以记录时的工作区为根重新校验，不信任前端传来的绝对路径。
+/// 注意与 `pi_agent_rollback`（Pi npm 安装回滚）无关。
+#[tauri::command]
+pub async fn pi_changes_rollback(
+    change_set_id: String,
+    paths: Vec<String>,
+) -> Result<crate::services::pi_changes::RollbackSummary, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::services::pi_changes::rollback_set(&change_set_id, &paths)
+    })
+    .await
+    .map_err(|error| format!("回滚任务失败：{error}"))?
+}

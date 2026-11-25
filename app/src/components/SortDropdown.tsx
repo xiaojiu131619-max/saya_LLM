@@ -14,6 +14,7 @@ export default function SortDropdown() {
   const { state, dispatch } = useApp();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -25,13 +26,28 @@ export default function SortDropdown() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Esc 关闭下拉并把焦点还给触发按钮，键盘用户不会丢失当前位置。
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [open]);
+
   const current = sortOptions.find((o) => o.value === state.sortBy);
 
   return (
     <div ref={ref} className="relative min-w-0">
       <button
-        onClick={() => setOpen(!open)}
-        className="flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
+        ref={triggerRef}
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
       >
         <ArrowUpDown className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
         <span className="truncate">{current?.label}</span>
@@ -44,14 +60,17 @@ export default function SortDropdown() {
           {sortOptions.map((option) => (
             <button
               key={option.value}
+              type="button"
+              title={option.value === 'updated' ? '本地 GGUF 没有更新时间时，按名称排序' : undefined}
               onClick={() => {
                 dispatch({ type: 'SET_SORT', payload: option.value });
                 setOpen(false);
+                triggerRef.current?.focus();
               }}
               className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-colors ${
                 state.sortBy === option.value
-                  ? 'bg-[var(--surface-muted)] text-[var(--accent)]'
-                  : 'text-[var(--text-primary)] hover:bg-[var(--surface-muted)]'
+                  ? 'bg-[var(--surface-selected)] text-[var(--accent)]'
+                  : 'text-[var(--text-primary)] hover:bg-[var(--surface-hover)]'
               }`}
             >
               {option.label}

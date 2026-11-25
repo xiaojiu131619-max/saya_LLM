@@ -282,7 +282,13 @@ export default function EmbeddingWorkspace() {
                           onChange={(event) => setEmbdNormalize(Math.round(Number(event.target.value)))}
                           className="mono-font h-8 w-20 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)] disabled:opacity-50"
                         />
-                        <ToggleSwitch checked={normalizeEnabled} onChange={setNormalizeEnabled} label="自定义归一化" />
+                        <ToggleSwitch
+                          checked={normalizeEnabled}
+                          onChange={setNormalizeEnabled}
+                          label="自定义归一化"
+                          // 运行中改这个开关要重启服务才生效，直接禁用，避免「拨了却没反应」。
+                          disabled={running}
+                        />
                       </div>
                     </div>
                   </div>

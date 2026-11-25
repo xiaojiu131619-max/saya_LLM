@@ -15,6 +15,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
+import EmptyState from '@/components/EmptyState';
 import ToggleSwitch from '@/components/ToggleSwitch';
 import WorkingBadge from '@/components/WorkingBadge';
 import StrataPerformance from '@/features/strata/StrataPerformance';
@@ -48,6 +49,9 @@ const TABS: Array<{ id: TabId; label: string; icon: typeof Brain }> = [
   { id: 'settings', label: '设置', icon: Settings2 },
 ];
 
+/** 日志面板只渲染尾部行数：与 llama / NiNfer 日志页同一口径，避免长日志整块重排。 */
+const LOG_TAIL_LINES = 600;
+
 const PRIMARY_BUTTON =
   'inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-medium text-[var(--text-on-accent)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-40';
 const SECONDARY_BUTTON =
@@ -70,6 +74,9 @@ export default function StrataPage() {
   const [metrics, setMetrics] = useState<StrataMetricsSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsLive, setLogsLive] = useState(true);
+  // 贴底跟随 + 日志视口：只在用户位于底部时跟着新日志走。
+  const [logsPinnedBottom, setLogsPinnedBottom] = useState(true);
+  const logsViewportRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState<string | null>(null);
   // 加载起点：只在进入「加载中」时定一次，计时交给 WorkingBadge 自己走。
   const [loadStartedAt, setLoadStartedAt] = useState<number | null>(null);
@@ -196,6 +203,26 @@ export default function StrataPage() {
       window.clearInterval(timer);
     };
   }, [desktop, activeTab, logsLive]);
+
+  // 只保留尾部行数参与渲染：日志再长，切到日志页也不会因整块 join + 重排掉帧。
+  // 总行数仍由标题角标展示，用户知道有截断。
+  const renderedLogs = useMemo(
+    () => (logs.length > 0 ? logs.slice(-LOG_TAIL_LINES).join('\n') : ''),
+    [logs],
+  );
+
+  // 贴底跟随：用户上翻读历史时不再被每秒刷新拽回底部；
+  // activeTab 进依赖，保证从别的页签切回日志页时先落到最新一行。
+  useEffect(() => {
+    const el = logsViewportRef.current;
+    if (el && logsPinnedBottom) el.scrollTop = el.scrollHeight;
+  }, [renderedLogs, logsPinnedBottom, activeTab]);
+
+  const handleLogsScroll = () => {
+    const el = logsViewportRef.current;
+    if (!el) return;
+    setLogsPinnedBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+  };
 
   // 请求统计：2 秒一次（与 NiNfer 面板同频）。采集本身在 Rust 侧的后台线程里，
   // 这里只是读一份内存快照，页面不在性能页时概览的紧凑面板也要用它。
@@ -658,6 +685,7 @@ export default function StrataPage() {
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs font-medium text-secondary-custom">
                 运行日志（{logs.length} 行）
+                {logs.length > LOG_TAIL_LINES ? `，显示最近 ${LOG_TAIL_LINES} 行` : ''}
               </div>
               <div className="flex gap-2">
                 <button
@@ -676,9 +704,23 @@ export default function StrataPage() {
                 </button>
               </div>
             </div>
-            <pre className="fat-log max-h-[28rem] overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]">
-              {logs.length > 0 ? logs.join('\n') : '暂无日志。启动智慧模型后这里会显示网关与引擎的输出。'}
-            </pre>
+            {logs.length > 0 ? (
+              <pre
+                ref={logsViewportRef}
+                onScroll={handleLogsScroll}
+                className="fat-log max-h-[28rem] overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-[length:var(--font-eyebrow)] leading-5 text-[var(--text-secondary)]"
+              >
+                {renderedLogs}
+              </pre>
+            ) : (
+              <div className="rounded-md border border-[var(--border)] bg-[var(--surface-muted)]">
+                <EmptyState
+                  icon={ScrollText}
+                  title="暂无日志"
+                  description="启动智慧模型后，网关与引擎的输出会显示在这里。"
+                />
+              </div>
+            )}
           </section>
         )}
 

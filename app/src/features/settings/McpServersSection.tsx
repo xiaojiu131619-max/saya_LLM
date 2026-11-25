@@ -281,9 +281,11 @@ export default function McpServersSection({ embedded = false }: { embedded?: boo
         </p>
       )}
 
-      {/* 编辑表单 */}
+      {/* 编辑表单。key 用 draft.id：不保存直接从服务器 A 切到 B（或点「添加服务器」）时，
+          强制重建表单，避免只在挂载时初始化的参数/环境变量/请求头文本残留 A 的内容。 */}
       {draft && (
         <McpServerForm
+          key={draft.id}
           draft={draft}
           onChange={setDraft}
           onSave={() => void handleSave()}

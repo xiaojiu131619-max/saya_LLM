@@ -35,6 +35,10 @@ fn join_normal_load((cancel, worker, _): NormalLoad) {
 
 #[tauri::command]
 pub fn start_server(app: AppHandle, config: ServerConfig) -> Result<(), String> {
+    // 先做低开销预检：内核/模型/侧车文件缺失、量化不兼容、端口被外部程序占用等
+    // 常见错误应立即返回，不能先把正在运行的 NiNfer/Strata 和当前模型停掉
+    // （backend_gate 只负责停，不负责恢复）。
+    process_manager::preflight_server_config(&config).map_err(|error| error.to_string())?;
     let mut loading = NORMAL_LOAD.lock().map_err(|_| "加载任务锁不可用")?;
     // 先取消并等待上一次普通加载：它自己握着 NORMAL_LOAD 里的 LifecycleGuard，
     // 不先收掉就直接 acquire_lifecycle 只会永远撞上「正在加载」。
@@ -63,8 +67,13 @@ pub fn start_server(app: AppHandle, config: ServerConfig) -> Result<(), String> 
         },
         move || {
             if let Ok(mut guard) = ready_lifecycle.lock() { guard.take(); }
-            app3.emit("server:ready", serde_json::json!({"message": "服务就绪"}))
-                .ok();
+            // 带上实际下发的参数：CPU 回退会改写 ngl/ctx/batch，前端可据此提示「已降级」。
+            let launch = process_manager::last_launch_snapshot();
+            app3.emit(
+                "server:ready",
+                serde_json::json!({"message": "服务就绪", "launch": launch}),
+            )
+            .ok();
         },
         move |error| {
             if let Ok(mut guard) = error_lifecycle.lock() { guard.take(); }
@@ -99,6 +108,15 @@ pub fn stop_server(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn get_server_status() -> Result<bool, String> {
     Ok(process_manager::is_server_running())
+}
+
+/// 最近一次成功启动实际下发的参数（含是否 CPU 兼容回退）。
+///
+/// 回退后界面上的用户配置仍是原值；这里给出真正生效的 ngl / ctx / batch / device，
+/// 供状态卡与加载页提示「已降级（ngl=0, ctx=4096）」。
+#[tauri::command]
+pub fn get_server_launch_snapshot() -> Option<process_manager::ServerLaunchSnapshot> {
+    process_manager::last_launch_snapshot()
 }
 
 #[tauri::command]
@@ -312,11 +330,28 @@ fn resolve_embedding_exe(executable_path: &str) -> Result<String, String> {
     Ok(exe)
 }
 
+/// 向量服务加载期的生命周期守卫。
+///
+/// 向量服务在后台线程里要几十秒才就绪；命令函数返回后闸门不能立刻放开，
+/// 否则这段时间里自动调参会再拉起一套 llama-server，两套进程同时抢显存，
+/// 调参的显存基线与 90% 预算都会被污染。就绪/失败/中途停止时统一释放。
+type EmbeddingLifecycle = std::sync::Arc<std::sync::Mutex<Option<crate::services::benchmark::LifecycleGuard>>>;
+
+fn release_embedding_lifecycle(
+    lifecycle: &EmbeddingLifecycle,
+    released: &std::sync::atomic::AtomicBool,
+) {
+    if let Ok(mut guard) = lifecycle.lock() {
+        guard.take();
+    }
+    released.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// 启动向量模型服务（独立端口、独立进程）。与 start_server 互不干扰，
 /// 因此对话/VLM 模型与向量模型可以同时运行。
 #[tauri::command]
 pub fn start_embedding_server(app: AppHandle, config: ServerConfig) -> Result<(), String> {
-    let _guard = crate::services::benchmark::acquire_lifecycle()?;
+    let guard = crate::services::benchmark::acquire_lifecycle()?;
     let config = normalize_server_access(config);
     let exe = match resolve_embedding_exe(&config.executable_path) {
         Ok(exe) => exe,
@@ -338,24 +373,49 @@ pub fn start_embedding_server(app: AppHandle, config: ServerConfig) -> Result<()
         }
     };
 
+    let lifecycle: EmbeddingLifecycle = std::sync::Arc::new(std::sync::Mutex::new(Some(guard)));
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready_lifecycle = lifecycle.clone();
+    let ready_released = released.clone();
+    let error_lifecycle = lifecycle.clone();
+    let error_released = released.clone();
     let app_progress = app.clone();
     let app_ready = app.clone();
     let app_error = app.clone();
-    embedding_manager::start_embedding_server(
+    let result = embedding_manager::start_embedding_server(
         &config,
         exe,
         move |progress| {
             app_progress.emit("embedding:progress", progress).ok();
         },
         move || {
+            release_embedding_lifecycle(&ready_lifecycle, &ready_released);
             app_ready
                 .emit("embedding:ready", serde_json::json!({"message": "向量服务就绪"}))
                 .ok();
         },
         move |error| {
+            release_embedding_lifecycle(&error_lifecycle, &error_released);
             app_error.emit("embedding:error", error).ok();
         },
-    )
+    );
+    if result.is_ok() {
+        // 看门狗：用户中途停止或进程在就绪前退出时，监视线程因代数变化直接静默退出，
+        // 不会再回调；必须由这里释放守卫，否则生命周期槽位会被永久占住。
+        let watchdog_lifecycle = lifecycle;
+        let watchdog_released = released;
+        std::thread::spawn(move || {
+            while !watchdog_released.load(std::sync::atomic::Ordering::SeqCst) {
+                if !embedding_manager::is_embedding_running() {
+                    release_embedding_lifecycle(&watchdog_lifecycle, &watchdog_released);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+    }
+    // Err 分支：守卫随 lifecycle 的 Arc 一起释放，命令直接回传错误。
+    result
 }
 
 #[tauri::command]

@@ -20,6 +20,7 @@ const DEMO_LOAD_CONFIG: ModelLoadConfig = {
   mmap: true,
   mlock: false,
   noWarmup: false,
+  retryCpuFallback: false,
   cacheTypeKEnabled: false,
   cacheTypeK: 'f16',
   cacheTypeVEnabled: false,

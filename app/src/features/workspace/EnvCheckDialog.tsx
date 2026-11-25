@@ -57,17 +57,24 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
   const [autoVisible, setAutoVisible] = useState(false);
   const [phase, setPhase] = useState<CheckPhase>('idle');
   const [items, setItems] = useState<DesktopEnvCheckItem[]>([]);
+  // 检测失败 / 宿主没返回任何检查项时，不能冒充「全部通过」——那会让用户以为组件齐全。
+  const [checkError, setCheckError] = useState<string | null>(null);
   const isOpen = manualOpen || autoVisible;
 
   const runCheck = useCallback(async () => {
     setPhase('checking');
+    setCheckError(null);
     try {
       const results = await runDesktopEnvCheck();
       setItems(results);
       setPhase('done');
+      if (results.length === 0) {
+        setCheckError('宿主没有返回任何检查项（可能不在桌面环境，或检测命令未注册）。');
+      }
     } catch (error) {
       setItems([]);
       setPhase('done');
+      setCheckError(`检测未完成：${error instanceof Error ? error.message : String(error)}`);
       // 检测失败属于静默降级：用户仍可正常使用，具体组件问题会在使用时暴露。
       console.error('环境检测失败', error);
     }
@@ -88,9 +95,10 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
             setItems(results);
             setPhase('done');
             setAutoVisible(true);
-          } else {
+          } else if (results.length > 0) {
             void markEnvCheckDone();
           }
+          // 空结果不标记「已检测」：下次启动静默重试，而不是永远认为环境没问题。
         } catch {
           // 自动检测失败不提示，避免首启动被误打扰。
         }
@@ -142,12 +150,14 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
 
   const summaryText = phase === 'checking'
     ? '正在检测本机运行环境…'
-    : failed === 0
-      ? '全部通过，环境已就绪。'
-      : [
-          errors > 0 ? `${errors} 项必需组件未就绪` : null,
-          warnings > 0 ? `${warnings} 项可选组件建议安装` : null,
-        ].filter(Boolean).join('，') + '。';
+    : checkError
+      ? checkError
+      : failed === 0
+        ? '全部通过，环境已就绪。'
+        : [
+            errors > 0 ? `${errors} 项必需组件未就绪` : null,
+            warnings > 0 ? `${warnings} 项可选组件建议安装` : null,
+          ].filter(Boolean).join('，') + '。';
 
   return (
     <AnimatePresence>
@@ -187,6 +197,14 @@ export default function EnvCheckDialog({ manualOpen = false, onClose }: EnvCheck
                 <div className="flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3.5 py-3.5 dark:border-white/[0.08]">
                   <Loader2 className="h-4 w-4 animate-spin text-[var(--text-tertiary)]" />
                   <div className="text-sm text-secondary-custom">正在检测…</div>
+                </div>
+              )}
+              {phase === 'done' && items.length === 0 && (
+                <div className="flex items-start gap-3 rounded-xl border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-3.5 py-3.5">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--state-warning)]" />
+                  <div className="min-w-0 text-xs leading-relaxed text-[var(--text-primary)]">
+                    没有拿到检测结果，无法判断运行组件是否齐全。可点「重新检测」重试；若持续为空，请确认当前是桌面版运行。
+                  </div>
                 </div>
               )}
               {phase === 'done' && items.map((item) => {

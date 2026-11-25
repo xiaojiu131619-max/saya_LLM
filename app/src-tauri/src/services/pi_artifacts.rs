@@ -1,7 +1,8 @@
 //! Pi 会话产物的解析与读取。
 //!
-//! 产物路径只允许落在 Pi 启动时配置的工作区根目录下；每个会话一个子目录，
-//! 读取时由前端带上会话工作区，宿主再做一次 canonicalize 校验。
+//! 产物路径只允许落在 Pi 的工作区内：启动时配置的工作区根目录（按会话派生子目录），
+//! Chat 显式选中的真实文件夹（当前或最近使用过的工作区）。读取时由前端带上会话工作区，
+//! 宿主再做一次 canonicalize 校验。
 //! 这里不记录文件内容，只返回相对路径、大小、修改时间和按需读取的预览。
 
 use std::io::Read;
@@ -46,24 +47,46 @@ pub struct PiArtifactPayload {
     pub text: Option<String>,
 }
 
-/// 解析并校验会话工作区：必须位于 Pi 启动时配置的根目录下。
+/// 解析并校验会话工作区：必须位于 Pi 的允许边界内。
+///
+/// 允许边界：
+/// - 启动时配置的工作区根目录（未显式选工作区时，当前工作区是它下面的会话子目录）；
+/// - 当前会话工作区本身（Chat 显式选中的真实文件夹可能不在根目录下）；
+/// - 最近使用过的会话工作区（切换会话后仍能预览旧消息的产物）。
+///
+/// 之前只认工作区根目录，导致「选中的文件夹不在根下」时本轮产物解析与预览全部被拒，
+/// 气泡没有产物卡，产物门还会把已落盘的文件误判成「未交付」。
 fn allowed_work_dir(requested: Option<&str>) -> Result<PathBuf, String> {
-    let root = pi_agent::current_work_root()
-        .ok_or_else(|| "Pi 尚未启动，无法读取产物；请先发送一条任务。".to_string())?;
-    let root = root
-        .canonicalize()
-        .map_err(|_| "Pi 工作区根目录不存在，请检查设置。".to_string())?;
+    let root = pi_agent::current_work_root();
+    let current = pi_agent::current_work_dir();
+    if root.is_none() && current.is_none() {
+        return Err("Pi 尚未启动，无法读取产物；请先发送一条任务。".to_string());
+    }
     let requested = requested.map(str::trim).filter(|path| !path.is_empty());
     let work = match requested {
         Some(path) => PathBuf::from(path),
-        None => pi_agent::current_work_dir()
+        None => current
+            .clone()
             .ok_or_else(|| "Pi 当前没有会话工作区。".to_string())?,
     };
     let work = work
         .canonicalize()
         .map_err(|_| "会话工作区不存在或已被删除。".to_string())?;
-    if !work.starts_with(&root) {
-        return Err("产物目录不在 Pi 工作区根目录内，已拒绝读取。".to_string());
+    // 工作区根目录可能尚未创建（显式选了别的文件夹时宿主不会建它），
+    // 因此边界列表里只收能解析成功的路径；至少有一个可用即可。
+    let mut boundaries = Vec::new();
+    for candidate in [root, current].into_iter().flatten() {
+        if let Ok(path) = candidate.canonicalize() {
+            boundaries.push(path);
+        }
+    }
+    // 切换会话后预览旧消息的产物：历史选区也是合法边界。
+    boundaries.extend(pi_agent::known_work_dirs());
+    if boundaries.is_empty() {
+        return Err("Pi 工作区根目录不存在，请检查设置。".to_string());
+    }
+    if !boundaries.iter().any(|base| work.starts_with(base)) {
+        return Err("产物目录不在 Pi 工作区内，已拒绝读取。".to_string());
     }
     if !work.is_dir() {
         return Err("产物目录不可用。".to_string());

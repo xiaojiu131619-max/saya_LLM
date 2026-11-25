@@ -10,10 +10,13 @@ export default function ColumnToggle() {
         type="button"
         onClick={() => dispatch({ type: 'SET_GRID_COLUMNS', payload: 1 })}
         className={`relative rounded-lg p-2 transition-colors active:scale-95 ${
-          state.gridColumns === 1 ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]'
+          state.gridColumns === 1
+            ? 'bg-[var(--surface-selected)]'
+            : 'hover:bg-[var(--surface-hover)]'
         }`}
         title="列表模式"
         aria-label="列表模式"
+        aria-pressed={state.gridColumns === 1}
       >
         <Square className={`relative z-10 h-4 w-4 ${state.gridColumns === 1 ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`} />
       </button>
@@ -21,10 +24,13 @@ export default function ColumnToggle() {
         type="button"
         onClick={() => dispatch({ type: 'SET_GRID_COLUMNS', payload: 2 })}
         className={`relative rounded-lg p-2 transition-colors active:scale-95 ${
-          state.gridColumns === 2 ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]'
+          state.gridColumns === 2
+            ? 'bg-[var(--surface-selected)]'
+            : 'hover:bg-[var(--surface-hover)]'
         }`}
         title="卡片模式"
         aria-label="卡片模式"
+        aria-pressed={state.gridColumns === 2}
       >
         <LayoutGrid className={`relative z-10 h-4 w-4 ${state.gridColumns === 2 ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`} />
       </button>

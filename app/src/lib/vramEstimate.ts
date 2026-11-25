@@ -281,8 +281,6 @@ export function predictVramUsage(
       missing.push('recurrent_state');
     }
   }
-  if (ngl > 0 && model.mmprojPath && (model.supportsVision || model.supportsAudio)) missing.push('projector_memory');
-  if (ngl > 0 && config.speculativeDecoding !== 'off') missing.push('draft_memory');
 
   const ratio = (value: number | undefined, fallback: number, min: number, max: number) => value != null && Number.isFinite(value) && value > 0 ? clamp(value, min, max) : fallback;
   const weightsRatio = ratio(calibration?.weightsRatio ?? calibration?.overallRatio, 1, 0.5, 1.3);

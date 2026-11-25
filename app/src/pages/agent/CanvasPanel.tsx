@@ -28,6 +28,7 @@ import {
   canvasGetConfig,
   canvasGetStatus,
   canvasInstallNode,
+  canvasInstallPackFromUrl,
   canvasInstallPackFromZip,
   canvasListWorkflows,
   canvasOpenBrowser,
@@ -44,6 +45,17 @@ import {
 import { isDesktopRuntime } from '@/lib/desktopRuntime';
 
 type BusyKind = 'start' | 'stop' | 'node' | 'pack' | 'save' | null;
+
+/**
+ * 在线安装用的画布模块发行包（约 5.4 MB）。
+ * 与 app/resources/canvas-pack.release.json 同源：重跑 sync-canvas-pack.ps1 与
+ * build-canvas-pack.ps1 发布新包后，必须同步更新这里的 url 与 sha256。
+ */
+const CANVAS_PACK_RELEASE = {
+  version: '0.25.3',
+  url: 'https://github.com/xiaojiu131619-max/saya_LLM/releases/download/canvas-v0.25.3/Agent_LLM_Canvas_v0.25.3.zip',
+  sha256: '033e9afdab670ea7b2a8973a00910de44bc922de2b97d9573cbcab3dd03855ca',
+} as const;
 
 function statusDot(ok: boolean, pending = false) {
   if (pending) return 'bg-[var(--state-warning)]';
@@ -308,6 +320,15 @@ export default function CanvasPanel() {
       }
     });
 
+  /** 从自家仓库的发行 tag 下载画布模块（后端 SHA256 校验）：发行版裸 exe 没带随包画布时的主安装路径。 */
+  const handleInstallPackOnline = () =>
+    runAction('pack', async () => {
+      const next = await canvasInstallPackFromUrl(CANVAS_PACK_RELEASE.url, CANVAS_PACK_RELEASE.sha256);
+      if (mounted.current) {
+        setMessage({ tone: 'ok', text: `画布模块已安装${next.version ? `（v${next.version}）` : ''}。` });
+      }
+    });
+
   const handleSaveConfig = () =>
     runAction('save', async () => {
       const saved = await canvasSaveConfig(config);
@@ -361,6 +382,15 @@ export default function CanvasPanel() {
                 画布模块：{packLabel}
                 {!packReady && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleInstallPackOnline()}
+                      disabled={busy !== null}
+                      className="inline-flex items-center gap-1 rounded-md bg-[var(--accent)] px-2 py-1 text-[length:var(--font-eyebrow)] font-medium text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                    >
+                      {busy === 'pack' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                      在线安装（约 4.7 MB）
+                    </button>
                     <button
                       type="button"
                       onClick={() => void handleInstallPackLocal()}
@@ -419,6 +449,14 @@ export default function CanvasPanel() {
             <p className="mt-1 text-[length:var(--font-eyebrow)] text-secondary-custom">{packLabel}</p>
             {!packReady && (
               <div className="mt-2 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleInstallPackOnline()}
+                  disabled={busy !== null}
+                  className="inline-flex items-center gap-1 rounded-md bg-[var(--accent)] px-2 py-1 text-[length:var(--font-eyebrow)] font-medium text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40"
+                >
+                  {busy === 'pack' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />} 在线安装
+                </button>
                 <button
                   type="button"
                   onClick={() => void handleInstallNode()}

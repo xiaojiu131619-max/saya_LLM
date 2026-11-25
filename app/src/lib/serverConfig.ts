@@ -124,7 +124,7 @@ export function buildServerConfig(
     embd_normalize: null,
     device: cpuOnly ? 'none' : null,
     main_gpu: cpuOnly ? null : 0,
-    retry_cpu_fallback: !cpuOnly,
+    retry_cpu_fallback: !cpuOnly && config.retryCpuFallback === true,
     no_cuda: cpuOnly,
   };
 }

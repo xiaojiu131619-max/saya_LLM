@@ -23,6 +23,10 @@ export interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
+/** 对话框内可聚焦元素：与浏览器默认 Tab 顺序一致，禁用项不参与。 */
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 const TONE_STYLES: Record<ConfirmDialogTone, {
   iconBg: string;
   iconColor: string;
@@ -61,15 +65,65 @@ function ConfirmDialogContent({
   onCancel,
 }: Omit<ConfirmDialogProps, 'open'>) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const styles = TONE_STYLES[tone];
 
+  // 打开时把焦点移进对话框（有输入框优先输入框，否则聚焦对话框本身让读屏播报标题），
+  // 卸载时归还触发元素——aria-modal 声明的「模态」必须配合真实的焦点管理。
+  useEffect(() => {
+    // 在 effect 内复制一份：cleanup 执行时 document.activeElement 已经是对话框里的元素了。
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const dialog = dialogRef.current;
+    const firstInput = dialog?.querySelector<HTMLElement>('input');
+    (firstInput ?? dialog)?.focus();
+    return () => {
+      // 若用户已打开另一个对话框或把焦点移到别处，不要在这里把焦点抢回来。
+      const active = document.activeElement;
+      if (!active || active === document.body || active === document.documentElement || !active.isConnected) {
+        previouslyFocused?.focus();
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) {
         onCancel();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+        .filter((element) => element.offsetParent !== null);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      const insideDialog = active instanceof HTMLElement && dialog.contains(active);
+
+      // Tab / Shift+Tab 在首尾之间循环，焦点不会跑到遮罩后的页面上。
+      if (!insideDialog) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (active === first || active === dialog)) {
+        // 焦点停在对话框容器本身时，Shift+Tab 也要绕回最后一个可聚焦项。
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -105,11 +159,13 @@ function ConfirmDialogContent({
       }}
     >
       <motion.div
+        ref={dialogRef}
+        tabIndex={-1}
         initial={false}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.92, opacity: 0 }}
         transition={{ type: 'spring', stiffness: 320, damping: 26 }}
-        className={`anim-enter-dialog glass-panel-strong w-full max-w-md overflow-hidden border ${styles.border}`}
+        className={`anim-enter-dialog glass-panel-strong w-full max-w-md overflow-hidden border outline-none ${styles.border}`}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
@@ -154,7 +210,6 @@ function ConfirmDialogContent({
               </label>
               <input
                 type="text"
-                autoFocus
                 value={typed}
                 onChange={(event) => setTyped(event.target.value)}
                 disabled={busy}

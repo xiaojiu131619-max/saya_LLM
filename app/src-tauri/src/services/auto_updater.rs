@@ -8,7 +8,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 static UPDATE_LOG: Lazy<PathBuf> = Lazy::new(|| resource_dir().join("update.log"));
 
@@ -79,17 +79,42 @@ pub(crate) fn ensure_not_cancelled() -> Result<(), String> {
     Ok(())
 }
 
+/// 运行期资源根目录：内核、ffmpeg、Pi、7z、更新日志的安装与查找落点。
+///
+/// 固定用 `<exe>/resources`，不再看 `_up_` 的脸色。`_up_/resources` 是打包器
+/// 对 `..` 前缀资源（画布）的映射目录，它是否存在于磁盘上取决于构建历史——
+/// 旧实现「看到 _up_ 就优先用它」曾让残留的 `_up_` 把真正装了内核的
+/// `<exe>/resources` 整个遮住，表现为启动直接跳核心更新页、内核 / ffmpeg /
+/// Pi 全部显示未安装、模型加载报「启动失败」。
+///
+/// 读取打包只读资产的消费方（画布、进程注入的 DLL 查找）各自维护
+/// `<exe>/resources` 与 `<exe>/_up_/resources` 双候选，与本函数无关。
 pub(crate) fn resource_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().unwrap_or(&exe);
-    let bundled = dir.join("_up_").join("resources");
-    let resources = if bundled.exists() || dir.join("_up_").exists() {
-        bundled
-    } else {
-        dir.join("resources")
-    };
+    let resources = dir.join("resources");
+    let legacy = dir.join("_up_").join("resources");
+    MIGRATE_LEGACY_RESOURCES.call_once(|| migrate_legacy_resources(&legacy, &resources));
     fs::create_dir_all(&resources).ok();
     resources
+}
+
+/// 旧 resource_dir() 优先 `_up_/resources` 的历史遗留迁移，进程内只跑一次。
+static MIGRATE_LEGACY_RESOURCES: Once = Once::new();
+
+/// 把旧解析写进 `_up_/resources` 的运行期内容一次性搬到固定根。
+/// 目标已存在时以固定根为准（不覆盖）；搬不动（跨盘 / 被占用）就留在原地，
+/// 不影响新根的正常工作。
+fn migrate_legacy_resources(legacy: &Path, live: &Path) {
+    const RUNTIME_ENTRIES: [&str; 5] = ["kernels", "ffmpeg.exe", "ffprobe.exe", "pi", "tools"];
+    for entry in RUNTIME_ENTRIES {
+        let from = legacy.join(entry);
+        let to = live.join(entry);
+        if !from.exists() || to.exists() {
+            continue;
+        }
+        let _ = fs::rename(&from, &to);
+    }
 }
 
 /// 版本化核心根目录：每次更新安装到 `kernels/<版本>_<安装时间>/`，

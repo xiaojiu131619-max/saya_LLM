@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$PackDir = (Join-Path $PSScriptRoot "..\resources\canvas"),
   [string]$OutDir = (Join-Path $PSScriptRoot "..\dist-canvas"),
   [string]$Version = "",
@@ -59,7 +59,12 @@ $Manifest = [ordered]@{
   upstream = $Source.upstream
   upstream_commit = $Source.commit
 }
-$Manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+# PowerShell 5.1 的 Set-Content -Encoding UTF8 会写 BOM，这里显式无 BOM。
+[System.IO.File]::WriteAllText(
+  $ManifestPath,
+  ($Manifest | ConvertTo-Json -Depth 4),
+  (New-Object System.Text.UTF8Encoding($false))
+)
 
 Write-Host ""
 Write-Host "Canvas pack created: $ZipPath"

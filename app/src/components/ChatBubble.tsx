@@ -1,28 +1,44 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion } from 'framer-motion';
 import {
   AlertTriangle,
+  Bookmark,
+  Braces,
   Check,
   ChevronDown,
   ChevronRight,
   Clock,
   Copy,
   Download,
+  FilePen,
+  FilePlus2,
+  FileSearch,
+  FileType2,
+  FolderOpen,
   Gauge,
+  Image as ImageIcon,
   Languages,
   Loader2,
   Pencil,
+  Plug,
   RotateCcw,
+  Sheet,
+  Sparkles,
+  SquareTerminal,
   Trash2,
   Wrench,
+  XCircle,
   Zap,
+  type LucideIcon,
 } from 'lucide-react';
 import type { Message, ToolActivity } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { judgeDelivery } from '@/features/chat/deliveryGuard';
 import MarkdownRenderer, { ThoughtBlock } from './MarkdownRenderer';
 import ArtifactPanel from './ArtifactPanel';
-import { isDesktopRuntime, partialMetricsFromError, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
+import ConfirmDialog from './ConfirmDialog';
+import { isDesktopRuntime, partialMetricsFromError, piChangesRollback, serverErrorHint, streamChatCompletion } from '@/lib/desktop';
 import { modelVideoSupport } from '@/lib/modelCapabilities';
 import { reasoningProfileFromModel } from '@/lib/reasoningGears';
 import { formatSessionCtxUsage } from '@/features/chat/chatUtils';
@@ -135,6 +151,9 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   const activeModel = ownerModel ?? runtimeModel;
   const displayModelName = message.modelName ?? sessionModelName ?? ownerModel?.name ?? '未记录模型';
   const displayModelColor = message.modelColor ?? sessionModelColor ?? ownerModel?.themeColorSolid;
+  // 「重新生成」原位替换该条回答（REPLACE_MESSAGE），因此对历史轮次也安全：
+  // 旧实现是 DELETE_MESSAGE + ADD_MESSAGE，会把这一轮挪到队尾，消息顺序和之后
+  // 每轮发给模型的上下文都会错位；换成原位替换后，后续轮次保持在原有位置。
   const canRegenerate = Boolean(allowRegenerate && isDesktopRuntime() && activeModel?.filePath && state.serverRunning && !message.isStreaming);
   const hasEmbeddedThinking = /<\/?think(?:ing)?>/i.test(message.content);
   const exportContent = message.reasoningContent && !hasEmbeddedThinking
@@ -182,6 +201,23 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
     }
   };
 
+  /**
+   * 消息操作行：←/→ 在「复制 / 编辑 / 重发 / 删除」之间移动，Home/End 跳首尾。
+   * 按钮本身 Tab 可达；方向键让键盘用户不必反复 Tab 穿过整条消息。
+   */
+  const handleActionRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])'));
+    if (buttons.length === 0) return;
+    event.preventDefault();
+    const index = buttons.findIndex((button) => button === document.activeElement);
+    let next = 0;
+    if (event.key === 'End') next = buttons.length - 1;
+    else if (event.key === 'ArrowRight') next = index < 0 ? 0 : (index + 1) % buttons.length;
+    else if (event.key === 'ArrowLeft') next = index < 0 ? buttons.length - 1 : (index - 1 + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  };
+
   const handleExport = () => {
     const blob = new Blob([exportContent], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -210,16 +246,17 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
     if (userMsgIndex === -1) return;
 
     const history = msgs.slice(0, userMsgIndex + 1);
-    dispatch({ type: 'DELETE_MESSAGE', payload: { modelId, sessionId, messageId: message.id } });
 
     const assistantMsgId = crypto.randomUUID();
     const startedAt = Date.now();
     const startTime = performance.now();
+    // 原位替换：保留这条回答在会话中的位置，后续轮次不会被挪动。
     dispatch({
-      type: 'ADD_MESSAGE',
+      type: 'REPLACE_MESSAGE',
       payload: {
         modelId,
         sessionId,
+        messageId: message.id,
         message: {
           id: assistantMsgId,
           role: 'assistant',
@@ -414,7 +451,12 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
           </div>
         )}
 
-        <div className="flex items-center gap-0.5 text-[var(--text-tertiary)] opacity-55 transition-opacity group-hover:opacity-100 dark:text-[var(--text-secondary)]">
+        <div
+          role="toolbar"
+          aria-label="消息操作"
+          onKeyDown={handleActionRowKeyDown}
+          className="flex items-center gap-0.5 text-[var(--text-tertiary)] opacity-55 transition-opacity group-hover:opacity-100 dark:text-[var(--text-secondary)]"
+        >
           <ActionButton icon={copied ? Check : Copy} label={copied ? '已复制' : '复制'} onClick={() => void handleCopy()} />
           <ActionButton icon={Pencil} label="编辑" onClick={startEdit} disabled={!onEditAndResend || message.isStreaming || savingEdit} />
           <ActionButton icon={RotateCcw} label="重发" onClick={() => void submitEdit(message.content)} disabled={!onEditAndResend || message.isStreaming || savingEdit} />
@@ -449,6 +491,10 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         <PiStepsPanel message={message} busy={Boolean(message.isStreaming)} />
       )}
 
+      {message.piChanges && message.piChanges.length > 0 && (
+        <PiChangesPanel message={message} modelId={modelId} sessionId={sessionId} />
+      )}
+
       {message.artifacts && message.artifacts.length > 0 && (
         <ArtifactPanel
           artifacts={message.artifacts}
@@ -473,9 +519,19 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-0.5 text-[var(--text-tertiary)] opacity-60 transition-opacity group-hover:opacity-100 dark:text-[var(--text-secondary)]">
+      <div
+        role="toolbar"
+        aria-label="消息操作"
+        onKeyDown={handleActionRowKeyDown}
+        className="flex flex-wrap items-center gap-0.5 text-[var(--text-tertiary)] opacity-60 transition-opacity group-hover:opacity-100 dark:text-[var(--text-secondary)]"
+      >
         <ActionButton icon={copied ? Check : Copy} label={copied ? '已复制' : '复制'} onClick={() => void handleCopy()} />
-        <ActionButton icon={RotateCcw} label="重新生成" onClick={() => void handleRegenerate()} disabled={!canRegenerate} />
+        <ActionButton
+          icon={RotateCcw}
+          label="重新生成"
+          onClick={() => void handleRegenerate()}
+          disabled={!canRegenerate}
+        />
         <ActionButton icon={Languages} label="翻译" disabled />
         <ActionButton icon={Download} label="导出" onClick={handleExport} />
         <ActionButton icon={Trash2} label="删除" onClick={handleDelete} danger />
@@ -510,7 +566,36 @@ export default function ChatBubble({ message, modelId, sessionId, sessionModelNa
   );
 }
 
-/** Pi 执行步骤面板：默认折叠只显最近一步，可展开全部。 */
+/** 宿主/MCP 工具的展示名与图标：把工具名翻译成人话。 */
+const PI_TOOL_META: Record<string, { label: string; icon: LucideIcon }> = {
+  read_file: { label: '读取文件', icon: FileSearch },
+  write_file: { label: '写入文件', icon: FilePen },
+  edit_file: { label: '修改文件', icon: FilePen },
+  make_docx: { label: '生成 Word', icon: FileType2 },
+  make_xlsx: { label: '生成 Excel', icon: Sheet },
+  read_docx: { label: '读取 Word', icon: FileSearch },
+  read_xlsx: { label: '读取 Excel', icon: FileSearch },
+  list_dir: { label: '列出目录', icon: FolderOpen },
+  run_command: { label: '执行命令', icon: SquareTerminal },
+  run_python: { label: '运行 Python', icon: Braces },
+  save_memory: { label: '保存记忆', icon: Bookmark },
+  canvas_status: { label: '画布状态', icon: ImageIcon },
+  canvas_list_workflows: { label: '画布工作流', icon: ImageIcon },
+  canvas_get_workflow: { label: '画布工作流', icon: ImageIcon },
+  canvas_run: { label: '画布生图', icon: ImageIcon },
+  canvas_cancel: { label: '取消生图', icon: ImageIcon },
+};
+
+function piToolMeta(tool?: string) {
+  if (!tool) return null;
+  if (tool.startsWith('mcp__')) {
+    const server = tool.split('__')[1] ?? '';
+    return { label: `${server} 工具`, icon: Plug };
+  }
+  return PI_TOOL_META[tool] ?? { label: tool, icon: Wrench };
+}
+
+/** Pi 执行步骤面板：技能 chips + 工具行（图标 / 路径 / 状态），默认折叠只显最近一步。 */
 function PiStepsPanel({
   message,
   busy,
@@ -521,48 +606,266 @@ function PiStepsPanel({
   const steps = message.piSteps ?? [];
   const state = message.piState ?? 'running';
   const [expanded, setExpanded] = useState(false);
-  const toneClass = {
-    info: 'text-[var(--text-secondary)]',
-    ok: 'text-[var(--state-success)]',
-    warn: 'text-[var(--state-warning)]',
-    err: 'text-[var(--state-danger)]',
-  };
-  const visible = expanded ? steps : steps.slice(-1);
+  const [detailPoint, setDetailPoint] = useState<string | null>(null);
   const waiting = state === 'waiting_user';
+
+  // 技能 chips 单独渲染；工具行（带 tool 元数据）与其余纯文本步骤分开。
+  const skillSteps = steps.filter((step) => step.skills && step.skills.length > 0);
+  const workSteps = steps.filter((step) => !step.skills || step.skills.length === 0);
+  const toolRows = workSteps.filter((step) => step.tool);
+  const plainSteps = workSteps.filter((step) => !step.tool);
+  const visible = expanded ? workSteps : workSteps.slice(-1);
 
   return (
     <div className="min-w-0 max-w-full rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
       <div className="mb-2 flex items-center gap-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
         {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" /> : <Zap className="h-3.5 w-3.5 text-[var(--accent)]" />}
         <span className="min-w-0 flex-1">
-          {waiting ? '等待权限确认' : busy ? 'Pi 执行中' : steps.length > 0 ? `执行了 ${steps.length} 步` : '等待 Pi'}
+          {waiting
+            ? '等待权限确认'
+            : busy
+              ? 'Pi 执行中'
+              : toolRows.length > 0
+                ? `调用了 ${toolRows.length} 次工具`
+                : workSteps.length > 0
+                  ? `执行了 ${workSteps.length} 步`
+                  : '等待 Pi'}
         </span>
-        {steps.length > 1 && (
+        {skillSteps.map((step, index) => (
+          <span key={`skills-${index}`} className="flex min-w-0 flex-wrap items-center gap-1">
+            {(step.skills ?? []).map((skill) => (
+              <span
+                key={skill}
+                className="inline-flex flex-shrink-0 items-center gap-0.5 rounded-full border border-[var(--accent)]/40 bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] font-medium text-[var(--accent)]"
+                title={`技能路由命中：${skill}`}
+              >
+                <Sparkles className="h-2.5 w-2.5" />
+                {skill}
+              </span>
+            ))}
+          </span>
+        ))}
+        {workSteps.length > 1 && (
           <button
             type="button"
             onClick={() => setExpanded(!expanded)}
             className="inline-flex flex-shrink-0 items-center gap-1 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)]"
           >
             {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-            {expanded ? '收起' : `全部 ${steps.length} 步`}
+            {expanded ? '收起' : `全部 ${workSteps.length} 步`}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-0.5">
+        {visible.map((step, index) => {
+          const key = `${step.ts}-${step.point}-${index}`;
+          if (step.tool) {
+            const meta = piToolMeta(step.tool);
+            const Icon = meta?.icon ?? Wrench;
+            const running = step.toolState === 'running';
+            const failed = step.toolState === 'error';
+            const showDetail = detailPoint === step.point;
+            return (
+              <div key={key} className="min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setDetailPoint(showDetail ? null : step.point)}
+                  className={`flex w-full min-w-0 items-center gap-2 rounded-[var(--radius-sm)] px-1.5 py-1 text-left transition-colors ${
+                    showDetail ? 'bg-black/[0.04] dark:bg-white/[0.06]' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+                  }`}
+                  title={`${meta?.label ?? step.tool}${step.path ? ` · ${step.path}` : ''}`}
+                >
+                  {running
+                    ? <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-[var(--accent)]" />
+                    : failed
+                      ? <XCircle className="h-3.5 w-3.5 flex-shrink-0 text-[var(--state-danger)]" />
+                      : <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${failed ? 'text-[var(--state-danger)]' : 'text-[var(--accent)]'}`} />}
+                  <span className={`min-w-0 flex-shrink-0 text-[length:var(--font-caption)] font-medium ${failed ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`}>
+                    {meta?.label ?? step.tool}
+                  </span>
+                  {step.path && (
+                    <span className="mono-font min-w-0 flex-1 truncate text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]" title={step.path}>
+                      {step.path}
+                    </span>
+                  )}
+                  {!step.path && <span className="min-w-0 flex-1" />}
+                  {step.repeat && step.repeat > 1 && (
+                    <span className="flex-shrink-0 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">×{step.repeat}</span>
+                  )}
+                  {step.text.length > 60 && !step.path && (
+                    <span className={`min-w-0 truncate text-[length:var(--font-eyebrow)] ${failed ? 'text-[var(--state-danger)]' : 'text-[var(--text-tertiary)]'}`}>
+                      {step.text}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          }
+          return (
+            <div
+              key={key}
+              className={`flex min-w-0 items-start gap-2 px-1.5 py-0.5 text-[length:var(--font-caption)] leading-relaxed ${
+                step.tone === 'ok'
+                  ? 'text-[var(--state-success)]'
+                  : step.tone === 'warn'
+                    ? 'text-[var(--state-warning)]'
+                    : step.tone === 'err'
+                      ? 'text-[var(--state-danger)]'
+                      : 'text-[var(--text-secondary)]'
+              }`}
+            >
+              <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-current opacity-60" />
+              <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                {step.text}
+                {step.repeat && step.repeat > 1 ? ` ×${step.repeat}` : ''}
+              </span>
+            </div>
+          );
+        })}
+        {!expanded && plainSteps.length > 1 && workSteps.length > 1 && visible.some((step) => !step.tool) && (
+          <p className="px-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+            展开查看全部 {workSteps.length} 步…
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Pi 文件改动卡片：本轮落盘的文件、diff 审阅与检查点回滚（危险操作，二次确认）。 */
+function PiChangesPanel({
+  message,
+  modelId,
+  sessionId,
+}: {
+  message: Message;
+  modelId: string;
+  sessionId: string;
+}) {
+  const { dispatch } = useApp();
+  const changes = useMemo(() => message.piChanges ?? [], [message.piChanges]);
+  const rolledBack = message.piChangesRolledBack === true;
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [rolling, setRolling] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // 同一路径多次编辑：op 取首条（对回滚语义重要），diff 按时间合并。
+  const grouped = useMemo(() => {
+    const map = new Map<string, { op: string; diffs: string[] }>();
+    for (const change of changes) {
+      const entry = map.get(change.path);
+      if (entry) entry.diffs.push(change.diff);
+      else map.set(change.path, { op: change.op, diffs: [change.diff] });
+    }
+    return [...map.entries()].map(([path, value]) => ({ path, ...value }));
+  }, [changes]);
+  const changeSetId = changes[0]?.changeSetId ?? '';
+
+  const handleRollback = async () => {
+    setRolling(true);
+    setNotice(null);
+    try {
+      const summary = await piChangesRollback(changeSetId, grouped.map((item) => item.path));
+      dispatch({
+        type: 'UPDATE_MESSAGE',
+        payload: { modelId, sessionId, messageId: message.id, piChangesRolledBack: true },
+      });
+      if (summary.skipped.length > 0) {
+        setNotice(`有 ${summary.skipped.length} 个文件未能恢复（可能已不在工作区内）。`);
+      }
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setRolling(false);
+      setConfirmOpen(false);
+    }
+  };
+
+  return (
+    <div className="min-w-0 max-w-full rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface-muted)]/50 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="mb-2 flex items-center gap-2 text-[length:var(--font-caption)] font-medium text-[var(--text-secondary)]">
+        {rolledBack
+          ? <RotateCcw className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
+          : <Pencil className="h-3.5 w-3.5 text-[var(--accent)]" />}
+        <span className="min-w-0 flex-1">
+          {rolledBack ? '文件改动已回滚' : `改动了 ${grouped.length} 个文件`}
+        </span>
+        {!rolledBack && (
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            disabled={rolling}
+            className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[length:var(--font-eyebrow)] text-secondary-custom transition-colors hover:border-[var(--state-danger)] hover:text-[var(--state-danger)] disabled:opacity-45 disabled:cursor-not-allowed"
+            title="把这些文件恢复到 Pi 改动之前的状态"
+          >
+            {rolling ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />} 回滚
           </button>
         )}
       </div>
 
       <div className="space-y-1">
-        {visible.map((step, index) => (
-          <div
-            key={`${step.ts}-${step.point}-${index}`}
-            className={`flex min-w-0 items-start gap-2 px-1 py-0.5 text-[length:var(--font-caption)] leading-relaxed ${toneClass[step.tone]}`}
-          >
-            <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-current opacity-60" />
-            <span className="min-w-0 break-words [overflow-wrap:anywhere]">
-              {step.text}
-              {step.repeat && step.repeat > 1 ? ` ×${step.repeat}` : ''}
-            </span>
-          </div>
-        ))}
+        {grouped.map((item) => {
+          const expanded = expandedPath === item.path;
+          const created = item.op === 'created';
+          return (
+            <div key={item.path} className="min-w-0">
+              <button
+                type="button"
+                onClick={() => setExpandedPath(expanded ? null : item.path)}
+                className={`flex w-full min-w-0 items-start gap-2 rounded-[var(--radius-field)] px-2 py-1.5 text-left transition-colors ${
+                  rolledBack ? 'opacity-60' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                }`}
+              >
+                {created
+                  ? <FilePlus2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[var(--state-success)]" />
+                  : <Pencil className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[var(--text-tertiary)]" />}
+                <span className="mono-font min-w-0 flex-1 truncate text-[length:var(--font-caption)] text-primary-custom" title={item.path}>
+                  {item.path}
+                </span>
+                <span className="flex-shrink-0 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                  {created ? '新建' : '修改'}
+                </span>
+                <ChevronDown
+                  className={`mt-0.5 h-3 w-3 flex-shrink-0 text-[var(--text-tertiary)] transition-transform ${expanded ? '' : '-rotate-90'}`}
+                />
+              </button>
+              {expanded && (
+                <pre className="mono-font max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] p-2.5 text-[length:var(--font-eyebrow)] leading-5 text-secondary-custom dark:bg-white/[0.03]">
+                  {item.diffs.join('\n⋯⋯\n')}
+                </pre>
+              )}
+            </div>
+          );
+        })}
       </div>
+
+      {notice && (
+        <p className="mt-2 rounded-md border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-2 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--state-warning)]">
+          {notice}
+        </p>
+      )}
+
+      {/* 气泡在虚拟列表里，所在行带 transform: translateY(...)；transform 会成为
+          position:fixed 后代的包含块，确认框若留在行内只会盖住一行、随列表滚动被裁切，
+          行被虚拟滚动回收时还会直接被卸载。portal 到 body 才能盖住整个窗口。 */}
+      {createPortal(
+        <ConfirmDialog
+          open={confirmOpen}
+          title="回滚 Pi 的文件改动"
+          description={`将把 ${grouped.length} 个文件恢复到 Pi 改动之前的状态。`}
+          bullets={[
+            'Pi 新建的文件会被删除',
+            '这些文件在此期间你自己做的改动会被覆盖',
+          ]}
+          confirmLabel={rolling ? '回滚中…' : '回滚'}
+          tone="danger"
+          onConfirm={() => void handleRollback()}
+          onCancel={() => setConfirmOpen(false)}
+        />,
+        document.body,
+      )}
     </div>
   );
 }

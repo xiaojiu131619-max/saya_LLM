@@ -14,6 +14,7 @@ import { useEngineUsageSync } from '@/hooks/useEngineUsageSync';
 import { FAST27B_SERVICE_ID } from '@/hooks/useEngineStatuses';
 import { STRATA_SERVICE_ID } from '@/hooks/useStrataStatus';
 import PageHeader from '@/components/PageHeader';
+import EmptyState from '@/components/EmptyState';
 import {
   HEATMAP_SCALES,
   buildHeatmapView,
@@ -25,9 +26,22 @@ import {
 
 const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
 
-// 离散色阶：0=无记录，1-4 由浅到深。GitHub 贡献图风格，避免连续 opacity 发灰。
-const HEATMAP_LEVELS_LIGHT = ['var(--border)', 'var(--state-danger-border)', 'var(--state-danger-border)', 'var(--accent-hover)', 'var(--accent-hover)'];
-const HEATMAP_LEVELS_DARK = ['rgba(255,255,255,0.06)', 'var(--accent)', 'var(--accent)', 'var(--accent)', 'var(--accent)'];
+// 离散色阶：0=无记录，1-4 由浅到深。四档用同一主色的四种浓度派生，
+// 浅色/深色主题都能看出用量强弱；色值全部来自既有令牌，不引入新色板。
+const HEATMAP_LEVELS_LIGHT = [
+  'var(--border)',
+  'color-mix(in srgb, var(--accent) 22%, var(--surface))',
+  'color-mix(in srgb, var(--accent) 45%, var(--surface))',
+  'color-mix(in srgb, var(--accent) 70%, var(--surface))',
+  'var(--accent)',
+];
+const HEATMAP_LEVELS_DARK = [
+  'color-mix(in srgb, var(--text-primary) 6%, transparent)',
+  'color-mix(in srgb, var(--accent) 26%, var(--surface))',
+  'color-mix(in srgb, var(--accent) 48%, var(--surface))',
+  'color-mix(in srgb, var(--accent) 72%, var(--surface))',
+  'var(--accent)',
+];
 
 // 大数字计数：>=1e9 用 B，>=1e6 用 M，>=1e3 用 K，否则原样。1.24M / 512K / 8K 风格。
 function formatCount(value: number): string {
@@ -61,6 +75,17 @@ const SOURCE_COLORS: Record<string, string> = {
 const SOURCE_ORDER = ['主模型', '对外 API', '引擎'] as const;
 
 /**
+ * 三种来源的时间窗并不相同：主模型是本地会话累计，对外 API 只从本次服务启动
+ * 开始记，两个引擎在打开本页时按最近 24 小时的指标快照增量合并。页面把口径
+ * 写出来，避免用户误以为三者是同一种统计范围。
+ */
+const SOURCE_CALIBERS: Record<string, string> = {
+  '主模型': '会话累计（持久化保存）',
+  '对外 API': '本次服务启动以来',
+  '引擎': '打开本页时按最近 24 小时快照增量累计',
+};
+
+/**
  * token 统计页。
  *
  * 原来的七张孤立指标卡 + 环形图 + 排行的组合里，同一份 token 被拆在四五处重复呈现，
@@ -88,16 +113,37 @@ export default function UsagePage() {
   const usageValues = useMemo(() => usageEntries.map(([, usage]) => usage), [usageEntries]);
   const modelById = new Map(state.models.map((model) => [model.id, model]));
   const totals = usageValues.reduce(
-    (acc, usage) => ({
-      promptTokens: acc.promptTokens + usage.promptTokens,
-      completionTokens: acc.completionTokens + usage.completionTokens,
-      totalTokens: acc.totalTokens + usage.totalTokens,
-      responseCount: acc.responseCount + usage.responseCount,
-      totalTokensPerSec: acc.totalTokensPerSec + usage.totalTokensPerSec,
-      totalFirstTokenDelay: acc.totalFirstTokenDelay + (usage.totalFirstTokenDelay ?? 0),
-      totalGenTime: acc.totalGenTime + (usage.totalGenTime ?? 0),
-    }),
-    { promptTokens: 0, completionTokens: 0, totalTokens: 0, responseCount: 0, totalTokensPerSec: 0, totalFirstTokenDelay: 0, totalGenTime: 0 }
+    (acc, usage) => {
+      // 三个计时指标各自记录「真正带了该数据的响应数」：对外 API 行只有
+      // responseCount，速度与计时字段恒为 0，不能混进平均值的分母。
+      const speedResponses = usage.totalTokensPerSec > 0 ? usage.responseCount : 0;
+      const firstTokenResponses = (usage.totalFirstTokenDelay ?? 0) > 0 ? usage.responseCount : 0;
+      const genTimeResponses = (usage.totalGenTime ?? 0) > 0 ? usage.responseCount : 0;
+      return {
+        promptTokens: acc.promptTokens + usage.promptTokens,
+        completionTokens: acc.completionTokens + usage.completionTokens,
+        totalTokens: acc.totalTokens + usage.totalTokens,
+        responseCount: acc.responseCount + usage.responseCount,
+        totalTokensPerSec: acc.totalTokensPerSec + usage.totalTokensPerSec,
+        totalFirstTokenDelay: acc.totalFirstTokenDelay + (usage.totalFirstTokenDelay ?? 0),
+        totalGenTime: acc.totalGenTime + (usage.totalGenTime ?? 0),
+        speedResponses: acc.speedResponses + speedResponses,
+        firstTokenResponses: acc.firstTokenResponses + firstTokenResponses,
+        genTimeResponses: acc.genTimeResponses + genTimeResponses,
+      };
+    },
+    {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      responseCount: 0,
+      totalTokensPerSec: 0,
+      totalFirstTokenDelay: 0,
+      totalGenTime: 0,
+      speedResponses: 0,
+      firstTokenResponses: 0,
+      genTimeResponses: 0,
+    }
   );
 
   // 所有后端合并后的「日期 → token」，热力图三档粒度共用这一份。
@@ -200,14 +246,15 @@ export default function UsagePage() {
     heatmapScaleRef.current = heatmapScale;
   }, [heatmapScale]);
 
-  const avgTokensPerSec = totals.responseCount > 0 && totals.totalTokensPerSec > 0
-    ? totals.totalTokensPerSec / totals.responseCount
+  // 平均值按各自的有效响应数求：对外 API 行没有计时数据，不参与分母。
+  const avgTokensPerSec = totals.speedResponses > 0 && totals.totalTokensPerSec > 0
+    ? totals.totalTokensPerSec / totals.speedResponses
     : 0;
-  const avgFirstTokenDelay = totals.responseCount > 0 && totals.totalFirstTokenDelay > 0
-    ? totals.totalFirstTokenDelay / totals.responseCount
+  const avgFirstTokenDelay = totals.firstTokenResponses > 0 && totals.totalFirstTokenDelay > 0
+    ? totals.totalFirstTokenDelay / totals.firstTokenResponses
     : 0;
-  const avgGenTime = totals.responseCount > 0 && totals.totalGenTime > 0
-    ? totals.totalGenTime / totals.responseCount
+  const avgGenTime = totals.genTimeResponses > 0 && totals.totalGenTime > 0
+    ? totals.totalGenTime / totals.genTimeResponses
     : 0;
   const modelUsage = usageEntries
     .map(([modelId, usage]) => {
@@ -350,6 +397,9 @@ export default function UsagePage() {
                   <span>输出 <span className="mono-font font-semibold text-[var(--text-primary)]">{formatCount(totals.completionTokens)}</span></span>
                   <span><span className="mono-font font-semibold text-[var(--text-primary)]">{totals.responseCount.toLocaleString()}</span> 次响应</span>
                 </div>
+                <p className="mt-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-tertiary)]">
+                  口径：主模型为会话累计，对外 API 自服务启动起，NiNfer / Strata 按最近 24 小时快照增量累计（打开本页时同步，应用未运行期间不采集）。
+                </p>
 
                 {/* 来源堆叠条：一条就能看出 token 从哪来，替代原来单独一行的文字拆分。 */}
                 {sourceRows.length > 0 && totals.totalTokens > 0 && (
@@ -365,7 +415,7 @@ export default function UsagePage() {
                     </div>
                     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
                       {sourceRows.map((row) => (
-                        <span key={row.source} className="inline-flex items-center gap-1.5">
+                        <span key={row.source} className="inline-flex items-center gap-1.5" title={SOURCE_CALIBERS[row.source]}>
                           <span className="h-2 w-2 rounded-full" style={{ background: SOURCE_COLORS[row.source] }} />
                           {row.source}
                           <span className="mono-font font-medium text-[var(--text-primary)]">{formatCount(row.tokens)}</span>
@@ -381,19 +431,19 @@ export default function UsagePage() {
                   label="平均速度"
                   value={avgTokensPerSec > 0 ? avgTokensPerSec.toFixed(1) : '—'}
                   unit="tok/s"
-                  hint="每次响应速度的算术平均"
+                  hint="每次响应速度的算术平均（只统计带速度数据的响应，不含对外 API）"
                 />
                 <SubMetric
                   label="平均首字"
                   value={avgFirstTokenDelay > 0 ? avgFirstTokenDelay.toFixed(2) : '—'}
                   unit="s"
-                  hint="从请求到第一个 token 的平均等待"
+                  hint="从请求到第一个 token 的平均等待（只统计带首字计时数据的响应）"
                 />
                 <SubMetric
                   label="平均输出"
                   value={avgGenTime > 0 ? avgGenTime.toFixed(1) : '—'}
                   unit="s"
-                  hint="单次回答的平均生成耗时"
+                  hint="单次回答的平均生成耗时（只统计带生成时长数据的响应）"
                 />
               </div>
             </div>
@@ -525,7 +575,7 @@ export default function UsagePage() {
                                       style={{
                                         width: gridCell.cell,
                                         height: gridCell.cell,
-                                        background: cell.tokens > 0 ? heatmapPalette[cell.level] : (state.theme === 'dark' ? 'rgba(255,255,255,0.06)' : 'var(--border)'),
+                                        background: cell.tokens > 0 ? heatmapPalette[cell.level] : heatmapPalette[0],
                                       }}
                                     />
                                   );
@@ -548,7 +598,8 @@ export default function UsagePage() {
               {heatmapScale === 'year' ? (
                 <div className="mt-2 flex h-7 items-center justify-end gap-1.5 pr-0.5 text-[length:var(--font-micro)] leading-none text-[var(--text-tertiary)]">
                   <span>少</span>
-                  {heatmapPalette.map((color, index) => (
+                  {/* 图例只展示 1-4 档用量色，0 档（无记录）不参与「少→多」的读法。 */}
+                  {heatmapPalette.slice(1).map((color, index) => (
                     <span key={index} className="h-[14px] w-[14px] rounded-[3px]" style={{ background: color }} />
                   ))}
                   <span>多</span>
@@ -597,9 +648,11 @@ export default function UsagePage() {
                   )}
                 </>
               ) : (
-                <div className="py-10 text-center text-[length:var(--font-caption)] text-[var(--text-secondary)]">
-                  暂无真实 token 使用记录。
-                </div>
+                <EmptyState
+                  icon={BarChart3}
+                  title="暂无真实 token 使用记录"
+                  description="完成一轮对话后，这里会按模型汇总 tokens、速度与首字延迟；引擎用量在服务启动后按 24 小时快照合并。"
+                />
               )}
             </section>
           </div>
@@ -747,7 +800,12 @@ function UsageRankRow({ rank, name, source, tokens, total, color, responseCount,
         <span className="mono-font w-4 flex-shrink-0 text-[length:var(--font-eyebrow)] font-semibold text-[var(--text-tertiary)]">{rank}</span>
         <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: color }} />
         <span className="min-w-0 flex-1 truncate text-[length:var(--font-caption)] font-medium text-[var(--text-primary)]">{name}</span>
-        <span className="flex-shrink-0 rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">{source}</span>
+        <span
+          className="flex-shrink-0 rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]"
+          title={source === '引擎' ? '打开使用统计页时按最近 24 小时指标快照增量累计，已同步的历史不会随窗口滚动丢失' : undefined}
+        >
+          {source}
+        </span>
         <span className="mono-font w-14 flex-shrink-0 text-right text-[length:var(--font-caption)] font-semibold text-[var(--text-primary)]">{formatCount(tokens)}</span>
       </div>
       <div className="mt-1.5 flex items-center gap-2 pl-6">

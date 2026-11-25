@@ -55,9 +55,38 @@ export interface DesktopEmbeddingStatus {
   media: DesktopEmbeddingMediaInfo | null;
 }
 
+/**
+ * 一次启动实际下发的参数快照。
+ *
+ * CPU 兼容回退会把 ngl / ctx / batch / flash-attn 等改写掉，界面上的用户配置却仍是原值；
+ * `cpuFallback` 为 true 时应提示「已降级」，并展示实际生效值。
+ */
+export interface DesktopServerLaunchSnapshot {
+  requestedNgl: number;
+  requestedNCtx: number;
+  requestedBatchSize: number;
+  ngl: number;
+  nCtx: number;
+  batchSize: number;
+  /** 实际传入 --device 的设备；null 表示由内核自动选择。 */
+  device: string | null;
+  mainGpu: number | null;
+  noCuda: boolean;
+  flashAttn: boolean;
+  kvOffload: boolean;
+  /** true = GPU 启动失败后以 CPU 兼容模式运行，参数已被改写。 */
+  cpuFallback: boolean;
+}
+
 export async function getDesktopServerStatus() {
   if (!isDesktopRuntime()) return false;
   return invoke<boolean>('get_server_status');
+}
+
+/** 读取当前服务实际生效的启动参数；服务未运行时返回 null。 */
+export async function getDesktopServerLaunchSnapshot(): Promise<DesktopServerLaunchSnapshot | null> {
+  if (!isDesktopRuntime()) return null;
+  return invoke<DesktopServerLaunchSnapshot | null>('get_server_launch_snapshot');
 }
 
 /**

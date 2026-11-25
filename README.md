@@ -4,7 +4,7 @@ Windows 本地大模型启动器。Tauri 2 + React 19 前端，Rust 后端，围
 
 版本号 **0.5.0**（`package.json` 与 `tauri.conf.json` 同步）· [更新日志](CHANGELOG.md) · [Releases](https://github.com/xiaojiu131619-max/saya_LLM/releases/latest)
 
-> 0.5.0 主线：Pi 内核接入 Chat、全局 Pi runtime、最小产物门、Pi 在线安装/升级/回滚、宿主工具代理与权限三档、技能路由对齐完整雷达、Pi 长期记忆与浮窗、无限画布 × Pi 联动（状态/工作流只读 + 生图/图生图，画布包 v0.24.7）。
+> 0.5.0 主线：Pi 内核接入 Chat、全局 Pi runtime、最小产物门、Pi 在线安装/升级/回滚、宿主工具代理与权限三档、技能路由对齐完整雷达、Pi 长期记忆与浮窗、无限画布 × Pi 联动（状态/工作流只读 + 生图/图生图，画布包 v0.25.3）。
 
 ---
 

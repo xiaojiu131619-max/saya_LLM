@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import PageHeader from '@/components/PageHeader';
+import EmptyState from '@/components/EmptyState';
 import {
   clearDesktopServerLogs,
   getDesktopServerLogs,
@@ -91,7 +92,9 @@ export default function LlamaLogsPage() {
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     setPinnedBottom(nearBottom);
-    if (nearBottom && !autoScroll) setAutoScroll(true);
+    // 跟随状态由「用户是否在底部」决定：上翻读历史时立即解除跟随，
+    // 否则每秒轮询出的新数组会把视口拽回底部；滚回底部附近或点「回到最新」再恢复。
+    setAutoScroll(nearBottom);
   };
 
   const jumpToBottom = () => {
@@ -218,11 +221,11 @@ export default function LlamaLogsPage() {
               className="mono-font h-[calc(100%-36px)] overflow-y-auto overflow-x-hidden px-4 py-3 text-[length:var(--font-caption)] leading-[1.7]"
             >
               {rendered.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center text-[var(--text-secondary)]">
-                  <Terminal className="mb-3 h-10 w-10 opacity-40" />
-                  <p className="text-sm">暂无 llama-server 输出</p>
-                  <p className="mt-1 text-xs">加载模型后，推理内核的日志会实时显示在这里</p>
-                </div>
+                <EmptyState
+                  icon={Terminal}
+                  title="暂无 llama-server 输出"
+                  description="加载模型后，推理内核的日志会实时显示在这里。"
+                />
               ) : (
                 rendered.map((line, index) => {
                   const tone = classifyLine(line);

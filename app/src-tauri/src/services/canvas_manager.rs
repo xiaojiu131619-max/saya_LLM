@@ -24,6 +24,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::commands::config::get_app_data_root;
 use crate::services::canvas_host::{self, CanvasHostHandle};
+use crate::services::ffmpeg_installer;
 use crate::services::node_installer::{self, NodeInfo, NodeSource};
 use crate::services::process_manager;
 
@@ -401,7 +402,74 @@ fn pack_status(app: Option<&AppHandle>) -> CanvasPackStatus {
     }
 }
 
-fn copy_dir_contents(source: &Path, target: &Path) -> Result<(), String> {
+fn ensure_data_dirs(pack_dir: &Path) -> Result<(), String> {
+    for dir in [data_dir(), outputs_dir(), logs_dir(), workflows_dir()] {
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("创建画布数据目录失败 {}：{error}", dir.display()))?;
+    }
+    seed_workflows(pack_dir)
+}
+
+/// 工作流补齐标记：记录「哪个模块版本已经补过内置工作流」。
+fn workflows_seed_marker_path() -> PathBuf {
+    canvas_root().join("workflows-seed.json")
+}
+
+/// 把内置工作流补齐到用户数据目录。
+///
+/// 这里不能用「用户目录非空就跳过」：画布模块升级时上游会新增工作流
+/// （v0.25.3 就从 22 个涨到 61 个），老用户目录里只要有一个文件就再也拿不到
+/// 新版本自带的工作流。也不能每次启动都补：那样用户删掉的工作流会被反复塞回来。
+///
+/// 折中做法是按模块版本记一次标记——同一版本只补一次，升级后补一次；每次只写
+/// 缺失的文件，已存在的绝不覆盖，用户改过的同名工作流仍然以用户版本为准。
+fn seed_workflows(pack_dir: &Path) -> Result<(), String> {
+    let source = pack_dir.join("gateway").join("workflows");
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let version = pack_version(pack_dir);
+    let marker = workflows_seed_marker_path();
+    let seeded = fs::read_to_string(&marker)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(|item| item.as_str())
+                .map(str::to_string)
+        });
+    if let (Some(version), Some(seeded)) = (version.as_deref(), seeded.as_deref()) {
+        if version == seeded {
+            return Ok(());
+        }
+    }
+    let mut added = Vec::new();
+    copy_missing_dir_contents(&source, &workflows_dir(), &mut added)?;
+    let payload = serde_json::json!({
+        "version": version,
+        "added": added.len(),
+        "seeded_at": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0),
+    });
+    // 标记写失败不影响画布使用，下次启动会再补一次。
+    let _ = fs::write(&marker, payload.to_string());
+    if !added.is_empty() {
+        eprintln!("[canvas] 已补充 {} 个内置工作流", added.len());
+    }
+    Ok(())
+}
+
+/// 递归补齐 `source` 下 `target` 中缺失的文件，返回新增文件的路径。
+///
+/// 已存在的文件（含目录）一律跳过，避免覆盖用户在画布里的改动。
+fn copy_missing_dir_contents(
+    source: &Path,
+    target: &Path,
+    added: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     fs::create_dir_all(target)
         .map_err(|error| format!("创建目录失败 {}：{error}", target.display()))?;
     for entry in fs::read_dir(source)
@@ -411,29 +479,11 @@ fn copy_dir_contents(source: &Path, target: &Path) -> Result<(), String> {
         let from = entry.path();
         let to = target.join(entry.file_name());
         if from.is_dir() {
-            copy_dir_contents(&from, &to)?;
-        } else {
+            copy_missing_dir_contents(&from, &to, added)?;
+        } else if !to.exists() {
             fs::copy(&from, &to)
                 .map_err(|error| format!("复制文件失败 {}：{error}", from.display()))?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_data_dirs(pack_dir: &Path) -> Result<(), String> {
-    for dir in [data_dir(), outputs_dir(), logs_dir(), workflows_dir()] {
-        fs::create_dir_all(&dir)
-            .map_err(|error| format!("创建画布数据目录失败 {}：{error}", dir.display()))?;
-    }
-    // 首次启动把内置工作流复制到用户数据目录；之后升级不覆盖用户改动。
-    let mut has_workflow = false;
-    if let Ok(entries) = fs::read_dir(workflows_dir()) {
-        has_workflow = entries.flatten().any(|entry| entry.path().is_file());
-    }
-    if !has_workflow {
-        let source = pack_dir.join("gateway").join("workflows");
-        if source.is_dir() {
-            copy_dir_contents(&source, &workflows_dir())?;
+            added.push(to);
         }
     }
     Ok(())
@@ -608,6 +658,13 @@ fn build_gateway_command(
         );
     if !config.comfy_dir.is_empty() {
         command.env("COMFYUI_DIR", &config.comfy_dir);
+    }
+    // v0.25 的视频剪辑 / 换脸 / 长视频拼接会调用 ffmpeg、ffprobe。应用自己的
+    // ffmpeg 安装器把它们放在 resources 目录，存在就显式指给网关，不必依赖 PATH。
+    for (env_key, stem) in [("FFMPEG_PATH", "ffmpeg"), ("FFPROBE_PATH", "ffprobe")] {
+        if let Some(exe) = ffmpeg_installer::installed_binary(stem) {
+            command.env(env_key, exe);
+        }
     }
     #[cfg(windows)]
     {
@@ -1220,6 +1277,48 @@ mod tests {
         assert_eq!(config.comfy_url, "http://127.0.0.1:8188");
     }
 
+    /// 升级画布模块时新增的内置工作流要能补进用户目录，同时不覆盖用户改动。
+    #[test]
+    fn seeds_missing_workflows_without_overwriting() {
+        use super::copy_missing_dir_contents;
+        use std::fs;
+        use std::path::PathBuf;
+
+        let root = std::env::temp_dir().join(format!(
+            "canvas-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let pack = root.join("pack");
+        let user = root.join("user");
+        fs::create_dir_all(&pack).expect("创建临时插件目录");
+        fs::create_dir_all(&user).expect("创建临时用户目录");
+        fs::write(pack.join("old.json"), "pack-old").expect("写入旧内置工作流");
+        fs::write(pack.join("new.json"), "pack-new").expect("写入新增内置工作流");
+        fs::write(user.join("old.json"), "user-edited").expect("写入用户版本");
+
+        let mut added: Vec<PathBuf> = Vec::new();
+        copy_missing_dir_contents(&pack, &user, &mut added).expect("补齐内置工作流");
+
+        assert_eq!(added.len(), 1, "只应补 1 个缺失工作流");
+        assert!(added[0].ends_with("new.json"), "补的应是新增工作流");
+        assert_eq!(
+            fs::read_to_string(user.join("old.json")).expect("读取用户版本"),
+            "user-edited",
+            "已存在的工作流不能被内置版本覆盖"
+        );
+        assert_eq!(
+            fs::read_to_string(user.join("new.json")).expect("读取新增工作流"),
+            "pack-new",
+            "缺失的工作流应被复制"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// 本地 smoke：需要 `app/resources/canvas` 已构建、系统有合规 Node。
     /// 运行：cargo test canvas_smoke -- --ignored --nocapture
     #[test]
@@ -1257,14 +1356,31 @@ mod tests {
     #[ignore]
     fn canvas_pack_install_smoke() {
         let _guard = TEST_LOCK.lock().expect("测试锁");
-        let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        // 不写死版本号：每次升级画布模块 zip 名都会变，取 dist-canvas 下最新的一份。
+        let dist_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
-            .join("dist-canvas")
-            .join("Agent_LLM_Canvas_v0.24.6.zip");
-        if !zip.is_file() {
-            eprintln!("跳过：未找到画布模块 zip {}", zip.display());
+            .join("dist-canvas");
+        let zip = std::fs::read_dir(&dist_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("Agent_LLM_Canvas_v") && name.ends_with(".zip"))
+            })
+            .max_by_key(|path| {
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+            });
+        let Some(zip) = zip else {
+            eprintln!("跳过：{} 下没有画布模块 zip", dist_dir.display());
             return;
-        }
+        };
+        eprintln!("使用画布模块 zip：{}", zip.display());
         let installed = super::install_pack_from_zip(&zip).expect("画布模块应能安装");
         assert!(installed.installed);
         let pack_dir = super::installed_pack_dir();

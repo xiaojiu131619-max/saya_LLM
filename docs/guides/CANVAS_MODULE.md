@@ -17,6 +17,8 @@ Agent 页「画布」标签
 
 参考项目：[1314521gjy/ComfyUI-Local-Infinite-Canvas](https://github.com/1314521gjy/ComfyUI-Local-Infinite-Canvas)（MIT，基于 basketikun/infinite-canvas）。
 
+当前内置模块：上游 **v0.25.3**（commit `205b37a`），模块内实际版本见 `app/resources/canvas/SOURCE.json`。
+
 ## 2. 关键约束
 
 - **画布端口固定 3210，不做静默回退。**
@@ -32,6 +34,10 @@ Agent 页「画布」标签
   `SCAN_ON_START=0`，否则 ComfyUI 未启动时扫描会拖住 `/health`，导致启动超时。网关就绪后由应用在后台调用 `/api/setup/scan`。
 - **Node 运行时由应用的托管安装器负责。**
   优先系统 Node（^22.19 || >=24），其次 `%APPDATA%/AgentLLM/runtimes/node-v*-win-x64`；都没有时由画布面板按需下载（约 35 MB），不需要用户手动安装。
+- **ffmpeg / ffprobe 由应用显式注入。**
+  v0.25 的视频剪辑、换脸、长视频拼接依赖这两个二进制。只要应用自己的 ffmpeg 安装器把它们装到 `resources/`，启动网关时就会带 `FFMPEG_PATH` / `FFPROBE_PATH`；没装时网关按 PATH 与 ComfyUI 目录回退。
+- **3D 场景的 Python 回退到 ComfyUI 自带环境。**
+  网关 `scene3d` 需要带 Pillow/numpy/cv2 的 Python，默认找 `COMFYUI_DIR/python_embeded/python.exe`；需要别的解释器时用 `SCENE3D_PYTHON` 覆盖。
 
 ## 3. 数据目录
 
@@ -40,7 +46,8 @@ Agent 页「画布」标签
   config.json          # ComfyUI 地址、画布端口、网关端口、窗口偏好
   data/                # 网关任务、上传、free-workflows 等
   outputs/             # 网关输出
-  workflows/           # 首次启动从模块复制；之后升级不覆盖
+  workflows/           # 每个模块版本补一次缺失的内置工作流；已存在的文件不覆盖
+  workflows-seed.json  # 记录已补齐内置工作流的模块版本
   logs/gateway.log     # 网关标准输出/错误
   downloads/           # 画布模块下载缓存
   pack/                # 按需安装的画布模块（web + gateway + node_modules）
@@ -50,23 +57,31 @@ Agent 页「画布」标签
 
 ## 4. 画布模块的构建与发布
 
-### 4.1 准备源码
+### 4.1 同步上游源码
+
+一条命令拉取并整理好整个模块：
 
 ```powershell
-git clone --depth 1 --filter=blob:none --sparse https://github.com/1314521gjy/ComfyUI-Local-Infinite-Canvas.git canvas-upstream
-cd canvas-upstream
-git sparse-checkout set --no-cone `
-  "/infinite-canvas/web/dist/" `
-  "/comfyui-gateway/src/" `
-  "/comfyui-gateway/workflows/" `
-  "/comfyui-gateway/prompts/" `
-  "/comfyui-gateway/package.json" `
-  "/comfyui-gateway/package-lock.json" `
-  "/comfyui-gateway/resources/index.json" `
-  "/VERSION" "/LICENSE" "/NOTICE.md" "/THIRD_PARTY_NOTICES.md"
+cd app
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-canvas-pack.ps1 -Ref v0.25.3
 ```
 
-按以下结构复制到 `app/resources/canvas/`：
+脚本做的事：
+
+1. 上游缺省检出到 `tmp/canvas-upstream`（`--filter=blob:none --sparse`），已存在就 fetch + checkout；
+2. 只检出打包需要的路径：`/infinite-canvas/web/dist/`、`/comfyui-gateway/{src,workflows,prompts,comfyui-bridge,tools}`、
+   `/comfyui-gateway/scripts/build-h3-trt-vae.py`、`/comfyui-gateway/{resources/index.json,package.json,package-lock.json}`、
+   `/VERSION`、`/LICENSE`、`/NOTICE.md`、`/THIRD_PARTY_NOTICES.md`；
+3. **裁剪 dist**：从 `index.html` 出发做「可达资源闭包」，只保留入口页与动态 import 真正引用的 assets；
+4. 应用本地改动（去掉画布修复助手插件、补 `config.js` 占位），写 `VERSION` 与 `SOURCE.json`。
+
+> 上游 `web/dist/assets` 不清理历史构建：v0.25.3 里堆了 452 个 bundle、318 MB，其中 443 个是过期产物。
+> 必须按可达闭包裁剪，否则单包会从 5 MB 涨到 300 MB 以上。
+>
+> `sync-canvas-pack.ps1` 必须保存为 **带 BOM 的 UTF-8**：Windows PowerShell 5.1 对无 BOM 脚本按 ANSI 解析，
+> 中文字符串会被撕成语法错误。
+
+同步后的模块结构：
 
 ```txt
 app/resources/canvas/
@@ -75,11 +90,14 @@ app/resources/canvas/
   NOTICE.md
   THIRD_PARTY_NOTICES.md
   SOURCE.json          # 记录上游 commit / 版本 / 打包范围
-  web/                 # infinite-canvas/web/dist 的内容
+  web/                 # infinite-canvas/web/dist 的裁剪结果（index.html + 可达 assets + 皮肤/图标/插件）
   gateway/
     src/
     workflows/
-    prompts/
+    prompts/           # 含 prompts/skills/h3-prompt-writing
+    comfyui-bridge/    # open-workflow.js 与 yue2_instrumental（v0.25 起必需）
+    tools/scene3d_pano.py
+    scripts/build-h3-trt-vae.py
     resources/index.json
     package.json
     package-lock.json
@@ -104,25 +122,46 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-canvas-pack.
 
 ```txt
 app/dist-canvas/
-  Agent_LLM_Canvas_v0.24.6.zip
+  Agent_LLM_Canvas_v0.25.3.zip
   canvas-pack.json     # version / size / sha256 / upstream_commit
 ```
 
 `app/resources/canvas/` 与 `app/dist-canvas/` 都在 `.gitignore` 中，不入库；发布时把 zip 上传到 GitHub Releases。
 
-### 4.3 配置下载源
+### 4.3 出包时把模块放到 exe 旁边
+
+```powershell
+cd app
+npm run desktop:build     # tauri build + scripts/stage-canvas-pack.ps1
+```
+
+**光靠 `tauri.conf.json` 的 `bundle.resources` 不够。** `app/resources/canvas` 被 `.gitignore` 忽略，
+而 Tauri 打包资源时遵循忽略规则，所以 `"../resources/canvas"` 会被静默跳过（`resources/tools` 因为
+没被忽略才会正常落盘）。因此 `desktop:build` 在 `tauri build` 之后调用
+`scripts/stage-canvas-pack.ps1`，把模块复制到 `src-tauri/target/release/canvas/`；应用侧
+`pack_candidates` 会认这个 exe 同级的 `canvas` 目录。
+
+单独补放（不重新编译）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\stage-canvas-pack.ps1
+```
+
+便携包 `npm run portable:zip` 走 `package-portable.ps1`，它本来就显式复制到 `<便携包>/canvas`。
+
+### 4.4 配置下载源
 
 `CanvasPanel.tsx` 顶部的 `CANVAS_PACK_RELEASE` 固定了下载地址与 SHA256：
 
 ```ts
 const CANVAS_PACK_RELEASE = {
-  version: '0.24.6',
-  url: 'https://github.com/<owner>/<repo>/releases/download/canvas-v0.24.6/Agent_LLM_Canvas_v0.24.6.zip',
+  version: '0.25.3',
+  url: 'https://github.com/<owner>/<repo>/releases/download/canvas-v0.25.3/Agent_LLM_Canvas_v0.25.3.zip',
   sha256: '<build-canvas-pack.ps1 输出的 SHA256>',
 };
 ```
 
-重新打包后 SHA 会变化，必须同步更新；否则下载会因校验失败而拒绝安装。
+同一份数据还要写进 `app/resources/canvas-pack.release.json`。重新打包后 SHA 会变化，必须同步更新；否则下载会因校验失败而拒绝安装。
 
 没有发布下载源时，画布面板仍支持「从本地 zip 安装」，可离线安装同一份产物。
 
@@ -135,6 +174,9 @@ const CANVAS_PACK_RELEASE = {
 - ComfyUI 未启动时画布能打开，但提交任务给出明确错误。
 - 停止画布/退出应用后没有残留 Node 进程，端口释放。
 - 重启后画布项目仍在（固定端口 3210）。
+- 老用户升级模块后，`canvas/workflows/` 会补上新增的内置工作流（启动日志出现 `[canvas] 已补充 N 个内置工作流`），已存在的同名文件不被覆盖；同一版本内重复启动不会再补。
+- 装了 ffmpeg 时，启动画布的网关进程环境里带 `FFMPEG_PATH` / `FFPROBE_PATH`。
+- `npm run desktop:build` 后 `src-tauri/target/release/canvas/VERSION` 与 `app/resources/canvas/VERSION` 一致；把裸 exe 拷到别处时，同级的 `canvas` 目录要一起拷。
 
 ## 6. 已知边界
 
@@ -142,12 +184,17 @@ const CANVAS_PACK_RELEASE = {
 - 不打包模型权重、LoRA、自定义节点；内置工作流是否可用取决于本机 ComfyUI 资源。
 - 资源中心仍可能从上游地址下载节点/权重，体积与网络由用户确认。
 - 画布模块升级需要重新打包并更新 SHA；上游代码变动不自动跟随。
+- 内置工作流按「一个模块版本补一次」同步：`canvas/workflows-seed.json` 里的版本与当前模块不同时，才把缺失的内置工作流补进来；已有同名文件一律不覆盖（保护用户改动）。因此同一版本内用户删掉的工作流不会自己回来，升级模块时才会补回。
+- 上游删除或改名的旧工作流、上游对同名工作流的内容修改都不会自动跟随，用户目录里可能留下历史版本。
 
 ## 7. 排障
 
 - **画布窗口空白 / 不出现**：动态窗口必须在 Tauri 主线程创建（`run_on_main_thread`），不能直接在命令线程 `build`；否则会留下一个 `about:blank` 后立刻消失的窗口。代码已按此实现。
 - **画布端口被占用**：先关闭占用程序；不要为了绕开占用直接换端口，画布项目按 origin 保存，换端口会看不到旧项目。
-- **应用重启后网关仍在跑**：`canvas/runtime.json` 记录当前网关 PID；应用启动和再次启动画布时会按 PID + 命令行清理上次残留，只杀 `node.exe` 且命令行包含 `canvas` 与 `server.js` 的进程。
+- **应用重启后网关仍在跑**：`canvas/runtime.json` 记录当前网关 PID；应用启动和再次启动画布时会按 PID + 命令行清理上次残留，只杀 `node.exe` 且命令行包含 `canvas` 与 `server.js` 的进程。注意这条规则也会命中独立安装的上游网关：若你自己在 `G:\AI\ComfyUI-Local-Infinite-Canvas` 里跑着网关，别让它出现在应用的 `runtime.json` 里。
 - **下载画布模块 404**：GitHub Releases 里还没有对应 tag/asset，或 `CANVAS_PACK_RELEASE` 的 URL/SHA 与发布的 zip 不一致；先上传 `app/dist-canvas/Agent_LLM_Canvas_v<版本>.zip`，再用 `canvas-pack.json` 的 SHA 更新代码。
 - **ComfyUI 一直显示离线**：确认地址可从本机访问（LAN 地址也可以）；改地址后要停止再启动画布，网关启动时读取 `COMFY_URL`。
+- **视频剪辑 / 换脸 / 长视频拼接报错找不到 ffmpeg**：这些能力依赖 `ffmpeg` 与 `ffprobe`。在应用里装好 ffmpeg 后重启画布，启动参数会自动带上 `FFMPEG_PATH` / `FFPROBE_PATH`；没装时网关回退到 PATH 与 ComfyUI 目录。
+- **3D 场景提示缺少图像处理环境**：`scene3d` 需要带 Pillow/numpy/cv2 的 Python，默认用 ComfyUI 的 `python_embeded`；也可用 `SCENE3D_PYTHON` 指定。
+- **升级后看不到新工作流**：确认模块版本（`SOURCE.json` / `VERSION`）与启动日志里的 `[canvas] 已补充 N 个内置工作流`；没有这行说明该版本已补过（`canvas/workflows-seed.json` 记录了版本），删掉这个文件再启动可强制重补一次。
 

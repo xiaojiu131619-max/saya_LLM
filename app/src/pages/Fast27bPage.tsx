@@ -16,6 +16,7 @@ import {
   Trash2,
 } from "lucide-react";
 import ToggleSwitch from "@/components/ToggleSwitch";
+import EmptyState from "@/components/EmptyState";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import WorkingBadge from "@/components/WorkingBadge";
 import Fast27bPerformance from "@/features/fast27b/Fast27bPerformance";
@@ -1041,10 +1042,12 @@ export default function Fast27bPage() {
                     className="mono-font h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--app-bg)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-[1.7]"
                   >
                     {!renderedLogs.length ? (
-                      <div className="flex h-full items-center justify-center gap-2 text-secondary-custom">
-                        <Terminal className="h-4 w-4 opacity-50" />
-                        启动后显示引擎日志
-                      </div>
+                      <EmptyState
+                        compact
+                        icon={Terminal}
+                        title="暂无引擎日志"
+                        description="启动 NiNfer 后，引擎输出会实时显示在这里。"
+                      />
                     ) : (
                       renderedLogs.map((line, index) => (
                         <div

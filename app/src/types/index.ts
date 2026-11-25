@@ -98,6 +98,13 @@ export interface ModelLoadConfig {
   specDraftNubatch: number;
   /** 多模态投影是否随 GPU 卸载（--mmproj-offload / --no-mmproj-offload）。 */
   mmprojOffload: boolean;
+  /**
+   * GPU 加载失败/OOM 时是否允许宿主自动改用 CPU 兼容模式重启。
+   *
+   * 回退会改写 ngl、ctx、batch、flash-attn、KV 卸载等用户显式设置的参数，
+   * 因此默认关闭：失败就明确报错，由用户决定是否降级。自动调参始终不降级。
+   */
+  retryCpuFallback: boolean;
   reasoningBudget: number;
 }
 
@@ -226,6 +233,13 @@ export interface ModelUsageStats {
   totalGenTime?: number;
   lastUsedAt?: number;
   dailyTokens: Record<string, number>;
+  /**
+   * 引擎用量专用的合并锚点：上一次指标快照窗口内的响应数。
+   *
+   * NiNfer / Strata 的快照只覆盖最近 24 小时，reducer 用它判断本次快照里
+   * 新增了多少条响应，窗口滚动时累计值才不会缩水。只参与计算，界面不要展示。
+   */
+  engineWindowResponses?: number;
 }
 
 export interface ModelMemoryLayout {
@@ -426,6 +440,10 @@ export interface Message {
   warnings?: string[];
   /** Pi 助手轮次：执行步骤流（气泡内折叠展示）。 */
   piSteps?: PiStep[];
+  /** Pi 本轮落盘的文件改动（检查点卡片：diff 审阅 + 回滚）。 */
+  piChanges?: PiFileChange[];
+  /** 改动已回滚：卡片转灰，按钮隐藏。 */
+  piChangesRolledBack?: boolean;
   /** Pi 助手轮次 id（取消时回传）。 */
   piTurnId?: string;
   /** Pi 助手轮次状态：running / done / aborted。 */
@@ -440,6 +458,28 @@ export interface PiStep {
   tone: 'info' | 'ok' | 'warn' | 'err';
   /** 连续相同事件合并后的次数（界面显示 ×N）。 */
   repeat?: number;
+  /** 工具步骤的结构化元数据：宿主/MCP 工具名（write_file、mcp__x__y…）。 */
+  tool?: string;
+  /** 工具的主路径/目标（write_file / edit_file 的 path 等）。 */
+  path?: string;
+  /** 工具调用结果：running / done / error。 */
+  toolState?: 'running' | 'done' | 'error';
+  /** 技能路由命中的技能名（point=skills 的合成步骤携带）。 */
+  skills?: string[];
+}
+
+/**
+ * Pi 一次文件落盘的改动记录（后端 `pi:file-changes` 事件）。
+ * 备份与清单都在后端数据目录，前端只拿展示用的 diff。
+ */
+export interface PiFileChange {
+  changeSetId: string;
+  /** 相对工作区的路径（正斜杠）。 */
+  path: string;
+  /** created | modified */
+  op: 'created' | 'modified' | string;
+  diff: string;
+  ts: number;
 }
 
 /** 一次 MCP 工具调用在界面上的记录。 */

@@ -5,6 +5,7 @@ import {
   piAgentGetStatus,
   piAgentRun,
   piAgentSelectSkills,
+  piFocusMainWindow,
   subscribePiAgent,
   type PiAgentStatus,
   type PiImageInput,
@@ -193,12 +194,14 @@ export default function PiFloatApp() {
         setPermissionWaiting(false);
       },
       onPermission: () => setPermissionWaiting(true),
-      // 后端超时后已按「拒绝」处理：这里要把「等确认」的提示撤掉，
-      // 否则提示会一直挂到本轮结束。活儿在主界面确认不了时，浮窗只能说明原因。
+      // 后端超时或取消后已按「拒绝」处理：这里要把「等确认」的提示撤掉，
+      // 否则提示会一直挂到本轮结束。活儿在主界面确认时，浮窗只能说明原因。
       onPermissionExpired: ({ tool }) => {
         setPermissionWaiting(false);
-        setError(`Pi 的「${tool}」权限请求已超时，已自动拒绝；请到主界面重新发起。`);
+        setError(`Pi 的「${tool}」权限请求已失效（取消或超时），已自动拒绝。`);
       },
+      // 文件改动卡片在主对话的气泡里展示，浮窗不重复渲染。
+      onFileChanges: () => {},
     });
   }, []);
 
@@ -272,6 +275,8 @@ export default function PiFloatApp() {
     runIdRef.current = '';
     failureRef.current = '';
     setBusy(false);
+    // 取消时后端会一并拒绝挂起的权限确认，浮窗的「等确认」提示也要撤掉。
+    setPermissionWaiting(false);
   }, []);
 
   const addImages = useCallback(async (files: Blob[]) => {
@@ -421,7 +426,15 @@ export default function PiFloatApp() {
       {permissionWaiting ? (
         <p className="flex items-center gap-1.5 border-t border-[var(--border)] px-3 py-1.5 text-[length:var(--font-micro)] leading-relaxed text-[var(--state-warning)]">
           <ShieldAlert className="h-3.5 w-3.5 flex-shrink-0" />
-          Pi 在请求工具权限，请到主界面确认弹窗；确认后这里会继续。
+          <span className="min-w-0 flex-1">Pi 在请求工具权限，请到主界面确认弹窗；确认后这里会继续。</span>
+          <button
+            type="button"
+            onClick={() => void piFocusMainWindow().catch(() => undefined)}
+            title="切换到主窗口的权限确认弹窗"
+            className="flex-shrink-0 rounded border border-[var(--border)] px-1.5 py-0.5 text-[length:var(--font-micro)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
+          >
+            回到主界面
+          </button>
         </p>
       ) : null}
 

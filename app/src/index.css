@@ -102,30 +102,35 @@
 
     --text-primary: #1C1C1C;
     --text-secondary: #5D5D5D;
-    --text-tertiary: #8A8A8A;
+    /* 对比度审计（2026-11-25）：原 #8A8A8A 在 surface-hover 上只有 2.95:1，
+       小字号提示文字达不到 WCAG AA 4.5:1；#6A6A6A 在全部底色上 ≥4.62。 */
+    --text-tertiary: #6A6A6A;
     --text-on-accent: #FFFFFF;
 
-    --accent: #0078D4;
-    --accent-hover: #106EBE;
-    --accent-pressed: #005A9E;
-    --accent-subtle: rgba(0, 120, 212, 0.08);
+    /* 品牌蓝下沉一档：#0078D4 作为 11px eyebrow / 链接色时在 app-bg 上只有 4.34:1。
+       同一色相梯度整体下移（原 hover/pressed 依次接替），白字按钮反而更清晰。 */
+    --accent: #006CBD;
+    --accent-hover: #005A9E;
+    --accent-pressed: #004578;
+    --accent-subtle: rgba(0, 108, 189, 0.08);
 
     --state-success: #107C10;
     --state-success-bg: #DFF6DD;
     --state-success-border: #B7E2B7;
-    --state-warning: #B26B00;
+    /* #B26B00 在 warning-bg 上 3.82:1；压暗到 #8A5200 后 5.80:1，仍是琥珀色语义。 */
+    --state-warning: #8A5200;
     --state-warning-bg: #FFF4CE;
     --state-warning-border: #F5D98A;
     --state-danger: #C42B1C;
     --state-danger-bg: #FDE7E9;
     --state-danger-border: #F1B5B8;
-    --state-info: #0078D4;
+    --state-info: #006CBD;
 
     --status-loaded: #107C10;
-    --status-loading: #B26B00;
+    --status-loading: #8A5200;
     --status-error: #C42B1C;
-    --status-standby: #8A8A8A;
-    --status-downloading: #0078D4;
+    --status-standby: #6A6A6A;
+    --status-downloading: #006CBD;
   }
 
   .dark {
@@ -167,7 +172,8 @@
     --status-loaded: #54B054;
     --status-loading: #D2923B;
     --status-error: #E87470;
-    --status-standby: #8A8A8A;
+    /* 原 #8A8A8A 在 surface 上 4.38:1，小字号 standby 文案略欠；提亮到 #9C9C9C 后 5.51:1。 */
+    --status-standby: #9C9C9C;
     --status-downloading: #4CC2FF;
   }
 

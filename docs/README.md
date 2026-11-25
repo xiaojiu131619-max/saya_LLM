@@ -1,5 +1,7 @@
 # docs/ 文档目录索引
 
+> 想先看「项目有哪些、各自小类在哪、端口与目录怎么分」：直接读 [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md)（项目总览与功能地图，含文档冲突清单）。
+
 本目录按**文档生命周期**分四层：
 
 | 目录 | 收录标准 |
@@ -15,23 +17,24 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **项目总览与功能地图**：双层项目表（子产品/工程 → 应用模块 → 小类）、架构与主链路、端口/目录/进程、开发与测试、文档冲突与过时点、维护约定 |
 | [USER_MANUAL.md](guides/USER_MANUAL.md) | **拾壹完整使用说明书**：界面地图、上手流程、模型加载参数、对话、Pi、引擎、画布、API、设置中心、工具与 MCP、统计、数据管理、排障手册、已知问题 |
 | [DEVELOPMENT_GUIDE.md](guides/DEVELOPMENT_GUIDE.md) | 本地开发、构建、测试和故障排查 |
 | [UI_DESIGN_GUIDE.md](guides/UI_DESIGN_GUIDE.md) | UI/UX 设计边界与实现规则：分层、令牌、字体、图标、动效、组件、布局、禁止清单 |
 | [CANVAS_MODULE.md](guides/CANVAS_MODULE.md) | 无限画布外挂模块：端口/数据目录、Node 复用、画布包构建与发布 |
-| [TECHNICAL_REPORT.md](guides/TECHNICAL_REPORT.md) | 当前架构、数据流与模块清单 |
+| [TECHNICAL_REPORT.md](guides/TECHNICAL_REPORT.md) | 当前架构、数据流与模块清单（**版本口径仍写 v0.3.1，已滞后**；字段与模块以代码与 PROJECT_GUIDE 为准） |
 | [SWIFT27B_TUNING.md](guides/SWIFT27B_TUNING.md) | Swift-27B 模型调优依据、A/B 实测数据与已知坑 |
-| [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md) | Agent 阶段 3 的 stdio JSON 行协议契约（本轮仅留档） |
+| [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md) | **现行 Pi 宿主集成协议**：Rust 宿主 ↔ Pi Node 子进程的实际契约（旧 stdio 设计已由 Pi RPC 取代） |
 | [PI_AGENT_GUIDE.md](guides/PI_AGENT_GUIDE.md) | Pi 智能体使用说明书：运行链路、配置、权限档、技能树路由、排障手册、已知限制 |
 
 ## plans/ —— 进行中的计划
 
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
-| [ROADMAP.md](plans/ROADMAP.md) | 项目路线图 0.3.1 → 1.0.0 | 持续更新 |
-| [COMFY_IMAGE_WORKSPACE_PLAN.md](plans/COMFY_IMAGE_WORKSPACE_PLAN.md) | ComfyUI 生图工作区 | 待执行 |
-| [CANVAS_AGENT_LINKAGE_PLAN.md](plans/CANVAS_AGENT_LINKAGE_PLAN.md) | 无限画布 × Pi Agent 联动（只读 → 生图 → 画布续编 → 解释） | 仅规划，未实施 |
-| [POST_0.5_BACKLOG.md](plans/POST_0.5_BACKLOG.md) | 0.5 之后完成清单：Chat 接入、会话自动启动、产物门、技能雷达、模型矩阵、Pi 分发 | 待排期 |
+| [ROADMAP.md](plans/ROADMAP.md) | 项目路线图 0.3.1 → 1.0.0（基线仍为 v0.3.1，待升级到 0.5.x） | 持续更新 |
+| [COMFY_IMAGE_WORKSPACE_PLAN.md](plans/COMFY_IMAGE_WORKSPACE_PLAN.md) | ComfyUI 生图工作区（基线 v0.3.1 时编写，需重定界；当前画布模块已覆盖部分能力） | 待重定界 |
+| [CANVAS_AGENT_LINKAGE_PLAN.md](plans/CANVAS_AGENT_LINKAGE_PLAN.md) | 无限画布 × Pi Agent 联动（只读 → 生图 → 画布续编 → 解释） | M1–M3 已实施（只读/生图/图生图）；画布选中项“交给 Pi”未实施 |
+| [POST_0.5_BACKLOG.md](plans/POST_0.5_BACKLOG.md) | 0.5 之后完成清单：Chat 接入、会话自动启动、产物门、技能雷达、模型矩阵、Pi 分发 | P0/P1/P3 已完成；P2 的 M1/M2 与 M3 图生图已完成，画布选中项“交给 Pi”未实施 |
 | [DYNAMIC_GGUF_DRAFTER_PLAN.md](plans/DYNAMIC_GGUF_DRAFTER_PLAN.md) | 动态 GGUF Drafter（MTP / DSpark / DFlash） | Phase 1-3 已实施，Phase 4 待做 |
 | [WIN7_REPLICA_PLAN.md](plans/WIN7_REPLICA_PLAN.md) | Windows 7 复刻落地计划 | 未执行 |
 

@@ -34,8 +34,9 @@ const MAX_COMMAND_OUTPUT: usize = 32 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 const PERMISSION_TIMEOUT_SECS: u64 = 120;
-/// auto 档人工确认时允许完整展示的代码/命令上限（字符数）。超过即整体拒绝，
-/// 绝不退回截断预览——确认弹窗必须能看到将要执行的全部内容。
+/// auto 档人工确认时允许完整展示的代码/命令上限（字符数）。代码/命令超过即整体拒绝，
+/// 绝不退回截断预览——确认弹窗必须能看到将要执行的全部内容；文件写入则展示到上限
+/// 并标注总长度，避免正常大文件写入被一刀切拒绝。
 const MAX_REVIEWABLE_CHARS: usize = 20_000;
 
 /// 权限三档，与界面的「只读 / 守门 / 放行」一一对应。
@@ -156,6 +157,9 @@ pub struct PiToolState {
     pub memory_dir: PathBuf,
     /// 已启用的 MCP 服务器配置；Pi 通过 `mcp__<服务器>__<工具>` 调用的路由表。
     pub mcp_servers: Vec<crate::models::mcp_types::McpServerConfig>,
+    /// 文件改动检查点：write_file / edit_file 落盘前备份原文件并推 diff 事件。
+    /// 测试与无界面场景为 None（不记录）。
+    pub changes: Option<Arc<crate::services::pi_changes::ChangeTracker>>,
 }
 
 static BRIDGE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -173,6 +177,11 @@ static PENDING_PERMISSIONS: Lazy<Mutex<HashMap<String, PendingPermission>>> =
 /// 发权限事件用的 AppHandle；start_bridge 时刷新。
 /// deny_all_pending（停止 / 重启 Pi）要靠它通知前端关闭失效弹窗。
 static PROMPT_APP: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
+
+/// 当前工具桥的检查点跟踪器。宿主每次真正发出 prompt 前调用
+/// [`begin_change_set`]，把文件改动归到新的一轮（气泡卡片按单条消息回滚）。
+static ACTIVE_CHANGES: Lazy<Mutex<Option<Arc<crate::services::pi_changes::ChangeTracker>>>> =
+    Lazy::new(|| Mutex::new(None));
 
 static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
@@ -242,6 +251,19 @@ pub fn current_mode() -> PiPermissionMode {
         .unwrap_or(PiPermissionMode::Auto)
 }
 
+/// 新的一轮 prompt 即将写入 Pi：让文件改动检查点从下一笔改动起使用新的 changeSetId。
+///
+/// 不在这里创建目录——本轮没有写文件就不会留下空检查点。
+pub fn begin_change_set() {
+    let tracker = ACTIVE_CHANGES
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
+    if let Some(tracker) = tracker {
+        tracker.begin_turn();
+    }
+}
+
 /// 前端确认后调用。找不到 id 说明请求已超时/已失效。
 pub fn answer_permission(id: &str, allow: bool) -> Result<(), String> {
     let sender = PENDING_PERMISSIONS
@@ -255,12 +277,12 @@ pub fn answer_permission(id: &str, allow: bool) -> Result<(), String> {
         .map_err(|_| "确认请求已失效".to_string())
 }
 
-/// 拒绝并清空所有挂起的权限确认（停止 / 重启 Pi 时调用）。
+/// 拒绝并清空所有挂起的权限确认（停止 / 重启 / 取消当前轮时调用）。
 ///
 /// 除了唤醒工具线程按「拒绝」处理，还要给前端补发 `pi:permission_expired`：
 /// 弹窗是为这次请求挂出来的，后端单方面失效后前端并不知道，用户隔一会儿
 /// 再点「允许」只是对着一个已不存在的请求确认。超时路径在 `ask` 里发同一事件。
-fn deny_all_pending() {
+pub(crate) fn deny_all_pending() {
     let drained: Vec<(String, String)> = if let Ok(mut pending) = PENDING_PERMISSIONS.lock() {
         pending
             .drain()
@@ -314,11 +336,26 @@ pub fn start_bridge(
     let generation = BRIDGE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     BRIDGE_RUNNING.store(true, Ordering::SeqCst);
 
+    // 文件改动检查点：跟踪器随桥创建，但每轮 prompt 前会切新 changeSetId。
+    // 失败不阻断 Pi（退化为无检查点，行为同旧版）。
+    let changes =
+        match crate::services::pi_changes::ChangeTracker::start(app.clone(), &sandbox) {
+            Ok(tracker) => Some(Arc::new(tracker)),
+            Err(error) => {
+                crate::services::pi_agent::add_log(&format!("[pi] 检查点初始化失败：{error}"));
+                None
+            }
+        };
+    if let Ok(mut slot) = ACTIVE_CHANGES.lock() {
+        *slot = changes.clone();
+    }
+
     let state = Arc::new(PiToolState {
         sandbox,
         prompt: Arc::new(TauriPermissionPrompt { app: app.clone() }),
         memory_dir: crate::services::pi_memory::memory_dir(),
         mcp_servers,
+        changes,
     });
 
     thread::spawn(move || {
@@ -340,6 +377,9 @@ pub fn stop_bridge() {
     BRIDGE_GENERATION.fetch_add(1, Ordering::SeqCst);
     BRIDGE_RUNNING.store(false, Ordering::SeqCst);
     set_string(&BRIDGE_TOKEN, "");
+    if let Ok(mut slot) = ACTIVE_CHANGES.lock() {
+        *slot = None;
+    }
     deny_all_pending();
 }
 
@@ -555,6 +595,14 @@ fn display_path(path: impl AsRef<Path>) -> String {
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }
 
+/// 相对工作区的正斜杠路径：检查点清单与前端卡片统一用它。
+/// 沙箱是 canonicalize 过的（可能带 `\\?\` 前缀），strip 掉后保证可读。
+fn relative_display(sandbox: &Path, path: &Path) -> String {
+    path.strip_prefix(sandbox)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| display_path(path))
+}
+
 fn normalize_lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -573,7 +621,7 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("创建目录失败：{error}"))?;
@@ -589,12 +637,28 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+/// 人工确认时最多展示这么多字符。与 run_python 的「必须完整可读」同一口径：
+/// 超出时在弹窗里明确告知总长度和已展示范围，不让用户以为看到的就是全部。
+const PERMISSION_PREVIEW_CHARS: usize = MAX_REVIEWABLE_CHARS;
+
+fn clip_permission_preview(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= PERMISSION_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let clipped: String = text.chars().take(PERMISSION_PREVIEW_CHARS).collect();
+    format!("{clipped}\n…（内容共 {total} 字符，以上为前 {PERMISSION_PREVIEW_CHARS} 字符）")
+}
+
+/// 覆盖/修改文件时的权限判定。`preview` 是即将写入的内容摘要：
+/// 只给路径等于让用户盲签，守门档必须能看到要落盘的内容。
 fn permission_for_write(
     state: &PiToolState,
     mode: PiPermissionMode,
     tool: &str,
     path: &Path,
     exists: bool,
+    preview: &str,
 ) -> Option<PiToolResult> {
     match mode {
         PiPermissionMode::Plan => Some(PiToolResult::err(
@@ -602,10 +666,18 @@ fn permission_for_write(
             true,
         )),
         PiPermissionMode::Auto if exists => {
+            let preview_text = if preview.trim().is_empty() {
+                "（将写入空内容）".to_string()
+            } else {
+                clip_permission_preview(preview)
+            };
             let allow = state.prompt.ask(
                 tool,
                 "覆盖/修改文件",
-                &format!("{}\n（文件已存在）", display_path(path)),
+                &format!(
+                    "{}\n（文件已存在，将被覆盖/修改）\n\n{preview_text}",
+                    display_path(path)
+                ),
                 mode,
             );
             if allow {
@@ -751,14 +823,28 @@ pub fn execute_tool(
                 Ok(path) => path,
                 Err(error) => return PiToolResult::err(error, true),
             };
-            if let Some(denied) = permission_for_write(state, mode, tool, &path, path.exists()) {
+            if let Some(denied) =
+                permission_for_write(state, mode, tool, &path, path.exists(), content)
+            {
                 return denied;
             }
+            // 检查点：备份原始内容（新文件则记 created），成功落盘后推 diff 事件。
+            let before = std::fs::read(&path).ok();
+            let relative = relative_display(&state.sandbox, &path);
             match atomic_write(&path, content.as_bytes()) {
-                Ok(()) => PiToolResult::ok(
-                    format!("已写入 {} 字节：{}", content.len(), display_path(&path)),
-                    Some(json!({ "path": display_path(&path), "bytes": content.len() })),
-                ),
+                Ok(()) => {
+                    if let Some(tracker) = &state.changes {
+                        tracker.record(&relative, before.as_deref(), content);
+                    }
+                    PiToolResult::ok(
+                        format!("已写入 {} 字节：{}", content.len(), display_path(&path)),
+                        Some(json!({
+                            "path": display_path(&path),
+                            "artifact": relative,
+                            "bytes": content.len()
+                        })),
+                    )
+                }
                 Err(error) => PiToolResult::err(error, false),
             }
         }
@@ -779,7 +865,11 @@ pub fn execute_tool(
             if !path.is_file() {
                 return PiToolResult::err(format!("不是文件：{}", display_path(&path)), false);
             }
-            if let Some(denied) = permission_for_write(state, mode, tool, &path, true) {
+            // 守门档必须看到「替换前 / 替换后」的具体内容，不能只给路径。
+            let preview = format!("旧内容：\n{old}\n\n新内容：\n{new}");
+            if let Some(denied) =
+                permission_for_write(state, mode, tool, &path, true, &preview)
+            {
                 return denied;
             }
             let text = match std::fs::read_to_string(&path) {
@@ -797,11 +887,21 @@ pub fn execute_tool(
                 );
             }
             let updated = text.replacen(old, new, 1);
+            let relative = relative_display(&state.sandbox, &path);
             match atomic_write(&path, updated.as_bytes()) {
-                Ok(()) => PiToolResult::ok(
-                    format!("已替换 1 处：{}", display_path(&path)),
-                    Some(json!({ "path": display_path(&path), "matches": 1 })),
-                ),
+                Ok(()) => {
+                    if let Some(tracker) = &state.changes {
+                        tracker.record(&relative, Some(text.as_bytes()), &updated);
+                    }
+                    PiToolResult::ok(
+                        format!("已替换 1 处：{}", display_path(&path)),
+                        Some(json!({
+                            "path": display_path(&path),
+                            "artifact": relative,
+                            "matches": 1
+                        })),
+                    )
+                }
                 Err(error) => PiToolResult::err(error, false),
             }
         }
@@ -830,6 +930,165 @@ pub fn execute_tool(
                 lines.join("\n"),
                 Some(json!({ "path": display_path(&path), "count": lines.len() })),
             )
+        }
+        "make_docx" => {
+            let raw = match arg_str(args, "path") {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => return PiToolResult::err("缺少 path", true),
+            };
+            let path = match resolve_inside(&state.sandbox, raw) {
+                Ok(path) => path,
+                Err(error) => return PiToolResult::err(error, true),
+            };
+            let title = args.get("title").and_then(Value::as_str);
+            let Ok(blocks) =
+                serde_json::from_value::<Vec<crate::services::pi_documents::DocxBlock>>(
+                    args.get("blocks").cloned().unwrap_or(Value::Array(vec![])),
+                )
+            else {
+                return PiToolResult::err("blocks 结构不合法：需要 [{type, text, level?, bold?}]", true);
+            };
+            // 覆盖已有文档时，确认框要能看到标题与正文摘要，而不是只有一个路径。
+            let mut preview = String::new();
+            if let Some(title) = title.map(str::trim).filter(|value| !value.is_empty()) {
+                preview.push_str(&format!("标题：{title}\n"));
+            }
+            preview.push_str(&format!("内容块：{} 个\n", blocks.len()));
+            for block in blocks.iter().take(15) {
+                preview.push_str(&format!("· [{}] {}\n", block.kind, block.text));
+            }
+            if blocks.len() > 15 {
+                preview.push_str(&format!("…（其余 {} 个内容块未列出）\n", blocks.len() - 15));
+            }
+            if let Some(denied) =
+                permission_for_write(state, mode, tool, &path, path.exists(), &preview)
+            {
+                return denied;
+            }
+            let bytes = match crate::services::pi_documents::make_docx(title, &blocks) {
+                Ok(bytes) => bytes,
+                Err(error) => return PiToolResult::err(error, false),
+            };
+            let before = std::fs::read(&path).ok();
+            let relative = relative_display(&state.sandbox, &path);
+            match atomic_write(&path, &bytes) {
+                Ok(()) => {
+                    if let Some(tracker) = &state.changes {
+                        tracker.record(&relative, before.as_deref(), &String::from_utf8_lossy(&bytes));
+                    }
+                    PiToolResult::ok(
+                        format!("已生成 Word 文档（{} 字节）：{}", bytes.len(), display_path(&path)),
+                        Some(json!({
+                            "path": display_path(&path),
+                            "artifact": relative,
+                            "bytes": bytes.len()
+                        })),
+                    )
+                }
+                Err(error) => PiToolResult::err(error, false),
+            }
+        }
+        "make_xlsx" => {
+            let raw = match arg_str(args, "path") {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => return PiToolResult::err("缺少 path", true),
+            };
+            let path = match resolve_inside(&state.sandbox, raw) {
+                Ok(path) => path,
+                Err(error) => return PiToolResult::err(error, true),
+            };
+            let Ok(sheets) =
+                serde_json::from_value::<Vec<crate::services::pi_documents::XlsxSheet>>(
+                    args.get("sheets").cloned().unwrap_or(Value::Array(vec![])),
+                )
+            else {
+                return PiToolResult::err("sheets 结构不合法：需要 [{name, rows: [[cell...]]}]", true);
+            };
+            // 覆盖已有表格时展示工作表、行数与前几行内容。
+            let mut preview = format!("工作表：{} 个\n", sheets.len());
+            for sheet in sheets.iter().take(5) {
+                preview.push_str(&format!("· {}（{} 行）\n", sheet.name, sheet.rows.len()));
+                for row in sheet.rows.iter().take(3) {
+                    let cells: Vec<String> = row
+                        .iter()
+                        .take(8)
+                        .map(|cell| {
+                            cell.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| cell.to_string())
+                        })
+                        .collect();
+                    preview.push_str(&format!("  {}\n", cells.join(" | ")));
+                }
+                if sheet.rows.len() > 3 {
+                    preview.push_str(&format!("  …（其余 {} 行未列出）\n", sheet.rows.len() - 3));
+                }
+            }
+            if sheets.len() > 5 {
+                preview.push_str(&format!("…（其余 {} 个工作表未列出）\n", sheets.len() - 5));
+            }
+            if let Some(denied) =
+                permission_for_write(state, mode, tool, &path, path.exists(), &preview)
+            {
+                return denied;
+            }
+            let bytes = match crate::services::pi_documents::make_xlsx(&sheets) {
+                Ok(bytes) => bytes,
+                Err(error) => return PiToolResult::err(error, false),
+            };
+            let before = std::fs::read(&path).ok();
+            let relative = relative_display(&state.sandbox, &path);
+            match atomic_write(&path, &bytes) {
+                Ok(()) => {
+                    if let Some(tracker) = &state.changes {
+                        tracker.record(&relative, before.as_deref(), &String::from_utf8_lossy(&bytes));
+                    }
+                    PiToolResult::ok(
+                        format!("已生成 Excel 表格（{} 字节）：{}", bytes.len(), display_path(&path)),
+                        Some(json!({
+                            "path": display_path(&path),
+                            "artifact": relative,
+                            "bytes": bytes.len()
+                        })),
+                    )
+                }
+                Err(error) => PiToolResult::err(error, false),
+            }
+        }
+        "read_docx" | "read_xlsx" => {
+            let raw = match arg_str(args, "path") {
+                Some(value) => value,
+                None => return PiToolResult::err("缺少 path", true),
+            };
+            let path = match resolve_inside(&state.sandbox, raw) {
+                Ok(path) => path,
+                Err(error) => return PiToolResult::err(error, true),
+            };
+            if !path.is_file() {
+                return PiToolResult::err(format!("不是文件：{}", display_path(&path)), false);
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => return PiToolResult::err(format!("读取失败：{error}"), false),
+            };
+            if tool == "read_docx" {
+                match crate::services::pi_documents::read_docx(&bytes) {
+                    Ok(text) => PiToolResult::ok(
+                        text,
+                        Some(json!({ "path": display_path(&path) })),
+                    ),
+                    Err(error) => PiToolResult::err(error, false),
+                }
+            } else {
+                let sheet = args.get("sheet").and_then(Value::as_str);
+                match crate::services::pi_documents::read_xlsx(&bytes, sheet) {
+                    Ok(text) => PiToolResult::ok(
+                        text,
+                        Some(json!({ "path": display_path(&path) })),
+                    ),
+                    Err(error) => PiToolResult::err(error, false),
+                }
+            }
         }
         "run_python" => {
             let code = match arg_str(args, "code") {
@@ -1529,7 +1788,137 @@ mod tests {
             prompt,
             memory_dir: sandbox.join("memory"),
             mcp_servers: Vec::new(),
+            changes: None,
         }
+    }
+
+    /// execute_tool 的分发层测试：工具名 → 参数 → 落盘效果。
+    /// 这些用例守住「模型发出工具调用后宿主真的会执行」这条链路，
+    /// 与 pi_documents 的字节级用例互补（那边只管生成函数本身）。
+    fn dispatch(state: &PiToolState, tool: &str, args: Value) -> PiToolResult {
+        execute_tool(state, PiPermissionMode::Full, tool, &args)
+    }
+
+    #[test]
+    fn write_file_lands_in_sandbox() {
+        let sandbox = temp_sandbox("write");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let result = dispatch(
+            &state,
+            "write_file",
+            json!({ "path": "note.txt", "content": "hello" }),
+        );
+        assert!(result.ok, "write_file 失败：{:?}", result.error);
+        let written = std::fs::read_to_string(sandbox.join("note.txt")).expect("文件应落盘");
+        assert_eq!(written, "hello");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn edit_file_replaces_unique_occurrence() {
+        let sandbox = temp_sandbox("edit");
+        std::fs::write(sandbox.join("code.txt"), "alpha\nbeta\n").expect("准备文件");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let result = dispatch(
+            &state,
+            "edit_file",
+            json!({ "path": "code.txt", "old": "beta", "new": "gamma" }),
+        );
+        assert!(result.ok, "edit_file 失败：{:?}", result.error);
+        let written = std::fs::read_to_string(sandbox.join("code.txt")).expect("读取结果");
+        assert_eq!(written, "alpha\ngamma\n");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn make_docx_writes_readable_file() {
+        let sandbox = temp_sandbox("makedocx");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let result = dispatch(
+            &state,
+            "make_docx",
+            json!({
+                "path": "报告.docx",
+                "title": "标题",
+                "blocks": [
+                    { "type": "paragraph", "text": "正文一" },
+                    { "type": "bullet", "text": "要点" }
+                ]
+            }),
+        );
+        assert!(result.ok, "make_docx 失败：{:?}", result.error);
+        let bytes = std::fs::read(sandbox.join("报告.docx")).expect("docx 应落盘");
+        let text = crate::services::pi_documents::read_docx(&bytes).expect("docx 可读回");
+        assert!(text.contains("标题"), "标题缺失：{text:?}");
+        assert!(text.contains("正文一"), "段落缺失：{text:?}");
+        assert!(text.contains("•  要点"), "列表项缺失：{text:?}");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn make_xlsx_writes_readable_file() {
+        let sandbox = temp_sandbox("makexlsx");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let result = dispatch(
+            &state,
+            "make_xlsx",
+            json!({
+                "path": "表.xlsx",
+                "sheets": [{
+                    "name": "数据",
+                    "rows": [["名称", "数量"], ["苹果", 42]]
+                }]
+            }),
+        );
+        assert!(result.ok, "make_xlsx 失败：{:?}", result.error);
+        let bytes = std::fs::read(sandbox.join("表.xlsx")).expect("xlsx 应落盘");
+        let text = crate::services::pi_documents::read_xlsx(&bytes, Some("数据")).expect("xlsx 可读回");
+        assert!(text.contains("名称\t数量"), "表头缺失：{text:?}");
+        assert!(text.contains("苹果\t42"), "数据行缺失：{text:?}");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn read_docx_roundtrips_through_dispatch() {
+        let sandbox = temp_sandbox("readdocx");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let made = dispatch(
+            &state,
+            "make_docx",
+            json!({
+                "path": "回读.docx",
+                "blocks": [{ "type": "paragraph", "text": "回读内容" }]
+            }),
+        );
+        assert!(made.ok, "make_docx 失败：{:?}", made.error);
+        let read = dispatch(
+            &state,
+            "read_docx",
+            json!({ "path": "回读.docx" }),
+        );
+        assert!(read.ok, "read_docx 失败：{:?}", read.error);
+        assert!(
+            read.data.unwrap_or_default().contains("回读内容"),
+            "回读内容不符"
+        );
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn document_tools_reject_path_outside_sandbox() {
+        let sandbox = temp_sandbox("escape");
+        let state = state(&sandbox, Arc::new(TestPrompt::new(true)));
+        let result = dispatch(
+            &state,
+            "make_docx",
+            json!({
+                "path": "../逃逸.docx",
+                "blocks": [{ "type": "paragraph", "text": "x" }]
+            }),
+        );
+        assert!(!result.ok, "越界路径必须被拒绝");
+        assert!(result.denied, "越界应标记为 denied");
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[test]

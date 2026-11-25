@@ -5,6 +5,8 @@ import { Play, RotateCcw, Box, Layers, Calendar, FileText, Hash, Cpu, Database, 
 import type { LucideIcon } from 'lucide-react';
 import type { ModelInfo, ModelLoadConfig, SystemStats } from '@/types';
 import type { ModelRunRecord } from '@/lib/desktop';
+import type { TuneRecord } from '@/lib/ipc/model';
+import { AUTO_TUNE_POINT_BUDGET, tuneRecordPatch, type AutoTuneTask } from '@/lib/autoTuneTask';
 import type { BackendTuningAdvice } from '@/lib/ipc/hardware';
 import type { VramCalibration } from '@/lib/vramCalibration';
 import type { VramPrediction } from '@/lib/vramEstimate';
@@ -16,6 +18,8 @@ import { getThemeDefaultColor } from '@/lib/modelTheme';
 interface ModelLoadViewProps {
   model: ModelInfo;
   prediction: VramPrediction;
+  /** 不含同参数实测总量覆盖的纯估算，用于和实测并列展示偏差。 */
+  analyticalPrediction: VramPrediction;
   calibration: VramCalibration | null;
   systemStats: SystemStats;
   activeTab: 'params' | 'info';
@@ -25,14 +29,22 @@ interface ModelLoadViewProps {
   loadError: string | null;
   loadPercent: number;
   statusMessage: string | null;
+  /** 本次启动实际生效参数与请求参数不一致时的说明（CPU 兼容回退等）；null 表示无降级。 */
+  launchNotice: string | null;
   autoTuneRunning: boolean;
   autoTuneStopping: boolean;
   autoTuneApplying: boolean;
   autoTuneBlocked: boolean;
+  /** 当前模型自己的调参任务快照；其他模型的任务不在这里显示进度。 */
+  autoTuneTask: AutoTuneTask | null;
   autoTuneLog: string[];
   autoTuneApplied: boolean;
   runRecords: ModelRunRecord[];
   onClearLog: () => void;
+  /** 撤销某次调参：恢复记录里的调参前完整加载配置。 */
+  onRestoreConfig: (config: ModelLoadConfig) => void;
+  /** 再次应用某次调参记录里的最佳参数（只写回调参涉及的字段）。 */
+  onApplyTuneRecord: (record: TuneRecord) => void;
   onChangeConfig: (key: keyof ModelLoadConfig, value: unknown) => void;
   onLoad: () => void;
   onStop: () => void;
@@ -128,6 +140,80 @@ function formatTag(tag: string) {
   return labels[tag] ?? tag;
 }
 
+function formatElapsed(ms: number) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function autoTunePhaseLabel(phase?: string) {
+  switch (phase) {
+    case 'coarse': return '显存边界搜索';
+    case 'tune': return '参数优化';
+    case 'refine': return '复测最优候选';
+    case 'candidate_failed': return '候选失败，继续搜索';
+    default: return '设备探测';
+  }
+}
+
+/**
+ * 显存预估 missing 项里，哪些属于「已按近似值计入」。
+ * 不在集合里的项表示尚未计入，实际占用可能比预计更高。
+ */
+const APPROXIMATE_ESTIMATE_KEYS = new Set([
+  'tensor_memory_layout', 'tensor_upper_bound', 'kernel_layer_order', 'other_tensor_placement',
+  'hybrid_layer_layout', 'parallel_auto', 'dense_ffn_offload', 'swa_capacity',
+  'sliding_window_pattern', 'kv_heads_by_layer',
+]);
+
+/**
+ * 草稿 / 投影显存是否已有可用的近似值：只有读到文件大小（或内置 MTP 层数）
+ * 才算「近似计入」，否则该项主要是未计入的权重体积。
+ */
+function estimateEntryApproximate(key: string, model: ModelInfo) {
+  if (key === 'draft_memory') {
+    const mode = model.loadConfig.speculativeDecoding;
+    const sizeGb = mode === 'dspark' ? model.dsparkDraftSizeGb
+      : mode === 'dflash' ? model.dflashDraftSizeGb
+        : mode === 'mtp' ? model.mtpDraftSizeGb : 0;
+    return (sizeGb ?? 0) > 0
+      || (mode === 'mtp' && Boolean(model.hasEmbeddedMtp) && (model.nextnPredictLayers ?? 0) > 0);
+  }
+  return APPROXIMATE_ESTIMATE_KEYS.has(key);
+}
+
+const SPEC_MODE_LABEL: Record<string, string> = {
+  off: '关闭',
+  mtp: 'MTP',
+  dspark: 'DSpark',
+  dflash: 'DFlash',
+};
+
+const TUNE_FAILURE_LABEL: Record<string, string> = {
+  oom: '显存不足',
+  unsupported: '内核不支持',
+  fatal: '启动/测量失败',
+  cancelled: '已取消',
+};
+
+/** 调参最佳结果与调参前配置的差异，只列真正变化的字段。 */
+function tuneRecordDiff(loadConfig: ModelLoadConfig, record: TuneRecord) {
+  const kvBefore = `${loadConfig.cacheTypeKEnabled ? loadConfig.cacheTypeK : 'f16'}/${loadConfig.cacheTypeVEnabled ? loadConfig.cacheTypeV : 'f16'}`;
+  const kvAfter = record.cache_type_k_enabled || record.cache_type_v_enabled
+    ? `${record.cache_type_k}/${record.cache_type_v}` : 'f16/f16';
+  const rows = [
+    { label: '上下文（ctx）', before: String(loadConfig.ctxLength), after: String(record.ctx) },
+    { label: 'GPU 卸载（ngl）', before: String(loadConfig.gpuLayers), after: String(record.ngl) },
+    { label: 'CPU MoE 层', before: String(loadConfig.moeCpuLayers), after: String(record.ncmoe) },
+    { label: 'CPU FFN 层', before: String(loadConfig.nCpuFfn), after: String(record.n_cpu_ffn ?? 0) },
+    { label: 'MoE 显存缓存', before: `${loadConfig.moeCacheMib} MiB`, after: `${record.moe_cache_mib ?? 0} MiB` },
+    { label: 'KV 缓存', before: kvBefore, after: kvAfter },
+    { label: '推测解码', before: SPEC_MODE_LABEL[loadConfig.speculativeDecoding] ?? loadConfig.speculativeDecoding, after: SPEC_MODE_LABEL[record.speculative ?? 'off'] ?? (record.speculative || 'off') },
+    // 旧记录缺少 threads 时不会写回，也就不在差异里展示。
+    ...(record.threads != null ? [{ label: '线程', before: String(loadConfig.threads), after: String(record.threads) }] : []),
+  ];
+  return rows.filter((row) => row.before !== row.after);
+}
+
 /**
  * 每个加载参数的中文用途详解。
  *
@@ -171,9 +257,125 @@ const PARAM_TOOLTIPS: Record<string, string> = {
   'NextN / MTP 元数据': 'GGUF 声明了 NextN / 多词元预测（MTP）层，但当前内核没有对应架构图或缺少可执行张量，因此不能启用内置多词元预测。换支持该架构的内核或改用独立草稿模型。',
 };
 
+/** 调参结果会写回的字段 → 面向用户的中文名。 */
+const TUNE_FIELD_LABELS: Record<string, string> = {
+  gpuLayers: 'GPU 卸载（ngl）',
+  ctxLength: '上下文长度',
+  moeCpuLayers: 'MoE CPU 层（ncmoe）',
+  nCpuFfn: 'FFN 卸载（ncffn）',
+  moeCacheMib: 'MoE 缓存（MiB）',
+  speculativeDecoding: '推测解码',
+  specDraftNMaxEnabled: '草稿深度开关',
+  specDraftNMax: '草稿深度',
+  specDraftNubatch: '草稿 ubatch',
+  threads: 'CPU 线程',
+  cacheTypeK: 'K 缓存类型',
+  cacheTypeV: 'V 缓存类型',
+  cacheTypeKEnabled: 'K 缓存量化',
+  cacheTypeVEnabled: 'V 缓存量化',
+};
+
+function formatTuneValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? '开' : '关';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '—';
+  if (value === 'off') return '关闭';
+  if (value === undefined || value === null || value === '') return '—';
+  return String(value);
+}
+
+/**
+ * 「调参前配置 → 最佳候选」的逐项差异。
+ *
+ * 自动应用后当前参数已经等于最佳结果，界面上再也看不出改了什么；
+ * 调参前配置随实验记录落盘，所以这里用 `experiment.load_config` 作基线。
+ */
+function tuneChangeRows(before: ModelLoadConfig, best: TuneRecord): Array<{ label: string; from: string; to: string }> {
+  const patch = tuneRecordPatch(best);
+  const rows: Array<{ label: string; from: string; to: string }> = [];
+  for (const key of Object.keys(patch) as Array<keyof ModelLoadConfig>) {
+    const prev: unknown = before[key];
+    const next: unknown = patch[key];
+    if (prev === next) continue;
+    rows.push({ label: TUNE_FIELD_LABELS[key] ?? key, from: formatTuneValue(prev), to: formatTuneValue(next) });
+  }
+  return rows;
+}
+
+function tuningCandidateLabel(record: TuneRecord): string {
+  const parts = [`ngl ${record.ngl}`];
+  if (record.ncmoe > 0) parts.push(`ncmoe ${record.ncmoe}`);
+  if (record.n_cpu_ffn) parts.push(`ffn ${record.n_cpu_ffn}`);
+  if (record.moe_cache_mib) parts.push(`MoE缓存 ${record.moe_cache_mib}MiB`);
+  parts.push(`ctx ${record.ctx}`);
+  if (record.cache_type_k_enabled || record.cache_type_v_enabled) parts.push(`KV ${record.cache_type_k}/${record.cache_type_v}`);
+  if (record.speculative && record.speculative !== 'off') parts.push(record.speculative);
+  return parts.join(' · ');
+}
+
+/**
+ * 调参进行中的候选实测列表：参数页直接显示每点的 tok/s（含标准差）、显存与最佳项。
+ *
+ * 之前只有「模型信息」页签能看到这些数据，从默认的参数页启动调参后只能等按钮文字变化。
+ * 排序用「中位数 − 标准差」与后端一致，避免把抖动当最佳。
+ */
+function TuningCandidateList({ records }: { records: TuneRecord[] }) {
+  const scored = records.map((record) => ({
+    record,
+    score: record.ts - Math.max(0, record.ts_stddev ?? 0),
+  }));
+  let bestIndex = -1;
+  scored.forEach((item, index) => {
+    if (!item.record.fits) return;
+    if (bestIndex < 0 || item.score > scored[bestIndex].score) bestIndex = index;
+  });
+  return (
+    <div className="anim-enter-fade mt-1.5 max-h-24 overflow-y-auto rounded-[var(--radius-field)] border border-[var(--border-subtle)]">
+      <table className="w-full text-[length:var(--font-eyebrow)]">
+        <thead className="sticky top-0 bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
+          <tr>
+            <th className="px-2 py-1 text-left font-medium">候选参数</th>
+            <th className="w-24 px-2 py-1 text-right font-medium">tok/s</th>
+            <th className="w-20 px-2 py-1 text-right font-medium">显存</th>
+            <th className="w-16 px-2 py-1 text-right font-medium">结果</th>
+          </tr>
+        </thead>
+        <tbody>
+          {scored.map((item, index) => (
+            <tr key={`${item.record.ngl}-${item.record.ctx}-${index}`} className={index === bestIndex ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}>
+              <td className="max-w-0 truncate px-2 py-1 font-mono" title={tuningCandidateLabel(item.record)}>{tuningCandidateLabel(item.record)}</td>
+              <td className="px-2 py-1 text-right font-mono">
+                {item.record.fits
+                  ? `${item.record.ts.toFixed(1)}${item.record.ts_stddev ? ` ±${item.record.ts_stddev.toFixed(1)}` : ''}`
+                  : '—'}
+              </td>
+              <td className="px-2 py-1 text-right font-mono">{item.record.vram_used_gb > 0 ? `${item.record.vram_used_gb.toFixed(1)}G` : '—'}</td>
+              <td className="px-2 py-1 text-right">{index === bestIndex ? '最佳' : item.record.fits ? '' : '不可用'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function ModelLoadView(props: ModelLoadViewProps) {
   const { model, activeTab, autoTuneRunning, autoTuneLog, autoTuneApplied, runRecords, onClearLog, onChangeConfig: updateConfig } = props;
   const config = model.loadConfig;
+  // 运行记录按时间从新到旧；取最近一次调参结果，供参数页给出可撤销的回执。
+  const latestAutoTuneExperiment = runRecords.find((record) => record.kind === 'autotune' && record.autotune)?.autotune ?? null;
+  const latestAutoTuneBest = latestAutoTuneExperiment?.best;
+  // 调参前后逐项差异：调参前配置保存在实验记录里，因此重启后仍能看「改了什么」。
+  const latestTuneChanges = latestAutoTuneExperiment?.best
+    ? tuneChangeRows(latestAutoTuneExperiment.load_config, latestAutoTuneExperiment.best)
+    : [];
+  // 撤销后当前参数不再等于最佳结果，回执横幅随之消失，避免继续声称「已应用」。
+  const latestAutoTuneApplied = Boolean(latestAutoTuneBest
+    && config.gpuLayers === latestAutoTuneBest.ngl
+    && config.ctxLength === latestAutoTuneBest.ctx
+    && config.cacheTypeKEnabled === latestAutoTuneBest.cache_type_k_enabled
+    && config.cacheTypeK === latestAutoTuneBest.cache_type_k
+    && config.cacheTypeVEnabled === latestAutoTuneBest.cache_type_v_enabled
+    && config.cacheTypeV === latestAutoTuneBest.cache_type_v);
   const layerCount = Math.max(0, model.blockCount ?? 0);
   const hasMultimodalProjector = Boolean(model.mmprojPath && (model.supportsVision || model.supportsAudio));
   const kvPerSlotDefault = Math.max(
@@ -242,6 +444,32 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
           )}
           {activeTab === 'params' ? (
             <div>
+              {autoTuneApplied && latestAutoTuneApplied && latestAutoTuneBest && (
+                <div className="accent-soft mt-3 rounded-[var(--radius-field)] px-4 py-3">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <Sparkles className="h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
+                    <span className="min-w-0 flex-1 text-[length:var(--font-caption)] leading-[var(--leading-ui)] text-[var(--text-secondary)]">
+                      自动调参已完成并应用最佳参数：ctx {latestAutoTuneBest.ctx.toLocaleString()} · ngl {latestAutoTuneBest.ngl} · K/V {latestAutoTuneBest.kv} · {latestAutoTuneBest.ts.toFixed(1)} tok/s。调参前的参数已随运行记录保存。
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => props.onTabChange('info')}
+                      className="flex flex-shrink-0 items-center gap-1 rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[length:var(--font-caption)] font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
+                    >
+                      查看明细与撤销
+                    </button>
+                  </div>
+                  {/* 变更明细：说清「哪些参数从多少改到多少」，而不是只报「已应用」。 */}
+                  {latestTuneChanges.length > 0 && (
+                    <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-t border-[var(--border-subtle)] pt-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]">
+                      <span className="font-medium text-[var(--text-secondary)]">本次变更</span>
+                      {latestTuneChanges.map((row) => (
+                        <span key={row.label} className="mono-font">{row.label} {row.from} → {row.to}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="model-load-param-grid">
                 <ParamSection title="推理与显存" icon={Cpu}>
                   <SliderParamRow
@@ -276,6 +504,12 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                     description="降低注意力显存与耗时；兼容问题时可关闭（--flash-attn）"
                     checked={config.fastAttention}
                     onChange={(v) => updateConfig('fastAttention', v)}
+                  />
+                  <ToggleParamRow
+                    label="CPU 兼容重试"
+                    description="GPU 加载失败或显存不足时自动改用 CPU 模式重启。默认关闭；开启后会改写 ngl、ctx、batch 等参数，自动调参不使用该回退"
+                    checked={config.retryCpuFallback}
+                    onChange={(v) => updateConfig('retryCpuFallback', v)}
                   />
                 </ParamSection>
 
@@ -593,8 +827,12 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
                 records={runRecords}
                 running={autoTuneRunning}
                 log={autoTuneLog}
-                applied={autoTuneApplied}
+                applied={autoTuneApplied && latestAutoTuneApplied}
                 onClearLog={onClearLog}
+                modelId={model.id}
+                modelPath={model.filePath ?? ''}
+                onRestoreConfig={props.onRestoreConfig}
+                onApplyTuneRecord={props.onApplyTuneRecord}
               />
               <div className="border-b border-[var(--border-subtle)] py-5">
                 <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)] dark:text-[var(--text-primary)]">模型介绍</h3>
@@ -668,7 +906,7 @@ export default function ModelLoadView(props: ModelLoadViewProps) {
   );
 }
 
-function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit, onChangeLogo, isLoading, loadMessage, loadError, loadPercent, statusMessage, autoTuneRunning, autoTuneStopping, autoTuneApplying, autoTuneBlocked, onLoad, onStop, onAutoTune, onStopAutoTune, onReset }: ModelLoadViewProps) {
+function ModelLoadCompactHeader({ model, prediction, analyticalPrediction, calibration, systemStats, activeTab, onTabChange, apiName, apiNamePlaceholder, onApiNameChange, onApiNameCommit, onChangeLogo, isLoading, loadMessage, loadError, loadPercent, statusMessage, launchNotice, autoTuneRunning, autoTuneStopping, autoTuneApplying, autoTuneBlocked, autoTuneTask, onLoad, onStop, onAutoTune, onStopAutoTune, onReset }: ModelLoadViewProps) {
   const calibrated = (calibration?.samples ?? 0) > 0;
   const calibrationTitle = calibrated
     ? `按 ${calibration?.samples} 次同模型、同设备、同参数实测分项校准${calibration?.exactGb != null ? `；同参数启动实测总量 ${calibration.exactGb.toFixed(2)} GB` : ''}；${calibration?.confidence === 'measured' ? '样本较稳定' : '样本有限'}${calibration?.rejected ? `；排除 ${calibration.rejected} 条不匹配或异常记录` : ''}`
@@ -710,6 +948,21 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
   const hasHardware = Number.isFinite(systemStats.vramTotal) && systemStats.vramTotal > 0;
   const exceeded = hasHardware && prediction.totalGb > systemStats.vramTotal;
   const buttonClass = 'inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-50';
+  const [estimateOpen, setEstimateOpen] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
+  const tuningActive = Boolean(autoTuneTask && (autoTuneTask.status === 'running' || autoTuneTask.status === 'stopping'));
+  useEffect(() => {
+    if (!tuningActive) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [tuningActive]);
+  const tuningPoints = autoTuneTask
+    ? Math.max(autoTuneTask.pointsStarted ?? 0, autoTuneTask.records.length + (autoTuneTask.failures?.length ?? 0))
+    : 0;
+  const measuredGb = calibration && calibration.samples > 0 ? calibration.exactGb ?? null : null;
+  const estimateDeviation = measuredGb != null && analyticalPrediction.totalGb > 0
+    ? ((measuredGb - analyticalPrediction.totalGb) / analyticalPrediction.totalGb) * 100
+    : null;
 
   return (
     <header className="model-load-compact-head">
@@ -734,7 +987,15 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
         <div className="flex flex-shrink-0 items-baseline gap-2">
           <span className="text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">预计显存</span>
           <strong className="mono-font text-base font-semibold text-[var(--accent)]">{formatGb(prediction.totalGb)}</strong>
-          <span className="text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)]" title={`${sourceLabel}；${calibrationTitle}${estimateTitle ? `；${estimateTitle}` : ''}`}>{calibrated ? '实测校准' : sourceLabel}{prediction.missing.length > 0 ? ' · 含近似项' : ''}</span>
+          <button
+            type="button"
+            aria-expanded={estimateOpen}
+            onClick={() => setEstimateOpen((value) => !value)}
+            title={`${sourceLabel}；${calibrationTitle}${estimateTitle ? `；${estimateTitle}` : ''}（点击查看分项与缺失项）`}
+            className="rounded text-left text-[length:var(--font-eyebrow)] text-[var(--text-tertiary)] underline-offset-2 transition-colors hover:text-[var(--accent)] hover:underline"
+          >
+            {calibrated ? '实测校准' : sourceLabel}{prediction.missing.length > 0 ? ` · ${prediction.missing.length} 项近似/缺失` : ''}
+          </button>
         </div>
         <div className="model-load-memory-chart">
           <div className="model-load-memory-bar" aria-hidden="true">{parts.map((part) => <span key={part.label} style={{ background: part.color, flexGrow: Math.max(0, part.value ?? 0), flexBasis: 0 }} />)}</div>
@@ -743,6 +1004,30 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
           </div>
         </div>
         {hasHardware && <span className={`mono-font text-[length:var(--font-eyebrow)] ${exceeded ? 'text-[var(--state-warning)]' : 'text-[var(--text-tertiary)]'}`} title={`${systemStats.gpuName} · 所有进程总占用；预测不会自动改变参数`}>设备 {systemStats.vramUsed.toFixed(1)} / {systemStats.vramTotal.toFixed(1)} GB{exceeded ? ' · 预测超容量' : ''}</span>}
+        {estimateOpen && (
+          <div className="basis-full rounded-[var(--radius-field)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-[length:var(--font-eyebrow)] leading-relaxed text-[var(--text-secondary)]">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <span>权重来源：{sourceLabel}</span>
+              <span>同参数实测：{measuredGb != null ? `${measuredGb.toFixed(2)} GB（${calibration?.samples} 次）` : '暂无'}</span>
+              <span>纯估算：{formatGb(analyticalPrediction.totalGb)}{estimateDeviation != null ? ` · 偏差 ${estimateDeviation > 0 ? '+' : ''}${estimateDeviation.toFixed(0)}%` : ''}</span>
+            </div>
+            {prediction.missing.length === 0 ? (
+              <p className="mt-1.5">没有已知的近似项或缺失项。</p>
+            ) : (
+              <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
+                {prediction.missing.map((key) => (
+                  <li key={key} className="flex min-w-0 items-start gap-1.5">
+                    <span className={`mt-0.5 flex-shrink-0 rounded px-1 font-medium ${estimateEntryApproximate(key, model) ? 'bg-[var(--state-warning-bg)] text-[var(--state-warning)]' : 'bg-[var(--state-danger-bg)] text-[var(--state-danger)]'}`}>
+                      {estimateEntryApproximate(key, model) ? '近似计入' : '未计入'}
+                    </span>
+                    <span className="min-w-0">{estimateNotes[key] ?? key}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-1.5 text-[var(--text-tertiary)]">「未计入」表示估算值可能低于实际占用；以启动后运行记录里的同参数实测为准。</p>
+          </div>
+        )}
       </div>
       <div className="model-load-compact-toolbar">
         <div className="relative flex items-center gap-1 rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--surface-muted)] p-0.5" role="tablist" aria-label="模型详情视图">
@@ -774,7 +1059,7 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
           })}
         </div>
         <div className="model-load-compact-actions">
-          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title="固定当前 ctx，先找显存边界，再比较推测解码、MoE 缓存、FFN 卸载、KV、批处理与线程；整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。">{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
+          <button type="button" onClick={autoTuneRunning ? onStopAutoTune : onAutoTune} disabled={autoTuneApplying || (!autoTuneRunning && (isLoading || autoTuneBlocked))} className={`${buttonClass} ${autoTuneRunning ? 'text-[var(--state-danger)]' : 'text-[var(--text-primary)]'}`} title={autoTuneBlocked && !autoTuneRunning ? '请先停止正在运行的模型服务，再开始自动调参。' : '固定当前 ctx，先找显存边界，再比较推测解码、MoE 缓存、FFN 卸载、KV 与线程；批处理保持当前值。整卡显存预算 90%，短负载实测不保证交互最优。停止失败时可再次点击重试。'}>{autoTuneRunning ? <Square className="h-3 w-3 fill-current" /> : <Wand2 className="h-3.5 w-3.5 text-[var(--accent)]" />}{autoTuneApplying ? '正在应用' : autoTuneStopping ? '停止中（可重试）' : autoTuneRunning ? '停止调参' : '自动调参'}</button>
           <button type="button" onClick={onReset} disabled={isLoading || autoTuneRunning} className={`${buttonClass} text-[var(--text-secondary)]`}><RotateCcw className="h-3.5 w-3.5" />重置</button>
           <button type="button" onClick={isLoading ? onStop : onLoad} disabled={autoTuneRunning} className={`inline-flex h-8 min-w-24 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors disabled:opacity-50 ${isLoading ? 'border border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] text-[var(--state-danger)]' : 'bg-[var(--accent)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]'}`}>{isLoading ? <Square className="h-3 w-3 fill-current" /> : <Play className="h-3.5 w-3.5" />}{isLoading ? '停止加载' : model.status === 'loaded' ? '重新加载' : '加载模型'}</button>
         </div>
@@ -782,6 +1067,28 @@ function ModelLoadCompactHeader({ model, prediction, calibration, systemStats, a
       {isLoading && <div className="mt-2 text-xs text-[var(--text-secondary)]" role="status"><div className="flex items-center gap-2"><LoaderCircle className="h-3.5 w-3.5 animate-spin" /><span className="min-w-0 flex-1 break-words">{loadMessage ?? '正在准备加载…'}{percent >= 100 && !loadMessage?.includes('停止') && !loadMessage?.includes('API 已就绪') ? ' · 等待 API 就绪' : ''}</span><span className="mono-font flex-shrink-0">日志阶段 {percent.toFixed(0)}%</span></div><div role="progressbar" aria-label="日志阶段进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} title="由日志阶段映射，不代表文件读取比例" className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--surface-muted)]"><div className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300" style={{ width: `${percent}%` }} /></div></div>}
       {!isLoading && loadError && <p role={failed ? 'alert' : 'status'} className={`mt-2 whitespace-pre-wrap break-words text-xs ${failed ? 'text-[var(--state-danger)]' : 'text-[var(--text-secondary)]'}`}>{loadError}</p>}
       {statusMessage && <p role="status" className="mt-1.5 text-xs text-[var(--text-secondary)]">{statusMessage}</p>}
+      {launchNotice && (
+        <p role="status" className="anim-enter-rise mt-2 flex items-start gap-1.5 rounded-[var(--radius-field)] border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] px-3 py-2 text-xs leading-[var(--leading-ui)] text-[var(--state-warning)]">
+          <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          <span className="min-w-0 break-words">{launchNotice}</span>
+        </p>
+      )}
+      {tuningActive && autoTuneTask && (
+        <div className="mt-1.5">
+          <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
+            {autoTuneTask.status === 'stopping'
+              ? <span className="inline-flex flex-shrink-0 items-center gap-1.5 text-[var(--state-warning)]"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />停止中：当前测量点结束后停止</span>
+              : <span className="inline-flex flex-shrink-0 items-center gap-1.5"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />自动调参中</span>}
+            <span className="mono-font flex-shrink-0 text-[var(--text-primary)]">第 {tuningPoints} / 最多 {AUTO_TUNE_POINT_BUDGET} 点</span>
+            <span className="flex-shrink-0">{autoTunePhaseLabel(autoTuneTask.phase)}</span>
+            {autoTuneTask.startedAt ? <span className="mono-font flex-shrink-0">已用 {formatElapsed(clock - autoTuneTask.startedAt)}</span> : null}
+            <span className="min-w-0 flex-1 truncate" title={autoTuneTask.log[autoTuneTask.log.length - 1]}>{autoTuneTask.log[autoTuneTask.log.length - 1]}</span>
+            <button type="button" onClick={() => onTabChange('info')} className="flex-shrink-0 font-medium text-[var(--accent)] hover:underline">运行记录</button>
+          </div>
+          {/* 候选实测：参数页就能看到每点的 tok/s、显存与最佳项，不必切到「模型信息」。 */}
+          {autoTuneTask.records.length > 0 && <TuningCandidateList records={autoTuneTask.records} />}
+        </div>
+      )}
     </header>
   );
 }
@@ -966,16 +1273,26 @@ const RUN_RECORD_KIND_LABEL: Record<ModelRunRecord['kind'], string> = {
 
 // 运行记录 + 自动调参合并卡：调参日志与启动/调参记录在同一个卡片里查看。
 // 调参进行中自动展开；结束后最优参数会自动应用（见 applyTuneRecord）。
-function RunRecordsCard({ records, running, log, applied, onClearLog }: {
+function RunRecordsCard({ records, running, log, applied, onClearLog, modelId, modelPath, onRestoreConfig, onApplyTuneRecord }: {
   records: ModelRunRecord[];
   running: boolean;
   log: string[];
   applied: boolean;
   onClearLog: () => void;
+  modelId: string;
+  modelPath: string;
+  onRestoreConfig: (config: ModelLoadConfig) => void;
+  onApplyTuneRecord: (record: TuneRecord) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const logViewportRef = useRef<HTMLDivElement | null>(null);
   const [logCollapsed, setLogCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [openDetails, setOpenDetails] = useState<string[]>([]);
+  const toggleDetail = (key: string) => {
+    setOpenDetails((keys) => keys.includes(key) ? keys.filter((item) => item !== key) : [...keys, key]);
+  };
+  const visibleRecords = records.slice(0, showAll ? 30 : 8);
 
   // 调参开始时自动展开卡片；日志区跟随滚动到底部。
   // 用「渲染期调整 state」替代原来 effect 内的同步 setState：行为不变，
@@ -1055,7 +1372,7 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
               )}
             </div>
           )}
-          {records.slice(0, 8).map((record) => {
+          {visibleRecords.map((record) => {
             const measurement = record.vram_measurement;
             const derivedActual = measurement?.baseline_gb != null && measurement.loaded_gb != null
               && Number.isFinite(measurement.baseline_gb) && Number.isFinite(measurement.loaded_gb)
@@ -1071,45 +1388,156 @@ function RunRecordsCard({ records, running, log, applied, onClearLog }: {
                 ? '旧记录·总量可用'
                 : ({ stable: '稳定采样', unverified: '未核实', adapted: '有效参数变化', contaminated: '采样异常' } as const)[measurement.quality]
               : '旧记录';
+            const key = `${record.timestamp}-${record.kind}`;
+            const experiment = record.kind === 'autotune' ? record.autotune ?? null : null;
+            const best = experiment?.best ?? null;
+            const detailOpen = openDetails.includes(key);
+            const canControl = Boolean(experiment && record.model_id === modelId
+              && experiment.config.model_id === modelId
+              && (!modelPath || experiment.config.baseline.model_path === modelPath));
+            const diff = experiment && best ? tuneRecordDiff(experiment.load_config, best) : [];
             return (
-              <div
-                key={`${record.timestamp}-${record.kind}`}
-                className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] dark:bg-white/[0.04]"
-              >
-                <span className="rounded-sm bg-[var(--accent-subtle)] px-1 py-0.5 font-medium text-[var(--accent)] dark:bg-white/[0.06]">
-                  {RUN_RECORD_KIND_LABEL[record.kind] ?? record.kind}
-                </span>
-                <span className="mono-font text-[var(--text-primary)]">
-                  ngl={record.ngl ?? '--'} ctx={record.ctx?.toLocaleString() ?? '--'} {record.vram_measurement ? `K/V=${record.vram_measurement.config.cache_type_k}/${record.vram_measurement.config.cache_type_v}` : `kv=${record.kv ?? 'f16'}`}
-                  {record.ncmoe != null ? ` ncmoe=${record.ncmoe}` : ''}
-                  {record.ncffn != null ? ` ncffn=${record.ncffn}` : ''}
-                  {record.moe_cache_mib != null ? ` moe缓存=${record.moe_cache_mib}MiB` : ''}
-                  {record.speculative && record.speculative !== 'off' ? ` 推测=${record.speculative}` : ''}
-                </span>
-                {record.tokens_per_sec != null && (
-                  <span className="mono-font text-[var(--text-secondary)]">{record.tokens_per_sec.toFixed(1)} tok/s</span>
-                )}
-                {actualGb != null && (
-                  <span className="mono-font text-[var(--text-secondary)]">
-                    显存 {actualGb.toFixed(1)} GB
-                    {deviation != null && Number.isFinite(deviation) ? `（预测偏差 ${deviation > 0 ? '+' : ''}${deviation.toFixed(0)}%）` : ''}
+              <div key={key}>
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md bg-[var(--surface-muted)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] dark:bg-white/[0.04]">
+                  <span className="rounded-sm bg-[var(--accent-subtle)] px-1 py-0.5 font-medium text-[var(--accent)] dark:bg-white/[0.06]">
+                    {RUN_RECORD_KIND_LABEL[record.kind] ?? record.kind}
                   </span>
-                )}
-                {record.kind === 'launch' && <span className="text-[var(--text-tertiary)]" title={record.vram_measurement?.kernel_version ?? '旧记录缺少采样来源，不参与校准'}>{qualityLabel}</span>}
-                {record.note && (
-                  <span
-                    className="break-words text-[var(--state-warning)] dark:text-[var(--state-warning)]"
-                    title={record.note}
-                  >
-                    {record.note}
+                  <span className="mono-font text-[var(--text-primary)]">
+                    ngl={record.ngl ?? '--'} ctx={record.ctx?.toLocaleString() ?? '--'} {record.vram_measurement ? `K/V=${record.vram_measurement.config.cache_type_k}/${record.vram_measurement.config.cache_type_v}` : `kv=${record.kv ?? 'f16'}`}
+                    {record.ncmoe != null ? ` ncmoe=${record.ncmoe}` : ''}
+                    {record.ncffn != null ? ` ncffn=${record.ncffn}` : ''}
+                    {record.moe_cache_mib != null ? ` moe缓存=${record.moe_cache_mib}MiB` : ''}
+                    {record.speculative && record.speculative !== 'off' ? ` 推测=${record.speculative}` : ''}
                   </span>
+                  {record.tokens_per_sec != null && (
+                    <span className="mono-font text-[var(--text-secondary)]">{record.tokens_per_sec.toFixed(1)} tok/s</span>
+                  )}
+                  {actualGb != null && (
+                    <span className="mono-font text-[var(--text-secondary)]">
+                      显存 {actualGb.toFixed(1)} GB
+                      {deviation != null && Number.isFinite(deviation) ? `（预测偏差 ${deviation > 0 ? '+' : ''}${deviation.toFixed(0)}%）` : ''}
+                    </span>
+                  )}
+                  {record.kind === 'launch' && <span className="text-[var(--text-tertiary)]" title={record.vram_measurement?.kernel_version ?? '旧记录缺少采样来源，不参与校准'}>{qualityLabel}</span>}
+                  {record.note && (
+                    <span
+                      className="break-words text-[var(--state-warning)] dark:text-[var(--state-warning)]"
+                      title={record.note}
+                    >
+                      {record.note}
+                    </span>
+                  )}
+                  {experiment && (
+                    <button
+                      type="button"
+                      aria-expanded={detailOpen}
+                      onClick={() => toggleDetail(key)}
+                      className="rounded px-1 font-medium text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)]"
+                    >
+                      {detailOpen ? '收起明细' : '查看明细'}
+                    </button>
+                  )}
+                  <span className="ml-auto text-[var(--text-tertiary)]">
+                    {new Date(record.timestamp * 1000).toLocaleString('zh-CN', { hour12: false })}
+                  </span>
+                </div>
+                {experiment && detailOpen && (
+                  <div className="mt-1 space-y-1.5 rounded-md border border-[var(--border)] bg-[var(--app-bg)] px-2.5 py-2 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)]">
+                    <div className="mono-font break-words text-[var(--text-primary)]">
+                      调参前：ctx={experiment.load_config.ctxLength.toLocaleString()} ngl={experiment.load_config.gpuLayers}
+                      {' '}K/V={experiment.load_config.cacheTypeKEnabled ? experiment.load_config.cacheTypeK : 'f16'}/{experiment.load_config.cacheTypeVEnabled ? experiment.load_config.cacheTypeV : 'f16'}
+                      {' '}batch={experiment.load_config.batchSize}/{experiment.load_config.physicalBatchSize}
+                      {' '}threads={experiment.load_config.threads}
+                    </div>
+                    {best ? (
+                      <>
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+                          <span className="font-medium text-[var(--text-primary)]">最佳参数变化：</span>
+                          {diff.length === 0 ? <span>与调参前一致。</span> : diff.map((row) => (
+                            <span key={row.label}>{row.label} <span className="mono-font text-[var(--accent)]">{row.before} → {row.after}</span></span>
+                          ))}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          {canControl ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => onRestoreConfig(experiment.load_config)}
+                                className="rounded-md border border-[var(--border)] px-2 py-1 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+                              >
+                                撤销本次调参（恢复调参前参数）
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onApplyTuneRecord(best)}
+                                className="rounded-md border border-[var(--border)] px-2 py-1 font-medium text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)]"
+                              >
+                                再次应用此结果
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-[var(--text-tertiary)]">该记录所属模型与当前文件不一致，仅可查看，不能应用。</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-[var(--text-tertiary)]">本次没有通过复测的最佳参数{experiment.error ? `：${experiment.error}` : '。'}</div>
+                    )}
+                    {(experiment.records ?? []).length > 0 && (
+                      <div className="max-h-56 overflow-auto rounded border border-[var(--border-subtle)]">
+                        <table className="w-full min-w-[540px] text-left">
+                          <thead className="sticky top-0 bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
+                            <tr>
+                              {['#', 'ctx', 'ngl', 'ncmoe', 'K/V', '批处理', 'tok/s', '显存', '结果'].map((label, index) => (
+                                <th key={label} className={`px-1.5 py-1 font-medium ${index >= 6 ? 'text-right' : ''}`}>{label}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(experiment.records ?? []).slice(0, 30).map((candidate, index) => (
+                              <tr key={index} className="border-t border-[var(--border-subtle)] transition-colors hover:bg-[var(--surface-hover)]">
+                                <td className="mono-font px-1.5 py-1 text-[var(--text-tertiary)]">{index + 1}</td>
+                                <td className="mono-font px-1.5 py-1">{candidate.ctx.toLocaleString()}</td>
+                                <td className="mono-font px-1.5 py-1">{candidate.ngl}</td>
+                                <td className="mono-font px-1.5 py-1">{candidate.ncmoe}</td>
+                                <td className="mono-font px-1.5 py-1">{candidate.cache_type_k_enabled || candidate.cache_type_v_enabled ? `${candidate.cache_type_k}/${candidate.cache_type_v}` : 'f16/f16'}</td>
+                                <td className="mono-font px-1.5 py-1">{candidate.batch_size ?? '--'}/{candidate.ubatch_size ?? '--'}</td>
+                                <td className="mono-font px-1.5 py-1 text-right">{candidate.ts.toFixed(1)}</td>
+                                <td className="mono-font px-1.5 py-1 text-right">{candidate.vram_available ? `${(candidate.vram_percent * 100).toFixed(0)}%` : '未知'}</td>
+                                <td className={`px-1.5 py-1 ${candidate.fits ? 'text-[var(--text-secondary)]' : 'text-[var(--state-danger)]'}`}>
+                                  {candidate.fits ? candidate.measurement_phase === 'refined_hot' ? '复测通过' : '通过' : '超预算'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {(experiment.failures ?? []).length > 0 && (
+                      <div className="space-y-0.5">
+                        <div className="font-medium text-[var(--text-primary)]">失败候选（{(experiment.failures ?? []).length} 条）</div>
+                        {(experiment.failures ?? []).slice(0, 8).map((failure, index) => (
+                          <div key={index} className="truncate" title={failure.message}>
+                            <span className="text-[var(--state-warning)]">{TUNE_FAILURE_LABEL[failure.kind] ?? failure.kind}</span>
+                            {' · '}{failure.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
-                <span className="ml-auto text-[var(--text-tertiary)]">
-                  {new Date(record.timestamp * 1000).toLocaleString('zh-CN', { hour12: false })}
-                </span>
               </div>
             );
           })}
+          {records.length > 8 && (
+            <button
+              type="button"
+              onClick={() => setShowAll((value) => !value)}
+              className="w-full rounded-md border border-[var(--border)] px-2.5 py-1.5 text-[length:var(--font-eyebrow)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)]"
+            >
+              {showAll ? '只显示最近 8 条' : `查看全部（共 ${records.length} 条${records.length > 30 ? '，最多展示 30 条' : ''}）`}
+            </button>
+          )}
         </div>
       )}
     </div>

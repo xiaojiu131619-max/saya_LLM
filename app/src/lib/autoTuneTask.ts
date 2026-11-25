@@ -13,6 +13,12 @@ export interface AutoTuneTask {
   result?: AutoTuneResult;
   authorized: boolean;
   application: 'none' | 'pending' | 'applied' | 'conflict';
+  /** 最近一次进度阶段（init / coarse / tune / refine / candidate_failed），用于界面显示当前在做什么。 */
+  phase?: string;
+  /** 已开始的测量点数；后端单次任务最多 POINT_BUDGET 点。仅用于展示，不参与结果判断。 */
+  pointsStarted?: number;
+  /** 本次调参开始时间（毫秒时间戳）；仅用于显示已用时间。 */
+  startedAt?: number;
 }
 export interface AutoTuneAuthorization {
   config: AutoTuneConfig;
@@ -62,9 +68,10 @@ export function tuneRecordPatch(record: TuneRecord): Partial<ModelLoadConfig> {
     specDraftNMaxEnabled: speculative !== 'off' && record.spec_draft_n_max != null,
     specDraftNMax: record.spec_draft_n_max ?? 4,
     specDraftNubatch: record.spec_draft_n_ubatch ?? 0,
-    batchSize: record.batch_size && record.batch_size > 0 ? record.batch_size : 512,
-    physicalBatchSize: record.ubatch_size && record.ubatch_size > 0 ? record.ubatch_size : 512,
-    threads: record.threads ?? -1,
+    // 不写回 batch / ubatch：自动调参的短负载测不出预填充差异，这两个值始终
+    // 保持用户基线。旧记录甚至可能缺字段，回落到 512 会静默改掉用户参数。
+    // 旧记录缺少 threads 时也不覆盖，避免把用户手动设置重置成「自动」。
+    ...(record.threads != null ? { threads: record.threads } : {}),
     cacheTypeK: record.cache_type_k, cacheTypeV: record.cache_type_v,
     cacheTypeKEnabled: record.cache_type_k_enabled, cacheTypeVEnabled: record.cache_type_v_enabled,
   };
@@ -77,6 +84,12 @@ export function canApplyAutoTune(model: ModelInfo | undefined, authorization: Au
 export function autoTuneBusy(task: AutoTuneTask | null): boolean {
   return task?.status === 'running' || task?.status === 'stopping' || task?.application === 'pending';
 }
+
+/**
+ * 后端自动调参的总点数预算（services/benchmark.rs 的 POINT_BUDGET）。
+ * 只用于界面展示「第 N / 最多 32 点」，不参与任何选择逻辑。
+ */
+export const AUTO_TUNE_POINT_BUDGET = 32;
 
 // API key 只留在本次内存授权中；连失败详情引用到的密钥原文也不能写入实验记录。
 export function sanitizedExperiment(authorization: AutoTuneAuthorization, task: AutoTuneTask, error?: string): AutoTuneExperiment {
@@ -144,7 +157,8 @@ export class AutoTuneTaskManager {
     this.authorization = structuredClone(authorization);
     this.publish({ runId: authorization.config.run_id, modelId: authorization.config.model_id,
       modelName: authorization.modelName, status: 'running', authorized: true, application: 'none', records: [],
-      log: [`正在调参：${authorization.modelName}。搜索 ctx / ngl / ncmoe / 独立 K/V，整卡显存预算 90%；其他参数使用开始时的完整基线。`,
+      phase: 'init', pointsStarted: 0, startedAt: Date.now(),
+      log: [`正在调参：${authorization.modelName}。搜索 ngl / ncmoe / FFN 卸载 / 独立 K/V / 推测解码 / MoE 缓存 / 线程，ctx 保持当前值，整卡显存预算 90%；批处理保持基线。`,
         `基线：ctx=${authorization.config.baseline.n_ctx} ngl=${authorization.config.baseline.ngl} K/V=${authorization.config.baseline.cache_type_k_enabled ? authorization.config.baseline.cache_type_k : 'f16'}/${authorization.config.baseline.cache_type_v_enabled ? authorization.config.baseline.cache_type_v : 'f16'}。短负载实测不保证长对话或交互最优。`] });
     const request = structuredClone(authorization.config);
     request.baseline.api_key = null;
@@ -184,7 +198,11 @@ export class AutoTuneTaskManager {
     const task = this.task!;
     const record = progress.record;
     const records = record && !task.records.some((item) => JSON.stringify(item) === JSON.stringify(record)) ? [...task.records, record] : task.records;
-    this.publish({ ...task, records, log: this.append(progress.message) });
+    // 后端在测量每个点前先发一条不带 record 的阶段消息；据此累计「已开始第 N 点」。
+    const startsPoint = !record && (progress.phase === 'coarse' || progress.phase === 'tune' || progress.phase === 'refine');
+    const pointsStarted = Math.max(0, task.pointsStarted ?? 0) + (startsPoint ? 1 : 0);
+    this.publish({ ...task, records, log: this.append(progress.message), phase: progress.phase, pointsStarted,
+      startedAt: task.startedAt ?? Date.now() });
   }
   done(result: AutoTuneResult) {
     this.bufferTerminal(() => this.done(result));
@@ -192,7 +210,7 @@ export class AutoTuneTaskManager {
     const stopping = this.task!.status === 'stopping';
     this.publish({ ...this.task!, status: 'done', result, records: result.records,
       application: this.authorization && !stopping ? 'pending' : 'none',
-      log: this.append(stopping ? '任务已结束；已请求停止，不自动应用结果。' : `调参完成：ctx=${result.best.ctx} ngl=${result.best.ngl} K/V=${result.best.cache_type_k}/${result.best.cache_type_v}，${result.best.ts.toFixed(1)} tok/s，${result.best.vram_available ? `显存 ${(result.best.vram_percent * 100).toFixed(0)}%` : '显存未知，无法验证 90% 预算'}。`) });
+      log: this.append(stopping ? '任务已结束；已请求停止，不自动应用结果。' : `调参完成：ctx=${result.best.ctx} ngl=${result.best.ngl} K/V=${result.best.cache_type_k}/${result.best.cache_type_v}，${result.best.ts.toFixed(1)} tok/s，${result.best.vram_available ? `显存 ${(result.best.vram_percent * 100).toFixed(0)}%` : '显存未知，无法验证 90% 预算'}。最佳参数已写入加载配置；可在「运行记录」查看新旧参数对比或撤销。`) });
     this.persist();
     this.applyPending();
   }
@@ -231,7 +249,8 @@ export class AutoTuneTaskManager {
         if (status.status === 'done' && status.result) this.done(status.result);
         else if (status.status === 'cancelled') this.cancelled(status.run_id, status.model_id, '调参已停止。', status);
         else if (status.status === 'error') this.fail(status.run_id, status.model_id, status.error ?? '未知错误', status);
-        else if (status.status === 'running' || status.status === 'stopping') this.publish({ ...this.task, status: this.task.status === 'stopping' ? 'stopping' : status.status, records: status.records, failures: status.failures });
+        else if (status.status === 'running' || status.status === 'stopping') this.publish({ ...this.task, status: this.task.status === 'stopping' ? 'stopping' : status.status, records: status.records, failures: status.failures,
+          pointsStarted: Math.max(this.task.pointsStarted ?? 0, status.records.length + status.failures.length) });
         return;
       }
       if (autoTuneBusy(this.task)) return;

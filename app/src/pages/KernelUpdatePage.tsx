@@ -289,8 +289,11 @@ export default function KernelUpdatePage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-8">
-      <PageHeader
+    // 外层已是 overflow-hidden 的工作区：本页必须自带滚动容器，
+    // 否则窗口变矮时右侧「更新列表」的卡片与按钮会被裁掉且滚不到。
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto w-full max-w-6xl px-6 py-8">
+        <PageHeader
         title="核心更新"
         description="按本机显卡选择发行包，只提供最新版本。"
         actions={
@@ -488,6 +491,7 @@ export default function KernelUpdatePage() {
       </div>
 
       <EnvCheckDialog manualOpen={envOpen} onClose={() => setEnvOpen(false)} />
+      </div>
     </div>
   );
 }

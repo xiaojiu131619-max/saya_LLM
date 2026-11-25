@@ -479,25 +479,34 @@ fn parse_llama_server_version(output: &str) -> Option<String> {
         .filter(|line| !line.is_empty())
 }
 
-#[tauri::command]
-pub fn check_engine_info(exe_path: String) -> EngineInfo {
-    let resolved = resolve_exe_path(&exe_path);
-    let binary_exists = Path::new(&resolved).exists();
-    let mut info = EngineInfo {
+/// 构造一个「未探测」的内核信息结果（探测失败时的安全回退）。
+fn empty_engine_info(exe_path: String) -> EngineInfo {
+    let binary_exists = Path::new(&exe_path).exists();
+    EngineInfo {
         binary_exists,
         cuda_graphs_enabled: false,
         cuda_version: None,
         cuda_matched: false,
         sm_architecture: None,
         llama_server_version: None,
-        exe_path: resolved.clone(),
+        exe_path,
         runtime_devices: Vec::new(),
         runtime_backend: None,
         host_backend: None,
         gpu_name: None,
-    };
+    }
+}
 
-    if !binary_exists {
+/// 同步探测内核信息：会依次拉起 `--list-devices` / `--version` / `--help` 三个子进程。
+///
+/// `device_probe` 等 Rust 内部调用方直接使用这个同步入口；Tauri 命令走下面的
+/// `kernel_info` 模块。同步命令会在 WebView2 的 UI 线程里等子进程退出，
+/// 应用启动与模型加载页打开时会让整个界面和后续 IPC 一起卡住。
+fn check_engine_info_blocking(exe_path: String) -> EngineInfo {
+    let resolved = resolve_exe_path(&exe_path);
+    let mut info = empty_engine_info(resolved.clone());
+
+    if !info.binary_exists {
         return info;
     }
 
@@ -595,6 +604,34 @@ pub fn check_engine_info(exe_path: String) -> EngineInfo {
     }
 
     info
+}
+
+/// 保持原函数名与签名，供 `device_probe` 等 Rust 内部调用方复用。
+pub fn check_engine_info(exe_path: String) -> EngineInfo {
+    check_engine_info_blocking(exe_path)
+}
+
+/// Tauri 命令包装：把阻塞探测挪到异步运行时的阻塞线程池。
+///
+/// 命令名必须仍是 `check_engine_info`（前端 `invoke('check_engine_info')` 不变），
+/// 因此放在子模块里与内部同步入口区分。
+pub mod kernel_info {
+    /// 探测线程异常退出（panic）时回退为「未探测到」的安全结果，避免整个命令失败。
+    #[tauri::command]
+    pub async fn check_engine_info(exe_path: String) -> super::EngineInfo {
+        let fallback_path = exe_path.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            super::check_engine_info_blocking(exe_path)
+        })
+        .await
+        {
+            Ok(info) => info,
+            Err(error) => {
+                eprintln!("[engine] 内核信息探测任务异常退出：{}", error);
+                super::empty_engine_info(fallback_path)
+            }
+        }
+    }
 }
 
 fn get_or_init_gpu_monitor(

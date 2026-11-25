@@ -1,11 +1,11 @@
 {
-  "version": "0.24.7",
-  "asset": "Agent_LLM_Canvas_v0.24.7.zip",
-  "url": "https://github.com/xiaojiu131619-max/saya_LLM/releases/download/canvas-v0.24.7/Agent_LLM_Canvas_v0.24.7.zip",
-  "sha256": "42a4311b6f1ccc1d44ef1d730a05ed6a40d9fff833c16aad2ecd6a181cdd44e8",
-  "size": 4894614,
+  "version": "0.25.3",
+  "asset": "Agent_LLM_Canvas_v0.25.3.zip",
+  "url": "https://github.com/xiaojiu131619-max/saya_LLM/releases/download/canvas-v0.25.3/Agent_LLM_Canvas_v0.25.3.zip",
+  "sha256": "033e9afdab670ea7b2a8973a00910de44bc922de2b97d9573cbcab3dd03855ca",
+  "size": 5615540,
   "upstream": "1314521gjy/ComfyUI-Local-Infinite-Canvas",
-  "upstream_commit": "1a67130ad8315258166ec5dd347a852575f09a1d",
-  "built_at": "2026-11-04T03:27:00+08:00",
-  "note": "重新运行 app/scripts/build-canvas-pack.ps1 后必须同步 sha256 与 CanvasPanel.tsx 的 CANVAS_PACK_RELEASE。"
+  "upstream_commit": "205b37a888662946d65a8cba96109116714e7625",
+  "built_at": "2026-11-19T01:31:07+08:00",
+  "note": "重新运行 app/scripts/sync-canvas-pack.ps1 与 build-canvas-pack.ps1 后必须同步 sha256 与 CanvasPanel.tsx 的 CANVAS_PACK_RELEASE。"
 }

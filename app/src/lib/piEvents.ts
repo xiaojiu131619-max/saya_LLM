@@ -11,7 +11,8 @@ export interface PiToolStep {
   args: string;
   /** write_file / edit_file 的路径，用于产物卡。 */
   path?: string;
-  /** canvas_run 等工具在结果 meta 里带回的会话工作区产物相对路径。 */
+  /** write_file / edit_file / make_docx / make_xlsx / canvas_run 等工具
+   *  在结果 meta 里带回的工作区相对产物路径。 */
   canvasArtifact?: string;
   result?: string;
   ok?: boolean;

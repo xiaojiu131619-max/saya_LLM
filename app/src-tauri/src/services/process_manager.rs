@@ -113,6 +113,8 @@ pub struct TokenUsageAgg {
 /// 全量 token 累计表：key = 模型 alias（同一次服务期间只有一个模型）。
 static API_TOKEN_USAGE: Lazy<Mutex<Vec<TokenUsageAgg>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static LAST_SERVER_CONFIG: Lazy<Mutex<Option<ServerConfig>>> = Lazy::new(|| Mutex::new(None));
+/// 最近一次成功 spawn 时真正下发的参数；与用户请求的参数分开保存。
+static LAST_LAUNCH_SNAPSHOT: Lazy<Mutex<Option<ServerLaunchSnapshot>>> = Lazy::new(|| Mutex::new(None));
 static SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 系统日志条目：统一日志中枢的最小单元。
@@ -302,6 +304,29 @@ pub struct ServerError {
     pub title: String,
     pub details: String,
     pub suggestions: Vec<String>,
+}
+
+/// 一次启动实际下发的参数快照。
+///
+/// CPU 兼容回退会改写 ngl / ctx / batch / flash-attn 等，界面却仍显示用户原配置；
+/// 这里同时记录请求值与实际值，供 `server:ready` 与状态查询暴露「已降级」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerLaunchSnapshot {
+    pub requested_ngl: u32,
+    pub requested_n_ctx: u32,
+    pub requested_batch_size: u32,
+    pub ngl: u32,
+    pub n_ctx: u32,
+    pub batch_size: u32,
+    /// 实际传入 `--device` 的设备；None 表示未显式指定（由内核自动选择）。
+    pub device: Option<String>,
+    pub main_gpu: Option<u32>,
+    pub no_cuda: bool,
+    pub flash_attn: bool,
+    pub kv_offload: bool,
+    /// true 表示这次启动是 GPU 失败后的 CPU 兼容回退，参数已被改写。
+    pub cpu_fallback: bool,
 }
 
 fn build_redacted_command_line(exe: &str, cmd: &Command) -> String {
@@ -1270,6 +1295,28 @@ fn should_retry_with_cpu(error: &ServerError, config: &ServerConfig) -> bool {
         )
 }
 
+/// 用户关闭了「CPU 兼容重试」时，把开关位置直接写进错误建议。
+///
+/// 回退默认关闭（会改写 ngl/ctx/batch，不能静默做），但用户看到 GPU 启动失败时
+/// 需要一个明确的下一步；只在原本可能触发回退的错误上补这一条。
+fn with_cpu_fallback_hint(mut error: ServerError, config: &ServerConfig) -> ServerError {
+    if config.retry_cpu_fallback || config.no_cuda {
+        return error;
+    }
+    if !matches!(
+        error.error_type.as_str(),
+        "warmup" | "cuda" | "vulkan" | "oom" | "unknown" | "timeout"
+    ) {
+        return error;
+    }
+    if !error.suggestions.iter().any(|item| item.contains("CPU 兼容重试")) {
+        error.suggestions.push(
+            "如需改用 CPU 兼容模式运行，请在「加载参数」里打开「CPU 兼容重试」后重新加载（会改写 ngl 与 ctx，默认关闭）".into(),
+        );
+    }
+    error
+}
+
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack
@@ -1603,13 +1650,18 @@ fn backend_mismatch_reason(
 /// 显卡与内核后端的匹配性预检。
 ///
 /// 目的是把「加载时莫名失败/只跑 CPU」提前变成一句能照做的中文指引。
-fn validate_backend_support(exe: &str, config: &ServerConfig) -> Result<()> {
+/// `candidates` 由调用方传入：`--list-devices` 每次都要拉起子进程（数百毫秒），
+/// 后端匹配校验与后续的设备选择必须共用同一份探测结果。
+fn validate_backend_support(
+    exe: &str,
+    config: &ServerConfig,
+    candidates: &[String],
+) -> Result<()> {
     if config.no_cuda {
         // 用户显式选择 CPU 模式，不做任何后端校验。
         return Ok(());
     }
     let backend = detect_kernel_backend(exe);
-    let candidates = list_runtime_devices(exe);
     let has_vulkan_device = candidates
         .iter()
         .any(|device| device.to_ascii_lowercase().starts_with("vulkan"));
@@ -1752,6 +1804,11 @@ fn validate_drafter_config(exe: &str, config: &ServerConfig) -> Result<()> {
             "dflash",
         ),
     ];
+    // 没有配置任何侧车时直接放行：`kernel_spec_types` 会拉起一次 `--help`，
+    // 普通加载（以及启动预检）不该为不需要的探测付这份开销。
+    if candidates.iter().all(|(path, _, _)| path.is_empty()) {
+        return Ok(());
+    }
     // 内核自报的 --spec-type 取值列表（读不到时退回二进制标记扫描）。
     let known_types = kernel_spec_types(exe);
     for (draft_path, spec_value, type_name) in candidates {
@@ -1904,10 +1961,6 @@ fn pick_offload_device(available: &[String], requested: Option<&str>) -> Option<
         .or_else(|| available.first().cloned())
 }
 
-fn resolve_offload_device(exe: &str, requested: Option<&str>) -> Option<String> {
-    pick_offload_device(&list_runtime_devices(exe), requested)
-}
-
 /// AMD / Vulkan 路线的启动优化。
 ///
 /// Vulkan 后端与 CUDA 的开销结构不同，同一套默认参数在 AMD 卡上常常「能跑但不快」：
@@ -1941,11 +1994,26 @@ pub fn is_vulkan_kernel(exe: &str) -> bool {
     detect_kernel_backend(exe) == KernelBackend::Vulkan
 }
 
-fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<String>> {
+/// 组装并启动 llama-server 进程。
+///
+/// `requested` 是用户原始请求、`cpu_fallback` 表示本次是 CPU 兼容回退；
+/// 两者只用于记录实际参数快照，不参与命令行构造。
+fn spawn_server_process(
+    exe: &str,
+    config: &ServerConfig,
+    requested: &ServerConfig,
+    cpu_fallback: bool,
+) -> Result<Receiver<String>> {
     validate_mtp_config(exe, config)?;
     validate_drafter_config(exe, config)?;
     validate_quant_support(exe, config)?;
-    validate_backend_support(exe, config)?;
+    // `--list-devices` 是子进程调用，一次加载只探测一次：后端匹配校验与设备选择共用。
+    let runtime_devices = if config.no_cuda {
+        Vec::new()
+    } else {
+        list_runtime_devices(exe)
+    };
+    validate_backend_support(exe, config, &runtime_devices)?;
     let effective_ngl = config.ngl;
     let host = bind_host(config);
     // 新内核参数按二进制声明探测：老内核/自编译内核遇到未知旗标会直接退出，
@@ -1963,7 +2031,7 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
     let selected_device = if config.no_cuda {
         Some("none".to_string())
     } else {
-        resolve_offload_device(exe, config.device.as_deref())
+        pick_offload_device(&runtime_devices, config.device.as_deref())
     };
     let uses_cuda_device = selected_device
         .as_deref()
@@ -2232,6 +2300,23 @@ fn spawn_server_process(exe: &str, config: &ServerConfig) -> Result<Receiver<Str
 
     let mut child = cmd.spawn()?;
     eprintln!("[server] child pid = {:?}", child.id());
+    // 进程已起来才记录快照：启动失败时不应让状态查询看到「已生效」的参数。
+    if let Ok(mut guard) = LAST_LAUNCH_SNAPSHOT.lock() {
+        *guard = Some(ServerLaunchSnapshot {
+            requested_ngl: requested.ngl,
+            requested_n_ctx: requested.n_ctx,
+            requested_batch_size: requested.batch_size,
+            ngl: config.ngl,
+            n_ctx: config.n_ctx,
+            batch_size: config.batch_size,
+            device: selected_device.clone(),
+            main_gpu: selected_main_gpu,
+            no_cuda: config.no_cuda,
+            flash_attn: config.flash_attn,
+            kv_offload: config.kv_offload,
+            cpu_fallback,
+        });
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -2408,6 +2493,50 @@ pub(crate) fn start_tuning_server(
     start_server_internal(config, |_| {}, on_ready, on_error, Some(cancel))
 }
 
+/// 启动前的低开销预检：不启动推理服务进程，可在命令线程同步执行。
+///
+/// 在 `backend_gate::ensure_exclusive` 停掉其它引擎之前，先拦住「内核 / 模型 / 侧车
+/// 文件缺失、量化不兼容、MTP 元数据不匹配、端口被外部程序占用」等必然失败的配置——
+/// 那些错误不该连带停掉用户正在运行的 NiNfer / Strata（闸门只负责停，不负责恢复）。
+///
+/// 检查以读取文件头为主；只有配置了推测解码侧车时会额外探测一次内核 `--help`。
+/// 需要 `--list-devices` 的设备匹配检查仍留在加载线程里，避免预检本身阻塞界面。
+pub fn preflight_server_config(config: &ServerConfig) -> Result<()> {
+    let exe = resolve_exe_path(&config.executable_path);
+    if !Path::new(&exe).exists() {
+        bail!(
+            "找不到 llama-server.exe（搜索路径：{}）。请在设置中指定正确路径，或将它放入 resources 目录。",
+            exe
+        );
+    }
+    if config.model_path.trim().is_empty() || !Path::new(&config.model_path).is_file() {
+        bail!("模型文件不存在：{}", config.model_path);
+    }
+    validate_mtp_config(&exe, config)?;
+    validate_drafter_config(&exe, config)?;
+    validate_quant_support(&exe, config)?;
+    // 切换模型时本应用自己的服务可能正占用目标端口，这不算外部冲突：
+    // 真正的端口等待在 start_server_internal 停掉旧进程之后再做。
+    let own_server_on_port = is_server_running()
+        && LAST_SERVER_CONFIG
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|running| running.port))
+            == Some(config.port);
+    if !own_server_on_port && port_is_listening(config) {
+        // 上次崩溃遗留的本应用 llama-server 也可能占着端口：加载线程本来就会清扫它们，
+        // 这里先清一次再判断，避免把可自动回收的残留误报成「外部程序占用」。
+        stop_stale_servers_for_exe_excluding(&exe, &managed_llama_pids());
+    }
+    if !own_server_on_port && port_is_listening(config) {
+        bail!(
+            "端口 {} 已被其它服务占用，请先关闭旧的 llama-server 或在设置中换一个端口。",
+            config.port
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn start_server_internal(
     config: &ServerConfig,
     on_progress: impl Fn(ServerProgress) + Send + Sync + 'static,
@@ -2473,6 +2602,8 @@ pub(crate) fn start_server_internal(
     let generation = SERVER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let worker = std::thread::spawn(move || {
+        // 保留用户原始请求，CPU 回退改写 current_config 时仍能对照出差异。
+        let requested_config = initial_config.clone();
         let mut current_config = initial_config;
         let mut did_cpu_retry = false;
 
@@ -2494,7 +2625,12 @@ pub(crate) fn start_server_internal(
                 },
             });
 
-            let rx = match spawn_server_process(&exe, &current_config) {
+            let rx = match spawn_server_process(
+                &exe,
+                &current_config,
+                &requested_config,
+                did_cpu_retry,
+            ) {
                 Ok(rx) => rx,
                 Err(e) => {
                     if !fired.swap(true, Ordering::SeqCst) {
@@ -2640,7 +2776,7 @@ pub(crate) fn start_server_internal(
                 MonitorResult::Error(err) => {
                     log_server_event("error", &format!("启动失败（{}）：{}", err.error_type, err.details));
                     if !fired.swap(true, Ordering::SeqCst) {
-                        on_error(err);
+                        on_error(with_cpu_fallback_hint(err, &current_config));
                     }
                     return;
                 }
@@ -2661,7 +2797,7 @@ pub(crate) fn start_server_internal(
                     }
                     log_server_event("error", "llama-server 在监听端口前异常退出。");
                     if !fired.swap(true, Ordering::SeqCst) {
-                        on_error(exited_error());
+                        on_error(with_cpu_fallback_hint(exited_error(), &current_config));
                     }
                     return;
                 }
@@ -2677,7 +2813,7 @@ pub(crate) fn start_server_internal(
                     }
                     log_server_event("error", "llama-server 启动超过 10 分钟仍未就绪。");
                     if !fired.swap(true, Ordering::SeqCst) {
-                        on_error(ServerError {
+                        on_error(with_cpu_fallback_hint(ServerError {
                             error_type: "timeout".into(),
                             title: "启动超时".into(),
                             details: "llama-server 启动超过 10 分钟仍未就绪。".into(),
@@ -2685,7 +2821,7 @@ pub(crate) fn start_server_internal(
                                 "换用更小的上下文长度后重试".into(),
                                 "确认模型体积和当前内存、显存容量匹配".into(),
                             ],
-                        });
+                        }, &current_config));
                     }
                     return;
                 }
@@ -2699,6 +2835,11 @@ pub(crate) fn start_server_internal(
 pub fn stop_server() -> Result<()> {
     #[cfg(windows)]
     job_guard::terminate(SERVER_JOB_TAG);
+
+    // 服务已停，旧的实际参数快照不再代表当前状态。
+    if let Ok(mut snapshot) = LAST_LAUNCH_SNAPSHOT.lock() {
+        *snapshot = None;
+    }
 
     let mut guard = CHILD_PROCESS.lock().map_err(|e| anyhow::anyhow!("进程管理器 Mutex 已中毒: {}", e))?;
     if let Some(mut child) = guard.take() {
@@ -2854,6 +2995,18 @@ pub fn is_server_running() -> bool {
             false
         }
     }
+}
+
+/// 最近一次成功启动实际下发的参数；服务未运行时返回 None，避免把上一次的参数
+/// 误当成当前状态（例如崩溃退出后状态卡仍显示「已就绪」的参数）。
+pub fn last_launch_snapshot() -> Option<ServerLaunchSnapshot> {
+    if !is_server_running() {
+        return None;
+    }
+    LAST_LAUNCH_SNAPSHOT
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
 }
 
 pub fn active_server_api_key() -> Option<String> {

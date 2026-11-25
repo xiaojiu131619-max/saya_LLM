@@ -162,6 +162,16 @@ export default function PiPanel() {
     })();
   }, [activeModel?.name, desktop, enginePort]);
 
+  useEffect(() => {
+    if (!desktop || !logsOpen) return;
+    // 展开时立刻拉一次，之后每 2 秒跟进：排障时能看到刚失败那一轮的最后几行，
+    // 不必反复点「刷新」。
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 首次拉取需要立即显示最新日志
+    void refreshLogs();
+    const timer = window.setInterval(() => void refreshLogs(), 2000);
+    return () => window.clearInterval(timer);
+  }, [desktop, logsOpen, refreshLogs]);
+
   const update = (patch: Partial<PiConfig>) => {
     setConfig((prev) => {
       const next = { ...prev, ...patch };

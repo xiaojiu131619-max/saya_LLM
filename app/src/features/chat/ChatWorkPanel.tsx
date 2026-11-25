@@ -53,14 +53,17 @@ export default function ChatWorkPanel({
   workspaceName,
   onClose,
   settingsContent,
+  initialTab,
 }: {
   workspacePath?: string;
   workspaceName?: string;
   onClose: () => void;
   settingsContent: ReactNode;
+  /** 外部直达的 tab（侧边栏「文件 / 浏览器」按钮）：变化时切过去。 */
+  initialTab?: WorkTab;
 }) {
   const { dispatch } = useApp();
-  const [tab, setTab] = useState<WorkTab>(workspacePath ? 'files' : 'settings');
+  const [tab, setTab] = useState<WorkTab>(initialTab ?? (workspacePath ? 'files' : 'settings'));
   const [cwd, setCwd] = useState('.');
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [filesBusy, setFilesBusy] = useState(false);
@@ -95,6 +98,11 @@ export default function ChatWorkPanel({
   useEffect(() => {
     void canvasGetConfig().then(setCanvasConfig).catch(() => undefined);
   }, []);
+
+  // 侧边栏直达按钮：外部指定 tab 时切换（含重复点同一个按钮再次拉起面板）。
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
 
   const openEntry = async (entry: WorkspaceEntry) => {
     if (!workspacePath) return;

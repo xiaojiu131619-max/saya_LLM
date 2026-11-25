@@ -9,6 +9,9 @@ import type { ModelInfo } from '@/types';
 
 const MODEL_SCOPE_URL = 'https://www.modelscope.cn/';
 
+/** 模型名排序：中文按拼音、数字按数值（model 2 排在 model 10 之前）。 */
+const MODEL_NAME_COLLATOR = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+
 /**
  * 向量 / 重排模型不进对话模型列表：它们是独立服务（独立端口、独立进程），
  * 混在列表里只会被当成聊天模型点开，然后在加载页被劝去向量服务。
@@ -48,24 +51,34 @@ export default function HomePage() {
       if (a.status !== 'loaded' && b.status === 'loaded') return 1;
       return 0;
     };
-    const sortWithRecent = (compare?: (a: typeof models[number], b: typeof models[number]) => number) =>
-      models.sort((a, b) => compareRecentFirst(a, b) || (compare ? compare(a, b) : 0));
+    const compareByName = (a: typeof models[number], b: typeof models[number]) =>
+      MODEL_NAME_COLLATOR.compare(a.name, b.name);
+    const parseParams = (p: string) => {
+      const num = parseFloat(p);
+      return p.includes('M') ? num / 1000 : num;
+    };
+    const compareByReleaseDate = (a: typeof models[number], b: typeof models[number]) => {
+      const aTime = Date.parse(a.releaseDate);
+      const bTime = Date.parse(b.releaseDate);
+      const aDated = Number.isFinite(aTime);
+      const bDated = Number.isFinite(bTime);
+      if (aDated && bDated && aTime !== bTime) return bTime - aTime;
+      // 有发布时间的模型排在「本地」之前；本地 GGUF 的 releaseDate 恒为「本地」，
+      // 没有可比日期时退回名称排序，避免选了「更新时间」列表一动不动。
+      if (aDated !== bDated) return aDated ? -1 : 1;
+      return compareByName(a, b);
+    };
 
-    // Sort
+    // 每种排序只按自己的关键字排；「默认排序」才把最近使用放在第一位。
     switch (state.sortBy) {
       case 'name':
-        return sortWithRecent((a, b) => a.name.localeCompare(b.name));
-      case 'size': {
-        const parseParams = (p: string) => {
-          const num = parseFloat(p);
-          return p.includes('M') ? num / 1000 : num;
-        };
-        return sortWithRecent((a, b) => parseParams(a.params) - parseParams(b.params));
-      }
+        return models.sort(compareByName);
+      case 'size':
+        return models.sort((a, b) => parseParams(a.params) - parseParams(b.params) || compareByName(a, b));
       case 'updated':
-        return sortWithRecent((a, b) => b.releaseDate.localeCompare(a.releaseDate));
+        return models.sort(compareByReleaseDate);
       default:
-        return sortWithRecent();
+        return models.sort(compareRecentFirst);
     }
   }, [visibleModels, state.recentModelUsage, state.sortBy, state.searchQuery]);
 

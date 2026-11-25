@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "tauri build && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stage-canvas-pack.ps1",
     "portable:zip": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/package-portable.ps1"
   },
   "dependencies": {

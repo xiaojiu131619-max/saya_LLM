@@ -7,8 +7,13 @@ use crate::models::app_state::AppState;
 use crate::models::model_info::ModelInfo;
 use crate::services::model_scanner::{parse_model_info_from_path, ModelScanner};
 
+/// 全量扫描模型目录。
+///
+/// 扫描会遍历目录、解析 GGUF 头并写缓存，耗时随模型数量增长；同步命令会在
+/// WebView2 的 UI 线程里执行，导致整窗与后续 IPC 一起卡住。这里转到阻塞线程池，
+/// 前端 `invoke('scan_models')` 的调用方式与返回值都不变。
 #[tauri::command]
-pub fn scan_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String> {
+pub async fn scan_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String> {
     let start = Instant::now();
     let dirs = state
         .config
@@ -16,7 +21,11 @@ pub fn scan_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String>
         .map_err(|e| e.to_string())?
         .model_dirs
         .clone();
-    let result = ModelScanner::new(dirs).scan().map_err(|e| e.to_string());
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ModelScanner::new(dirs).scan().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|error| format!("模型扫描线程异常退出：{}", error))?;
     eprintln!("[scan] scan_models took {:?}", start.elapsed());
     result
 }

@@ -289,6 +289,11 @@ export default function DataManagementPage() {
     }
     await clearDesktopModelCache();
     await resetDesktopAppConfig();
+    // 只清 localStorage 是不够的：reload 触发的 beforeunload 会用内存 state 重建快照并写回同一个 key。
+    // RESET_ALL 清空全部前端用户数据（含提示词预设、对话参数、模型快速启动记忆），
+    // 并在 AppProvider 的 dispatch 包装里暂停落盘、删除本地快照，刷新后不会「清了又回来」。
+    stopActiveChatCompletion();
+    dispatch({ type: 'RESET_ALL' });
     clearFrontendLocalStorage();
     setDataMessage('已执行出厂重置，应用即将刷新...');
     window.setTimeout(() => window.location.reload(), 200);
@@ -304,6 +309,9 @@ export default function DataManagementPage() {
       dispatch({ type: 'SET_SERVER_RUNNING', payload: false });
     }
     await resetDesktopAppConfig();
+    // config.json 重置后，前端保存的各模型加载预设/快速启动记忆也要清掉；
+    // 否则刷新时扫描模型会把旧参数重新套回去，与「清空各模型的预设参数」的文案不符。
+    dispatch({ type: 'RESET_MODEL_PREFERENCES' });
     setDataMessage('应用配置已重置为默认值，应用即将刷新...');
     window.setTimeout(() => window.location.reload(), 200);
   };

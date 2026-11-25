@@ -10,6 +10,10 @@
 
 ### 变更
 
+- **无限画布更新到上游 v0.25.3**（commit `205b37a`，此前 v0.24.7 / `1a67130`）：重新打包 `Agent_LLM_Canvas_v0.25.3.zip`（5.36 MB，sha256 `033e9afd…`），`CanvasPanel` 的下载源与 `canvas-pack.release.json` 同步；上游新增 H3 HyperFlow、视频编辑与音频、3D 场景、Krea2 模式、换脸与长视频拼接、风格配方、LoRA 栈与批量下载等能力，网关源码从 36 个模块涨到 53 个、内置工作流从 22 个涨到 61 个。
+- **画布模块补进上游新增的运行时目录**：`comfyui-gateway/comfyui-bridge`（工作流桥与 `yue2_instrumental`）、`comfyui-gateway/tools/scene3d_pano.py`、`comfyui-gateway/scripts/build-h3-trt-vae.py`。缺这些目录时对应功能会直接报「文件缺失」。
+- **新增 `app/scripts/sync-canvas-pack.ps1`**：一条命令完成上游检出、sparse 路径、dist 裁剪、本地改动复刻与 `SOURCE.json` 写入；后续升级不再靠手工复制。`build-canvas-pack.ps1` 与 `sync-canvas-pack.ps1` 统一为带 BOM 的 UTF-8（PowerShell 5.1 无 BOM 会按 ANSI 解析、中文报语法错）。
+- **画布 dist 按可达闭包裁剪**：上游 `web/dist/assets` 不清理历史构建，v0.25.3 有 452 个 bundle、318 MB，其中 443 个是过期产物。只保留 `index.html` 与动态 import 真正引用的 9 个资源（6.0 MB）；不裁剪的话单包会涨到 300 MB 以上。
 - **技能路由提速约 17 倍**：单次路由（debug 基准）26.3ms → 1.5ms。索引签名不再每次路由逐目录 `is_file()`（Windows 上 240 次 stat 约 16ms，占九成开销）；索引快照改 `Arc` 共享、触发词与小写形式在索引期预计算、无强信号时跳过描述分词。
 - **技能召回准确率修复**：触发词解析新增「提及 … 等关键词时触发」「关键词：」「Triggered by/when」等写法（周报、播客、事故复盘、甘特图、A 股行情等此前漏召回）；≤4 字符英文触发词改为词边界匹配（`ab` 不再命中 `about`）；仅在描述里出现格式词不再算强信号（修复「PDF 转 Word」被所有「支持导出 PDF」的技能挤占、提到 xlsx 时无关技能齐入选）；`解释 / 运行 / 复现` 等通用动词不再当触发词（修复 SQL 问题串到 MATLAB 技能）。
 - **技能库去重（240 → 210）**：删除 26 组中英重复技能的英文版与 4 个旧版/简版，保留的中文技能并入英文 `Triggers on` 触发词；`tdd-coach` 吸收新版「十字路口」章节；`_tree.json` 同步移除成员与失效关联。
@@ -43,6 +47,10 @@
 
 ### 修复
 
+- **画布模块升级后看不到新增的内置工作流**：`ensure_data_dirs` 原先只要用户 `canvas/workflows/` 里有一个文件就整个跳过复制，老用户永远拿不到新版本自带的工作流（v0.25.3 从 22 个涨到 61 个，等于白白升级）。改为逐文件补齐：缺失的补上、已存在的绝不覆盖（用户改过的同名工作流仍以用户版本为准），并在日志里给出补充数量；补了回归测试。
+- **画布视频能力找不到 ffmpeg**：v0.25 的剪辑 / 换脸 / 长视频拼接依赖 `ffmpeg`、`ffprobe`。现在启动网关时若应用已通过 ffmpeg 安装器装好这两个二进制，就显式注入 `FFMPEG_PATH` / `FFPROBE_PATH`；`ffmpeg_installer::installed_binary()` 成为安装位置的唯一来源，不再各处拼 resources 路径。
+- **`npm run desktop:build` 产物不含画布模块**：`app/resources/canvas` 在 `.gitignore` 里，而 Tauri 打包资源时遵循忽略规则，`bundle.resources` 的 `"../resources/canvas"` 会被静默跳过（`resources/tools` 未被忽略才正常落盘），于是裸 exe 旁边永远没有画布。新增 `scripts/stage-canvas-pack.ps1` 并接进 `desktop:build`，构建后把模块复制到 `src-tauri/target/release/canvas/`；浏览器面板按 exe 同级 `canvas` 解析，便携包脚本本来就显式复制。
+- **画布 zip 安装 smoke 测试写死版本号**：`canvas_pack_install_smoke` 曾固定找 `Agent_LLM_Canvas_v0.24.6.zip`，每次升级都静默跳过。改为取 `dist-canvas` 下最新的 `Agent_LLM_Canvas_v*.zip`，并打印实际使用的包。
 - **Pi 回滚入口恢复可用**：`rollback_available()` 曾用只认 `node_modules` 目录名的查找，对 `node_modules.backup` 恒为 false，回滚入口永远不可见；现按包内 `package.json` 的版本判定，并补了回归测试。
 - **Pi 复制安装补齐守卫与原子性**：本地复制安装与在线安装 / 回滚共用安装锁，Pi 运行中直接拒绝；失败路径清理 `node_modules.installing-<pid>` 半成品目录；恢复备份失败如实报错，不再谎称「已恢复」。
 - **Pi CLI 自动发现收紧**：发布版不再从 `%TEMP%` 自动发现 CLI（仅开发构建保留该候选），自动发现的候选必须通过 `package.json` 包名与版本校验；显式 `PI_AGENT_CLI` 仍允许自定义构建。

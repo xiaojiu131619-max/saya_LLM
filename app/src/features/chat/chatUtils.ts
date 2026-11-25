@@ -376,12 +376,21 @@ export function estimateTextTokens(text: string): number {
   return cjk + Math.ceil(other / 4);
 }
 
+// 单条消息的上下文估算：正文 + 思考内容。
+// 多模态消息的正文（含文本附件全文）在 text part 里，content 只是气泡展示用的摘要，
+// 两处都算会重复计数，因此有 text part 时以它为准。
+export function estimateMessageTokens(message: Message): number {
+  const parts = message.multimodalContent ?? [];
+  const hasTextPart = parts.some((part) => part.type === 'text');
+  const bodyTokens = hasTextPart
+    ? parts.reduce((sum, part) => sum + (part.type === 'text' ? estimateTextTokens(part.text) : 0), 0)
+    : estimateTextTokens(message.content);
+  return bodyTokens + estimateTextTokens(message.reasoningContent ?? '');
+}
+
 // 会话累计上下文占用：把会话中所有消息（含思考内容）粗估加总。
 export function estimateSessionCtxTokens(messages: Message[]): number {
-  return messages.reduce(
-    (sum, msg) => sum + estimateTextTokens(msg.content) + estimateTextTokens(msg.reasoningContent ?? ''),
-    0,
-  );
+  return messages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
 }
 
 // 本地会话水位展示：百分比为主，估算值/容量为补充。

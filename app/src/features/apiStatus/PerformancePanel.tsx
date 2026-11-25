@@ -115,26 +115,25 @@ export default function PerformancePanel() {
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     let disposed = false;
-    void getHardwareInfo()
-      .then((info) => {
-        if (disposed) return;
-        setGpuName(info.gpu_name || null);
-        setVramTotal(Number.isFinite(info.total_vram) && info.total_vram > 0 ? info.total_vram : null);
-      })
-      .catch(() => undefined);
+    // 同一时刻只允许一个采样在飞：机器繁忙时 IPC 变慢，1 秒定时器不会把请求堆起来。
+    let inFlight = false;
 
     const sample = async () => {
+      if (inFlight) return;
+      inFlight = true;
       const stamp = Date.now();
       try {
         const hardware = await getHardwareInfo();
+        if (disposed) return;
+        // 显卡静态信息在第一轮采样就回填：后面即使系统统计失败，设备名与显存总量也已拿到。
+        setGpuName((current) => current ?? (hardware.gpu_name || null));
+        setVramTotal((current) => current ?? (Number.isFinite(hardware.total_vram) && hardware.total_vram > 0 ? hardware.total_vram : null));
         const stats = await getDesktopSystemStats({
           gpuUsage: 0, vramUsed: 0, vramTotal: 0, ramUsage: 0, ramTotal: 0,
           computeScores: [], gpuName: '', hostName: '',
         } as SystemStats);
         if (disposed) return;
         const snapshot = await getDesktopVramSnapshot().catch(() => null);
-        setGpuName((current) => current ?? (hardware.gpu_name || null));
-        setVramTotal((current) => current ?? (Number.isFinite(hardware.total_vram) && hardware.total_vram > 0 ? hardware.total_vram : null));
         setRamTotal((current) => current ?? (finite(stats?.ramTotal) && stats.ramTotal > 0 ? stats.ramTotal : null));
         setSamples((history) => {
           const next = [
@@ -157,6 +156,8 @@ export default function PerformancePanel() {
         });
       } catch {
         if (!disposed) setSamples((history) => [...history.slice(-HISTORY_SECONDS + 1), emptySample(stamp)]);
+      } finally {
+        inFlight = false;
       }
     };
     void sample();

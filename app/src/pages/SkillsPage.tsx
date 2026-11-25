@@ -10,6 +10,7 @@ import {
   Waypoints,
 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
+import EmptyState from '@/components/EmptyState';
 import ToggleSwitch from '@/components/ToggleSwitch';
 import { open } from '@tauri-apps/plugin-dialog';
 import { usePiRuntime } from '@/features/pi/PiRuntimeContext';
@@ -345,9 +346,14 @@ export default function SkillsPage() {
               {loading ? (
                 <p className="px-2 py-6 text-center text-[length:var(--font-caption)] text-[var(--text-tertiary)]">正在读取技能索引…</p>
               ) : tree.length === 0 ? (
-                <p className="px-2 py-6 text-center text-[length:var(--font-caption)] text-[var(--text-tertiary)]">
-                  {skillsDir ? '没有匹配的技能' : '先在 Agent 的 Pi 设置里配置技能库目录'}
-                </p>
+                <EmptyState
+                  compact
+                  icon={skillsDir ? Search : FolderOpen}
+                  title={skillsDir ? '没有匹配的技能' : '尚未配置技能库'}
+                  description={skillsDir
+                    ? '试试技能名、触发词或工具名；搜索会同时匹配子技能。'
+                    : '到 Agent 页的 Pi 设置里选择技能库目录，索引会自动生成。'}
+                />
               ) : (
                 tree.map((cat) => {
                   // 搜索时全部展开，让命中结果连同层级一起可见。

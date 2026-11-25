@@ -43,6 +43,8 @@ import {
 import { fast27bServiceView, useEngineStatuses } from '@/hooks/useEngineStatuses';
 import { strataServiceView, useStrataStatus } from '@/hooks/useStrataStatus';
 import { usePiRuntime } from '@/features/pi/PiRuntimeContext';
+import { autoTuneManager } from '@/lib/autoTuneRuntime';
+import { autoTuneBusy } from '@/lib/autoTuneTask';
 
 function latestStatsForSessions(sessions?: ChatSession[]) {
   let latest: MessageStats | undefined;
@@ -209,8 +211,12 @@ export default function ModelWorkspace() {
     const refreshServerStatus = async () => {
       try {
         const running = await getDesktopServerStatus();
-        if (!disposed && running !== state.serverRunning) {
-          dispatch({ type: 'SET_SERVER_RUNNING', payload: running });
+        // 自动调参的测量服务也登记在同一个受管进程槽位，状态命令会返回 true；
+        // 它不是可对话的模型服务。调参期间一律按「未运行」处理，避免侧栏
+        // 显示在线、聊天恢复可发送，把请求发到正在跑分的测量服务上污染 tok/s。
+        const effectiveRunning = autoTuneBusy(autoTuneManager.getSnapshot()) ? false : running;
+        if (!disposed && effectiveRunning !== state.serverRunning) {
+          dispatch({ type: 'SET_SERVER_RUNNING', payload: effectiveRunning });
         }
       } catch {
         if (!disposed && state.serverRunning) {

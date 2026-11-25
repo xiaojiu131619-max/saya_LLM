@@ -46,7 +46,7 @@ import {
   sessionWorkDir,
   type PiConfig,
 } from '@/lib/piConfig';
-import type { MessageStats, PiStep } from '@/types';
+import type { MessageStats, PiFileChange, PiStep } from '@/types';
 import { AGENT_SCOPE_MODEL_ID } from '@/types';
 
 /**
@@ -66,6 +66,8 @@ type PiRunState = {
   prompt: string;
   workDir: string;
   steps: PiStep[];
+  /** 本轮 Pi 落盘的文件改动（pi:file-changes 累积，随消息持久化）。 */
+  changes: PiFileChange[];
   artifactPaths: string[];
   toolPaths: Record<string, string>;
   assistantText: string;
@@ -111,6 +113,13 @@ interface PiRuntimeValue {
 
 const PiRuntimeContext = createContext<PiRuntimeValue | null>(null);
 
+/** 权限档的中文名：弹窗里直接给用户看，不暴露内部 plan/auto/full。 */
+const PERMISSION_MODE_LABELS: Record<string, string> = {
+  plan: '只读',
+  auto: '守门',
+  full: '放行',
+};
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function usePiRuntime() {
   const value = useContext(PiRuntimeContext);
@@ -128,6 +137,12 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
   // 被顶掉、120 秒后静默拒绝，用户也可能批准错对象。
   const [permissionQueue, setPermissionQueue] = useState<PiPermissionRequest[]>([]);
   const pendingPermission = permissionQueue[0] ?? null;
+  // 权限请求所属轮次的上下文（任务摘要 / 工作区）。在事件回调里取快照，
+  // 避免渲染期直接读 runRef。
+  const [permissionContext, setPermissionContext] = useState<{
+    task: string;
+    workDir: string;
+  } | null>(null);
   const [startingSessionId, setStartingSessionId] = useState<string | null>(null);
   const runRef = useRef<PiRunState | null>(null);
   const eventBufferRef = useRef<PiAgentEventPayload[]>([]);
@@ -390,8 +405,10 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
               },
             });
           }
-        } catch {
-          // 产物解析失败不阻塞收尾；气泡仍保留步骤记录。
+        } catch (reason) {
+          // 产物解析失败不阻塞收尾；但原因要写进步骤，不能静默吞掉。
+          const detail = reason instanceof Error ? reason.message : String(reason);
+          pushStep(run, `产物解析失败：${detail}`, 'warn', 'artifacts');
         }
       }
 
@@ -510,6 +527,22 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         run.failure = failure;
       }
 
+      // Pi 拒收 prompt 时（例如上一轮尚未真正收尾、或正在压缩上下文），
+      // response(success=false) 是唯一会到达的终态事件。这里必须收尾，
+      // 否则新气泡会一直停在「执行中」，用户只能再点一次停止。
+      if (type === 'response') {
+        if (event.success === false && String(event.id ?? '') === run.runId) {
+          const raw = String(event.error ?? '未知原因');
+          const detail = /already processing|compaction is in progress/i.test(raw)
+            ? 'Pi 仍在上一个任务里，或正在压缩上下文；这次任务没有开始，请等当前轮收尾后再发。'
+            : raw;
+          run.failure = detail;
+          pushStep(run, `任务未开始：${detail}`, 'err', 'response');
+          void finalizeRun('aborted');
+        }
+        return;
+      }
+
       if (type === 'agent_settled' || (type === 'agent_end' && event.willRetry !== true)) {
         // 失败也算收尾：finalizeRun 会把原因写进气泡。
         const state = cancelRequestedRef.current || run.failure ? 'aborted' : 'done';
@@ -562,6 +595,9 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
           text: label,
           tone: tool.state === 'running' ? 'info' : tool.ok ? 'ok' : 'err',
           repeat: 1,
+          tool: tool.tool,
+          path: tool.path,
+          toolState: tool.state,
         };
         if (index >= 0) {
           run.steps[index] = { ...run.steps[index], ...step, repeat: run.steps[index].repeat };
@@ -569,15 +605,15 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
           run.steps.push(step);
         }
         if (tool.path) run.toolPaths[tool.id] = tool.path;
-        const artifactPath = tool.path || run.toolPaths[tool.id];
-        const canvasArtifact = tool.canvasArtifact;
-        if (
-          tool.state === 'done' &&
-          tool.ok &&
-          ((tool.tool === 'write_file' || tool.tool === 'edit_file') && artifactPath ||
-            tool.tool === 'canvas_run' && canvasArtifact)
-        ) {
-          run.artifactPaths.push(canvasArtifact ?? artifactPath!);
+        // 产物路径优先用工具返回的 meta.artifact（相对工作区，所有写文件工具统一提供）；
+        // 旧版 write_file / edit_file 没有该字段时退回工具参数里的 path。
+        const legacyWritePath =
+          tool.tool === 'write_file' || tool.tool === 'edit_file'
+            ? tool.path ?? run.toolPaths[tool.id]
+            : undefined;
+        const artifactPath = tool.canvasArtifact ?? legacyWritePath;
+        if (tool.state === 'done' && tool.ok && artifactPath) {
+          run.artifactPaths.push(artifactPath);
         }
         dispatch({
           type: 'UPDATE_MESSAGE',
@@ -633,19 +669,38 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         if (run) pushStep(run, `Pi 错误：${message ?? '未知错误'}`, 'err', 'error');
         void finalizeRun('aborted');
       },
-      onPermission: (request) =>
+      onPermission: (request) => {
+        const run = runRef.current;
+        setPermissionContext(run ? { task: run.prompt, workDir: run.workDir } : null);
         setPermissionQueue((prev) =>
           prev.some((item) => item.id === request.id) ? prev : [...prev, request],
-        ),
-      // 后端等到超时就会按「拒绝」处理并回一条失效事件：弹窗要自己关掉，
+        );
+      },
+      // write_file / edit_file 落盘后的检查点事件：累积进本轮 run 并实时写进
+      // 消息（气泡里的「文件改动」卡片）。没有活动 run 时丢弃——事件属于某轮任务。
+      onFileChanges: (change) => {
+        const run = runRef.current;
+        if (!run) return;
+        run.changes.push(change);
+        dispatch({
+          type: 'UPDATE_MESSAGE',
+          payload: {
+            modelId: run.sessionModelId,
+            sessionId: run.sessionId,
+            messageId: run.messageId,
+            piChanges: [...run.changes],
+          },
+        });
+      },
+      // 后端超时或取消后会按「拒绝」处理并回一条失效事件：弹窗要自己关掉，
       // 否则用户点「允许」只会得到一句「权限回传失败」。
       onPermissionExpired: ({ id, tool }) => {
         setPermissionQueue((prev) => prev.filter((item) => item.id !== id));
-        setError(`Pi 的「${tool}」权限请求已超时，已自动拒绝。`);
+        setError(`Pi 的「${tool}」权限请求已失效（取消或超时），已自动拒绝。`);
       },
     });
     return dispose;
-  }, [applyEvent, finalizeRun, pushStep]);
+  }, [applyEvent, dispatch, finalizeRun, pushStep]);
 
   const sendTask = useCallback(
     async (input: PiTaskInput) => {
@@ -658,6 +713,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         prompt: input.text,
         workDir: '',
         steps: [],
+        changes: [],
         artifactPaths: [],
         toolPaths: {},
         assistantText: '',
@@ -687,7 +743,14 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
             skillContext = selection.context;
             selectedSkills = selection.skills.map((skill) => skill.name);
             if (selectedSkills.length > 0) {
-              pushStep(run, `技能路由：${selectedSkills.join('、')}`, 'info', 'skills');
+              run.steps.push({
+                ts: Date.now(),
+                point: 'skills',
+                text: `技能路由：${selectedSkills.join('、')}`,
+                tone: 'info',
+                repeat: 1,
+                skills: selectedSkills,
+              });
             }
           } catch (reason) {
             pushStep(
@@ -751,13 +814,19 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
 
   const cancelTask = useCallback(async () => {
     cancelRequestedRef.current = true;
+    // 弹窗立即失效：后端 cancel 也会拒绝挂起的确认，但先清本地队列，
+    // 避免用户在取消后继续点「允许」把写文件/命令真的放行。
+    setPermissionQueue([]);
+    const cancellingRun = runRef.current;
     try {
       await piAgentCancel();
     } catch {
       // Pi 可能已经退出；仍然把本地消息收尾
     }
-    const run = runRef.current;
+    // 取消请求返回前如果已经开始新一轮（取消后立刻重发），不能把新 run 收掉。
+    if (runRef.current !== cancellingRun) return;
     runRef.current = null;
+    const run = cancellingRun;
     if (run) {
       // 中止也保留已产生的部分测量值（与普通对话的 terminated 口径一致）。
       const stats = finalizeStats(run);
@@ -856,6 +925,24 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
     ],
   );
 
+  // 权限弹窗的补充上下文：让用户知道这是哪一档权限、哪个任务的请求。
+  const pendingModeLabel = pendingPermission
+    ? PERMISSION_MODE_LABELS[pendingPermission.mode] ?? pendingPermission.mode
+    : '';
+  const pendingTask = (permissionContext?.task ?? '').replace(/\s+/g, ' ').trim();
+  const pendingPermissionBullets = pendingPermission
+    ? [
+        `当前权限档：${pendingModeLabel}（${pendingPermission.mode}）`,
+        ...(pendingTask
+          ? [`任务：${pendingTask.length > 80 ? `${pendingTask.slice(0, 80)}…` : pendingTask}`]
+          : []),
+        ...(permissionContext?.workDir ? [`工作区：${permissionContext.workDir}`] : []),
+        ...(permissionQueue.length > 1
+          ? [`排队中还有 ${permissionQueue.length - 1} 个请求`]
+          : []),
+      ]
+    : undefined;
+
   return (
     <PiRuntimeContext.Provider value={value}>
       {children}
@@ -864,8 +951,8 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
         title="Pi 请求权限"
         description={
           pendingPermission ? (
-            // 命令/代码预览必须完整可读：等宽 + 滚动渲染全量内容，
-            // 截断交给后端的上限判定，前端不做二次截断。
+            // 命令/代码/写入内容预览必须完整可读：等宽 + 滚动渲染，
+            // 预览上限与超限说明由后端统一生成，前端不做二次截断。
             <div className="mono-font max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
               {pendingPermission.title || '工具调用'}
               {'\n'}
@@ -875,16 +962,7 @@ export function PiRuntimeProvider({ children }: { children: ReactNode }) {
             ''
           )
         }
-        bullets={
-          pendingPermission
-            ? [
-                `当前权限档：${pendingPermission.mode}`,
-                ...(permissionQueue.length > 1
-                  ? [`排队中还有 ${permissionQueue.length - 1} 个请求`]
-                  : []),
-              ]
-            : undefined
-        }
+        bullets={pendingPermissionBullets}
         confirmLabel="允许"
         cancelLabel="拒绝"
         tone="warning"

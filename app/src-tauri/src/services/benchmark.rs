@@ -231,11 +231,6 @@ impl Candidate {
         self.moe_cache_mib = mib;
         self
     }
-    fn with_batch(mut self, batch: u32, ubatch: u32) -> Self {
-        self.batch_size = batch.max(1).min(self.ctx.max(1));
-        self.ubatch_size = ubatch.max(1).min(self.batch_size);
-        self
-    }
     fn with_threads(mut self, threads: i32) -> Self {
         self.threads = if threads > 0 { threads } else { -1 };
         self
@@ -775,7 +770,8 @@ pub async fn measure_point(
 }
 
 /// 可用假测量器驱动的有界搜索状态机：先找固定 ctx 下的显存边界，
-/// 再由 `tuning_candidates` 在同一配置上比较推测解码、KV、缓存、批处理与线程。
+/// 再由 `tuning_candidates` 在同一配置上比较推测解码、KV、缓存与线程；
+/// 批处理保持基线（短负载测不出预填充差异）。
 pub struct Search {
     config: AutoTuneConfig,
     queue: VecDeque<Candidate>,
@@ -997,19 +993,15 @@ pub fn tuning_candidates(config: &AutoTuneConfig, base: &Candidate) -> Vec<Candi
         }
     }
 
-    // 3) 独立 K/V 量化；4) 批处理 / 物理批处理。
+    // 3) 独立 K/V 量化。
     for kv in ["q8_0", "q4_0"] {
         push(base.clone().quantized(kv));
     }
-    for batch in [1024, 2048] {
-        for ubatch in [256, 512, 1024] {
-            if ubatch <= batch {
-                push(base.clone().with_batch(batch, ubatch));
-            }
-        }
-    }
+    // 不搜索 batch / ubatch：当前统一用 64 词元提示、64 生成词元的短负载测速，
+    // 小于全部 ubatch 候选，预填充差异测不出来；按解码 tok/s 选它们等于按噪声
+    // 改写用户的批处理参数。保持基线值，由用户在参数页显式调整。
 
-    // 5) 设备探测出的 CPU 线程建议；6) 降低 CPU 卸载并用量化 KV 换回 GPU 层。
+    // 4) 设备探测出的 CPU 线程建议；5) 降低 CPU 卸载并用量化 KV 换回 GPU 层。
     if let Some(threads) = config.recommended_threads {
         push(base.clone().with_threads(threads));
     }
@@ -1034,11 +1026,16 @@ pub fn tuning_candidates(config: &AutoTuneConfig, base: &Candidate) -> Vec<Candi
 }
 
 pub fn rank_records(records: &mut [TuneRecord], mode: &SortMode) {
+    // 用「中位数 tok/s − 标准差」作为保守下界排序：同分点之间的热测抖动不再
+    // 直接把某个候选推成最佳。原始 tok/s 仍作为第一平手项。
+    let lower_bound = |record: &TuneRecord| record.ts - record.ts_stddev.max(0.0);
     records.sort_by(|a, b| match mode {
-        SortMode::TsPriority => b.ts.total_cmp(&a.ts)
+        SortMode::TsPriority => lower_bound(b).total_cmp(&lower_bound(a))
+            .then(b.ts.total_cmp(&a.ts))
             .then(a.vram_percent.total_cmp(&b.vram_percent))
             .then(b.ctx.cmp(&a.ctx)),
         SortMode::CtxPriority => b.ctx.cmp(&a.ctx)
+            .then(lower_bound(b).total_cmp(&lower_bound(a)))
             .then(b.ts.total_cmp(&a.ts))
             .then(a.vram_percent.total_cmp(&b.vram_percent)),
     });
@@ -1230,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn tuning_candidates_cover_spec_cache_batch_and_threads_at_fixed_ctx() {
+    fn tuning_candidates_cover_spec_cache_and_threads_at_fixed_ctx() {
         let mut c = config();
         c.is_moe = true;
         c.block_count = 40;
@@ -1240,13 +1237,17 @@ mod tests {
         c.recommended_threads = Some(8);
         let mut base = Candidate::baseline(&c);
         base.ncmoe = 20;
+        base.batch_size = 1536;
+        base.ubatch_size = 384;
         let points = tuning_candidates(&c, &base);
         assert!(points.iter().all(|point| point.ctx == base.ctx));
         assert!(points.iter().any(|point| point.speculative == "mtp"));
         assert!(points.iter().any(|point| point.speculative == "dspark"));
         assert!(points.iter().any(|point| point.speculative == "dflash"));
         assert!(points.iter().any(|point| point.moe_cache_mib > 0));
-        assert!(points.iter().any(|point| point.batch_size > base.batch_size));
+        // 短负载测速无法区分批处理差异，候选不得改动用户基线。
+        assert!(points.iter().all(|point| point.batch_size == base.batch_size
+            && point.ubatch_size == base.ubatch_size));
         assert!(points.iter().any(|point| point.threads == 8));
         assert!(points.len() > 8);
     }
